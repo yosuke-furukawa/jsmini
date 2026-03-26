@@ -31,6 +31,9 @@ export class Environment {
   }
 
   define(name: string, value: unknown): void {
+    if (this.constants.has(name)) {
+      throw new TypeError(`Assignment to constant variable '${name}'`);
+    }
     this.values.set(name, value);
   }
 

@@ -548,6 +548,10 @@ describe("Evaluator - Step 2-3: let / const・ブロックスコープ", () => {
     assert.throws(() => evaluate("{ let x = 1; let x = 2; }"), /already been declared/);
   });
 
+  it("同一スコープで const の重複宣言はエラー", () => {
+    assert.throws(() => evaluate("{ const x = 1; const x = 2; }"), /already been declared/);
+  });
+
   it("var ホイスティングが関数スコープ内で正しく動く", () => {
     assert.equal(evaluate(`
       var x = 1;
