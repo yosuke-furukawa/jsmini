@@ -67,6 +67,8 @@ export function parse(source: string): Program {
     if (current().type === "Return") return parseReturnStatement();
     if (current().type === "Throw") return parseThrowStatement();
     if (current().type === "Try") return parseTryStatement();
+    if (current().type === "Break") { eat("Break"); if (current().type === "Semicolon") eat("Semicolon"); return { type: "BreakStatement", label: null }; }
+    if (current().type === "Continue") { eat("Continue"); if (current().type === "Semicolon") eat("Semicolon"); return { type: "ContinueStatement", label: null }; }
     if (current().type === "If") return parseIfStatement();
     if (current().type === "While") return parseWhileStatement();
     if (current().type === "For") return parseForStatement();
@@ -77,23 +79,43 @@ export function parse(source: string): Program {
     return { type: "ExpressionStatement", expression };
   }
 
-  // VariableDeclaration = ('var' | 'let' | 'const') Pattern ('=' Expression)? ';'
+  // VariableDeclaration = ('var' | 'let' | 'const') Declarator (',' Declarator)* ';'
   function parseVariableDeclaration(): Statement {
     const kindToken = eat(current().type);
     const kind = kindToken.value as "var" | "let" | "const";
+    const declarations: any[] = [];
+
+    // 最初の宣言子
     const id = parseBindingPattern();
     let init: Expression | null = null;
     if (current().type === "Equals") {
       eat("Equals");
-      init = parseExpression();
+      init = parseAssignment();
     }
     if (kind === "const" && init === null) {
       throw new SyntaxError("Missing initializer in const declaration");
     }
+    declarations.push({ type: "VariableDeclarator", id, init });
+
+    // 追加の宣言子
+    while (current().type === "Comma") {
+      eat("Comma");
+      const nextId = parseBindingPattern();
+      let nextInit: Expression | null = null;
+      if (current().type === "Equals") {
+        eat("Equals");
+        nextInit = parseAssignment();
+      }
+      if (kind === "const" && nextInit === null) {
+        throw new SyntaxError("Missing initializer in const declaration");
+      }
+      declarations.push({ type: "VariableDeclarator", id: nextId, init: nextInit });
+    }
+
     eat("Semicolon");
     return {
       type: "VariableDeclaration",
-      declarations: [{ type: "VariableDeclarator", id, init }],
+      declarations,
       kind,
     };
   }
@@ -424,20 +446,24 @@ export function parse(source: string): Program {
 
     const left = parseLogicalOr();
 
-    if (current().type === "Equals") {
-      eat("Equals");
+    // 代入演算子
+    const assignOps = ["Equals", "PlusEquals", "MinusEquals", "StarEquals", "SlashEquals", "PercentEquals"];
+    if (assignOps.includes(current().type)) {
+      const opToken = eat(current().type);
+      const operator = opToken.value;
       const right = parseAssignment();
-      // カバー文法: ObjectExpression / ArrayExpression をパターンに変換
-      if (left.type === "ObjectExpression") {
-        return { type: "AssignmentExpression", operator: "=", left: exprToObjectPattern(left), right };
-      }
-      if (left.type === "ArrayExpression") {
-        return { type: "AssignmentExpression", operator: "=", left: exprToArrayPattern(left), right };
+      if (operator === "=") {
+        if (left.type === "ObjectExpression") {
+          return { type: "AssignmentExpression", operator, left: exprToObjectPattern(left), right };
+        }
+        if (left.type === "ArrayExpression") {
+          return { type: "AssignmentExpression", operator, left: exprToArrayPattern(left), right };
+        }
       }
       if (left.type !== "Identifier" && left.type !== "MemberExpression") {
         throw new SyntaxError("Invalid left-hand side in assignment");
       }
-      return { type: "AssignmentExpression", operator: "=", left, right };
+      return { type: "AssignmentExpression", operator, left, right };
     }
     return left;
   }
@@ -566,7 +592,9 @@ export function parse(source: string): Program {
       current().type === "Less" ||
       current().type === "Greater" ||
       current().type === "LessEqual" ||
-      current().type === "GreaterEqual"
+      current().type === "GreaterEqual" ||
+      current().type === "In" ||
+      current().type === "Instanceof"
     ) {
       const operator = eat(current().type).value;
       const right = parseAdditive();
@@ -601,7 +629,7 @@ export function parse(source: string): Program {
     return left;
   }
 
-  // Unary = ('!' | '-' | 'typeof') Unary | CallExpression
+  // Unary / Update
   function parseUnary(): Expression {
     if (current().type === "Bang") {
       const operator = eat("Bang").value;
@@ -612,6 +640,11 @@ export function parse(source: string): Program {
       const operator = eat("Minus").value;
       const argument = parseUnary();
       return { type: "UnaryExpression", operator, prefix: true, argument };
+    }
+    if (current().type === "PlusPlus" || current().type === "MinusMinus") {
+      const operator = eat(current().type).value as "++" | "--";
+      const argument = parseUnary();
+      return { type: "UpdateExpression", operator, argument: argument as any, prefix: true };
     }
     if (current().type === "Typeof") {
       const operator = eat("Typeof").value;
@@ -680,6 +713,11 @@ export function parse(source: string): Program {
       } else {
         break;
       }
+    }
+    // postfix ++/--
+    if (current().type === "PlusPlus" || current().type === "MinusMinus") {
+      const operator = eat(current().type).value as "++" | "--";
+      return { type: "UpdateExpression", operator, argument: expr as any, prefix: false };
     }
     return expr;
   }

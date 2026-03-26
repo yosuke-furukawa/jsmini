@@ -14,6 +14,8 @@ Object.assign(KEYWORDS, {
   for: "For",
   function: "Function",
   return: "Return",
+  break: "Break",
+  continue: "Continue",
   typeof: "Typeof",
   throw: "Throw",
   try: "Try",
@@ -25,6 +27,8 @@ Object.assign(KEYWORDS, {
   extends: "Extends",
   super: "Super",
   of: "Of",
+  in: "In",
+  instanceof: "Instanceof",
   // undefined は予約語ではないのでキーワードに含めない
 });
 
@@ -147,6 +151,34 @@ export function tokenize(source: string): Token[] {
     // 複数文字演算子
     const startCol = column;
 
+    if (ch === "+" && peek(1) === "+") {
+      pushToken("PlusPlus", "++", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "-" && peek(1) === "-") {
+      pushToken("MinusMinus", "--", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "+" && peek(1) === "=") {
+      pushToken("PlusEquals", "+=", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "-" && peek(1) === "=") {
+      pushToken("MinusEquals", "-=", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "*" && peek(1) === "=") {
+      pushToken("StarEquals", "*=", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "/" && peek(1) === "=") {
+      pushToken("SlashEquals", "/=", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "%" && peek(1) === "=") {
+      pushToken("PercentEquals", "%=", startCol);
+      pos += 2; column += 2; continue;
+    }
     if (ch === "=" && peek(1) === "=" && peek(2) === "=") {
       pushToken("EqualEqualEqual", "===", startCol);
       pos += 3; column += 3; continue;

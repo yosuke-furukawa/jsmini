@@ -12,6 +12,8 @@ export type Statement =
   | FunctionDeclaration
   | ClassDeclaration
   | ReturnStatement
+  | BreakStatement
+  | ContinueStatement
   | ThrowStatement
   | TryStatement
   | IfStatement
@@ -113,6 +115,16 @@ export type CatchClause = {
   body: BlockStatement;
 };
 
+export type BreakStatement = {
+  type: "BreakStatement";
+  label: null;
+};
+
+export type ContinueStatement = {
+  type: "ContinueStatement";
+  label: null;
+};
+
 export type WhileStatement = {
   type: "WhileStatement";
   test: Expression;
@@ -155,7 +167,15 @@ export type Expression =
   | BinaryExpression
   | LogicalExpression
   | UnaryExpression
+  | UpdateExpression
   | AssignmentExpression;
+
+export type UpdateExpression = {
+  type: "UpdateExpression";
+  operator: "++" | "--";
+  argument: Identifier | MemberExpression;
+  prefix: boolean;
+};
 
 export type ThisExpression = {
   type: "ThisExpression";

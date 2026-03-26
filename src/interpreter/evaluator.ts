@@ -29,6 +29,9 @@ class ThrowSignal {
   }
 }
 
+class BreakSignal {}
+class ContinueSignal {}
+
 // 関数オブジェクトの内部表現
 const JS_FUNCTION_BRAND = Symbol("JSFunction");
 const PROTO_KEY = "__proto__";
@@ -373,6 +376,10 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
       const value = stmt.argument ? evalExpression(stmt.argument, env) : undefined;
       throw new ReturnSignal(value);
     }
+    case "BreakStatement":
+      throw new BreakSignal();
+    case "ContinueStatement":
+      throw new ContinueSignal();
     case "ThrowStatement": {
       const value = evalExpression(stmt.argument, env);
       throw new ThrowSignal(value);
@@ -430,13 +437,18 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
       return undefined;
     }
     case "WhileStatement": {
-      while (evalExpression(stmt.test, env)) {
-        evalStatement(stmt.body, env);
+      outer_while: while (evalExpression(stmt.test, env)) {
+        try {
+          evalStatement(stmt.body, env);
+        } catch (e) {
+          if (e instanceof BreakSignal) break outer_while;
+          if (e instanceof ContinueSignal) continue outer_while;
+          throw e;
+        }
       }
       return undefined;
     }
     case "ForStatement": {
-      // let/const の場合、for 全体を囲むスコープを作る
       const isBlockScoped = stmt.init?.type === "VariableDeclaration" && stmt.init.kind !== "var";
       const forEnv = isBlockScoped ? new Environment(env) : env;
 
@@ -447,8 +459,14 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
           evalExpression(stmt.init, forEnv);
         }
       }
-      while (!stmt.test || evalExpression(stmt.test, forEnv)) {
-        evalStatement(stmt.body, forEnv);
+      outer_for: while (!stmt.test || evalExpression(stmt.test, forEnv)) {
+        try {
+          evalStatement(stmt.body, forEnv);
+        } catch (e) {
+          if (e instanceof BreakSignal) break outer_for;
+          if (e instanceof ContinueSignal) { if (stmt.update) evalExpression(stmt.update, forEnv); continue outer_for; }
+          throw e;
+        }
         if (stmt.update) evalExpression(stmt.update, forEnv);
       }
       return undefined;
@@ -460,10 +478,15 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
       const pattern = stmt.left.declarations[0].id;
 
       for (const item of iterable) {
-        // let/const: 各イテレーションで新しいスコープを作成
         const iterEnv = isBlockScoped ? new Environment(env) : env;
         bindPattern(pattern, item, iterEnv, kind);
-        evalStatement(stmt.body, iterEnv);
+        try {
+          evalStatement(stmt.body, iterEnv);
+        } catch (e) {
+          if (e instanceof BreakSignal) break;
+          if (e instanceof ContinueSignal) continue;
+          throw e;
+        }
       }
       return undefined;
     }
@@ -546,6 +569,28 @@ function evalExpression(expr: Expression, env: Environment): unknown {
       }
       return result;
     }
+    case "UpdateExpression": {
+      // ++x, x++, --x, x--
+      const arg = expr.argument;
+      let oldValue: number;
+      if (arg.type === "Identifier") {
+        oldValue = env.get(arg.name) as number;
+      } else {
+        // MemberExpression
+        const obj = evalExpression(arg.object, env) as JSObject;
+        const key = resolveMemberKey(arg, env);
+        oldValue = getProperty(obj, key) as number;
+      }
+      const newValue = expr.operator === "++" ? oldValue + 1 : oldValue - 1;
+      if (arg.type === "Identifier") {
+        env.set(arg.name, newValue);
+      } else {
+        const obj = evalExpression(arg.object, env) as JSObject;
+        const key = resolveMemberKey(arg, env);
+        obj[key] = newValue;
+      }
+      return expr.prefix ? newValue : oldValue;
+    }
     case "NewExpression":
       return evalNewExpression(expr, env);
     case "ObjectExpression": {
@@ -583,21 +628,47 @@ function evalExpression(expr: Expression, env: Environment): unknown {
       return getProperty(obj as JSObject, key);
     }
     case "AssignmentExpression": {
-      if (expr.left.type === "MemberExpression") {
-        const obj = evalExpression(expr.left.object, env) as Record<string, unknown>;
-        const key = resolveMemberKey(expr.left, env);
-        const value = evalExpression(expr.right, env);
-        obj[key] = value;
-        return value;
-      }
       if (expr.left.type === "ObjectPattern" || expr.left.type === "ArrayPattern") {
         const value = evalExpression(expr.right, env);
         assignPattern(expr.left, value, env);
         return value;
       }
-      const value = evalExpression(expr.right, env);
-      env.set(expr.left.name, value);
-      return value;
+
+      // 複合代入: 現在の値を取得して演算
+      const rightValue = evalExpression(expr.right, env);
+      let newValue: unknown;
+      if (expr.operator === "=") {
+        newValue = rightValue;
+      } else {
+        let currentValue: unknown;
+        if (expr.left.type === "MemberExpression") {
+          const obj = evalExpression(expr.left.object, env) as JSObject;
+          currentValue = getProperty(obj, resolveMemberKey(expr.left, env));
+        } else {
+          currentValue = env.get(expr.left.name);
+        }
+        switch (expr.operator) {
+          case "+=":
+            newValue = typeof currentValue === "string" || typeof rightValue === "string"
+              ? String(currentValue) + String(rightValue)
+              : (currentValue as number) + (rightValue as number);
+            break;
+          case "-=": newValue = (currentValue as number) - (rightValue as number); break;
+          case "*=": newValue = (currentValue as number) * (rightValue as number); break;
+          case "/=": newValue = (currentValue as number) / (rightValue as number); break;
+          case "%=": newValue = (currentValue as number) % (rightValue as number); break;
+          default: throw new Error(`Unknown assignment operator: ${expr.operator}`);
+        }
+      }
+
+      if (expr.left.type === "MemberExpression") {
+        const obj = evalExpression(expr.left.object, env) as Record<string, unknown>;
+        const key = resolveMemberKey(expr.left, env);
+        obj[key] = newValue;
+      } else {
+        env.set(expr.left.name, newValue);
+      }
+      return newValue;
     }
     case "CallExpression":
       return evalCallExpression(expr, env);
@@ -835,6 +906,18 @@ function evalBinaryExpression(
     case "===": return left === right;
     case "!=": return left != right;
     case "!==": return left !== right;
+    case "in": return String(left) in (right as Record<string, unknown>);
+    case "instanceof": {
+      if (!isJSFunction(right)) throw new TypeError("Right-hand side of instanceof is not callable");
+      // プロトタイプチェーンを辿って right.prototype を探す
+      const proto = (right as JSFunction).prototype;
+      let current = (left as JSObject)?.[PROTO_KEY] as JSObject | null;
+      while (current !== null && current !== undefined) {
+        if (current === proto) return true;
+        current = (current as JSObject)?.[PROTO_KEY] as JSObject | null;
+      }
+      return false;
+    }
     default:
       throw new Error(`Unknown operator: ${expr.operator}`);
   }

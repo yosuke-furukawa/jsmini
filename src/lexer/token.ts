@@ -22,6 +22,8 @@ export type TokenType =
   | "For"              // for
   | "Function"         // function
   | "Return"           // return
+  | "Break"            // break
+  | "Continue"         // continue
   | "Typeof"           // typeof
   | "Throw"            // throw
   | "Try"              // try
@@ -45,12 +47,21 @@ export type TokenType =
   | "EqualEqual"       // ==
   | "EqualEqualEqual"  // ===
   | "Bang"             // !
+  | "In"               // in
+  | "Instanceof"       // instanceof
   | "BangEqual"        // !=
   | "BangEqualEqual"   // !==
   | "Less"             // <
   | "Greater"          // >
   | "LessEqual"        // <=
   | "GreaterEqual"     // >=
+  | "PlusPlus"         // ++
+  | "MinusMinus"       // --
+  | "PlusEquals"       // +=
+  | "MinusEquals"      // -=
+  | "StarEquals"       // *=
+  | "SlashEquals"      // /=
+  | "PercentEquals"    // %=
   | "AmpersandAmpersand" // &&
   | "PipePipe"         // ||
   // Delimiters

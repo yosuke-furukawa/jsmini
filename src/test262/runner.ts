@@ -134,8 +134,10 @@ function canRun(source: string): string | null {
   if (/\bdelete\s/.test(cleaned)) return "delete";
   if (/\bvoid\s/.test(cleaned)) return "void";
   if (/\bin\s/.test(cleaned)) return "in operator";
-  if (/\binstanceof\s/.test(cleaned)) return "instanceof";
-  if (/\+\+|--/.test(cleaned)) return "increment/decrement";
+  // 実装済み: ++/--, +=/-= 等, break, continue, in, instanceof
+  if (/\bReferenceError\b/.test(cleaned)) return "ReferenceError builtin";
+  if (/\bTypeError\b/.test(cleaned)) return "TypeError builtin";
+  if (/\bSyntaxError\b/.test(cleaned)) return "SyntaxError builtin";
   if (/\beval\s*\(/.test(cleaned)) return "eval";
   if (/\bFunction\s*\(/.test(cleaned)) return "Function constructor";
   if (/\bNumber\s*[\.(]/.test(cleaned)) return "Number builtin";
@@ -145,11 +147,8 @@ function canRun(source: string): string | null {
   if (/\bisNaN\s*\(/.test(cleaned)) return "isNaN";
   if (/\bparseInt\s*\(/.test(cleaned)) return "parseInt";
   if (/\bverifyProperty\b/.test(cleaned)) return "verifyProperty helper";
-  if (/\?\s/.test(cleaned) && /\?[^.]/.test(cleaned)) return "ternary"; // ?. は除外
-  if (/\bbreak\b/.test(cleaned)) return "break";
-  if (/\bcontinue\b/.test(cleaned)) return "continue";
+  if (/\?\s/.test(cleaned) && /\?[^.]/.test(cleaned)) return "ternary";
   if (/\blabel\s*:/.test(cleaned)) return "label";
-  if (/\+=|-=|\*=|\/=/.test(cleaned)) return "compound assignment";
   return null;
 }
 
@@ -226,12 +225,16 @@ let pass = 0;
 let fail = 0;
 let skip = 0;
 const failures: TestResult[] = [];
+const skipReasons: Record<string, number> = {};
 
 for (const testFile of allTests) {
   const result = runTest(testFile);
   if (result.status === "pass") pass++;
-  else if (result.status === "skip") skip++;
-  else {
+  else if (result.status === "skip") {
+    skip++;
+    const reason = result.error ?? "unknown";
+    skipReasons[reason] = (skipReasons[reason] ?? 0) + 1;
+  } else {
     fail++;
     failures.push(result);
   }
@@ -252,4 +255,10 @@ if (failures.length > 0) {
     console.log(`  FAIL: ${f.file}`);
     console.log(`        ${f.error}`);
   }
+}
+
+console.log(`\n--- Skip Reasons ---`);
+const sortedSkips = Object.entries(skipReasons).sort((a, b) => b[1] - a[1]);
+for (const [reason, count] of sortedSkips) {
+  console.log(`  ${count.toString().padStart(4)} : ${reason}`);
 }
