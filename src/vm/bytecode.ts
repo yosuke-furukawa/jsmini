@@ -36,8 +36,12 @@ export type Opcode =
   | "LdaLocal"        // LdaLocal <slot> — ローカル変数を push
   | "StaLocal"        // StaLocal <slot> — スタックトップをローカル変数に格納 (pop しない)
 
+  // プロパティ
+  | "GetProperty"     // GetProperty <nameIndex> — pop obj, push obj[name]
+
   // 関数
   | "Call"            // Call <argc> — スタックから関数 + argc 個の引数を pop、呼び出し
+  | "CallMethod"      // CallMethod <argc> — メソッド呼び出し (スタック: ...args, obj, method)
 
   // 制御フロー
   | "Jump"            // Jump <offset> — 無条件ジャンプ (pc = operand)

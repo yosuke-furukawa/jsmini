@@ -273,14 +273,41 @@ class BytecodeCompiler {
         break;
       }
 
-      case "CallExpression": {
-        // 引数を左から右に push
-        for (const arg of expr.arguments) {
-          this.compileExpression(arg as Expression);
+      case "MemberExpression": {
+        this.compileExpression(expr.object);
+        if (!expr.computed && expr.property.type === "Identifier") {
+          const nameIdx = this.addConstant(expr.property.name);
+          this.emit("GetProperty", nameIdx);
+        } else {
+          throw new Error("Computed member expression not yet supported in VM");
         }
-        // 関数を push
-        this.compileExpression(expr.callee);
-        this.emit("Call", expr.arguments.length);
+        break;
+      }
+
+      case "CallExpression": {
+        if (expr.callee.type === "MemberExpression") {
+          // メソッド呼び出し: obj.method(args)
+          // 引数を push
+          for (const arg of expr.arguments) {
+            this.compileExpression(arg as Expression);
+          }
+          // obj を push
+          this.compileExpression(expr.callee.object);
+          // メソッドを push
+          this.emit("Dup"); // obj を複製 (this 用に残す)
+          if (!expr.callee.computed && expr.callee.property.type === "Identifier") {
+            const nameIdx = this.addConstant(expr.callee.property.name);
+            this.emit("GetProperty", nameIdx);
+          }
+          this.emit("CallMethod", expr.arguments.length);
+        } else {
+          // 通常の関数呼び出し
+          for (const arg of expr.arguments) {
+            this.compileExpression(arg as Expression);
+          }
+          this.compileExpression(expr.callee);
+          this.emit("Call", expr.arguments.length);
+        }
         break;
       }
 

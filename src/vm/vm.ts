@@ -25,6 +25,10 @@ export class VM {
     return this.stack[this.sp];
   }
 
+  setGlobal(name: string, value: unknown): void {
+    this.globals.set(name, value);
+  }
+
   execute(func: BytecodeFunction): unknown {
     // トップレベルをフレームとして実行
     this.frames.push({
@@ -203,6 +207,14 @@ export class VM {
           break;
         }
 
+        // プロパティ
+        case "GetProperty": {
+          const obj = this.pop() as Record<string, unknown>;
+          const name = constants[instr.operand!] as string;
+          this.push(obj[name]);
+          break;
+        }
+
         // 関数呼び出し
         case "Call": {
           const argc = instr.operand!;
@@ -218,6 +230,34 @@ export class VM {
             const fn = callee as BytecodeFunction;
             const locals = new Array(fn.localCount).fill(undefined);
             // パラメータをローカルスロットにバインド
+            for (let i = 0; i < fn.paramCount; i++) {
+              locals[i] = args[i] ?? undefined;
+            }
+            this.frames.push({ func: fn, pc: 0, locals });
+          } else {
+            throw new Error("Not a function");
+          }
+          break;
+        }
+
+        // メソッド呼び出し
+        case "CallMethod": {
+          const argc = instr.operand!;
+          const method = this.pop();  // メソッド関数
+          const thisObj = this.pop(); // this (obj)
+          const args: unknown[] = [];
+          for (let i = 0; i < argc; i++) {
+            args.unshift(this.pop());
+          }
+
+          if (typeof method === "function") {
+            // ネイティブメソッド (console.log 等)
+            const result = (method as Function).apply(thisObj, args);
+            this.push(result);
+          } else if (typeof method === "object" && method !== null && "bytecode" in method) {
+            // BytecodeFunction メソッド — TODO: this バインド
+            const fn = method as BytecodeFunction;
+            const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }

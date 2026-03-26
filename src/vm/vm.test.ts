@@ -256,3 +256,35 @@ describe("VM - Step 4-3: 関数", () => {
     `), 100);
   });
 });
+
+describe("VM - Step 4-5: 文字列 + console.log", () => {
+  it("文字列リテラルを評価できる", () => {
+    assert.equal(vmEvaluate('"hello";'), "hello");
+  });
+
+  it("文字列連結ができる", () => {
+    assert.equal(vmEvaluate('"hello" + " " + "world";'), "hello world");
+  });
+
+  it("文字列と変数の連結ができる", () => {
+    assert.equal(vmEvaluate('var name = "world"; "hello " + name;'), "hello world");
+  });
+
+  it("console.log が動く", () => {
+    const logs: unknown[] = [];
+    vmEvaluate('console.log("hello");', { log: (...args: unknown[]) => logs.push(...args) });
+    assert.deepEqual(logs, ["hello"]);
+  });
+
+  it("console.log が複数引数を受け取れる", () => {
+    const logs: unknown[][] = [];
+    vmEvaluate('console.log(1, 2, 3);', { log: (...args: unknown[]) => logs.push(args) });
+    assert.deepEqual(logs, [[1, 2, 3]]);
+  });
+
+  it("console.log が数値を出力できる", () => {
+    const logs: unknown[] = [];
+    vmEvaluate('console.log(42);', { log: (...args: unknown[]) => logs.push(...args) });
+    assert.deepEqual(logs, [42]);
+  });
+});
