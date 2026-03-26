@@ -46,13 +46,13 @@ type FeedbackMap = Map<BytecodeFunction, TypeFeedback>;
 
 ### 実装
 
-- [ ] `src/vm/feedback.ts` — TypeFeedback の型定義と管理
-- [ ] VM の `Call` 命令実行時に引数の型を記録
-- [ ] VM の `Return` 命令実行時に戻り値の型を記録
-- [ ] 呼び出し回数をカウント
-- [ ] `isMonomorphic` の判定（全呼び出しで同じ型パターンか）
-- [ ] `--print-feedback` フラグでフィードバック情報をダンプ
-- [ ] テスト
+- [x] `src/jit/feedback.ts` — TypeFeedback の型定義と FeedbackCollector
+- [x] VM の `Call` 命令実行時に引数の型を記録 (`recordCall`)
+- [x] VM の `Return` 命令実行時に戻り値の型を記録 (`recordReturn`)
+- [x] 呼び出し回数をカウント (`callCount`)
+- [x] `isMonomorphic` の判定（全サンプルが同じ型パターンか）
+- [x] `--print-feedback` フラグでフィードバック情報をダンプ
+- [x] テスト (4件)
 
 ```bash
 $ npm start -- --vm --print-feedback '
