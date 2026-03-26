@@ -362,3 +362,170 @@ describe("Parser - Step 2-2: 配列", () => {
     assert.throws(() => parse("var x = [1 2];"), /Expected/);
   });
 });
+
+describe("Parser - Statement vs Declaration", () => {
+  it("if の body に var は書ける", () => {
+    assert.doesNotThrow(() => parse("if (true) var x = 1;"));
+  });
+
+  it("if の body に let は書けない", () => {
+    assert.throws(() => parse("if (true) let x = 1;"), /not allowed/);
+  });
+
+  it("if の body に const は書けない", () => {
+    assert.throws(() => parse("if (true) const x = 1;"), /not allowed/);
+  });
+
+  it("if のブロック内なら let は書ける", () => {
+    assert.doesNotThrow(() => parse("if (true) { let x = 1; }"));
+  });
+
+  it("while の body に let は書けない", () => {
+    assert.throws(() => parse("while (true) let x = 1;"), /not allowed/);
+  });
+
+  it("for の body に const は書けない", () => {
+    assert.throws(() => parse("for (var i = 0; i < 1; i = i + 1) const x = 1;"), /not allowed/);
+  });
+
+  it("トップレベルで let / const は書ける", () => {
+    assert.doesNotThrow(() => parse("let x = 1; const y = 2;"));
+  });
+});
+
+describe("Parser - Step 3: アロー関数", () => {
+  it("アロー関数（式本体）をパースできる", () => {
+    const ast = parse("var f = (a, b) => a + b;");
+    const init = ast.body[0].declarations[0].init;
+    assert.equal(init.type, "ArrowFunctionExpression");
+    assert.equal(init.expression, true);
+    assert.equal(init.params.length, 2);
+  });
+
+  it("アロー関数（ブロック本体）をパースできる", () => {
+    const ast = parse("var f = (a) => { return a; };");
+    const init = ast.body[0].declarations[0].init;
+    assert.equal(init.type, "ArrowFunctionExpression");
+    assert.equal(init.expression, false);
+  });
+
+  it("単一引数アローをパースできる", () => {
+    const ast = parse("var f = a => a;");
+    const init = ast.body[0].declarations[0].init;
+    assert.equal(init.type, "ArrowFunctionExpression");
+    assert.equal(init.params.length, 1);
+  });
+
+  it("引数なしアローをパースできる", () => {
+    const ast = parse("var f = () => 42;");
+    const init = ast.body[0].declarations[0].init;
+    assert.equal(init.type, "ArrowFunctionExpression");
+    assert.equal(init.params.length, 0);
+  });
+});
+
+describe("Parser - Step 3: テンプレートリテラル", () => {
+  it("式埋め込みなしをパースできる", () => {
+    const ast = parse("`hello`;");
+    const expr = ast.body[0].expression;
+    assert.equal(expr.type, "TemplateLiteral");
+    assert.equal(expr.quasis.length, 1);
+    assert.equal(expr.expressions.length, 0);
+    assert.equal(expr.quasis[0].value.cooked, "hello");
+  });
+
+  it("式埋め込みありをパースできる", () => {
+    const ast = parse("`a ${x} b`;");
+    const expr = ast.body[0].expression;
+    assert.equal(expr.type, "TemplateLiteral");
+    assert.equal(expr.quasis.length, 2);
+    assert.equal(expr.expressions.length, 1);
+    assert.equal(expr.quasis[0].value.cooked, "a ");
+    assert.equal(expr.quasis[1].value.cooked, " b");
+  });
+});
+
+describe("Parser - Step 3: クラス", () => {
+  it("基本的なクラスをパースできる", () => {
+    const ast = parse("class Foo { constructor(x) { this.x = x; } greet() { return 1; } }");
+    const stmt = ast.body[0];
+    assert.equal(stmt.type, "ClassDeclaration");
+    assert.equal(stmt.id.name, "Foo");
+    assert.equal(stmt.body.body.length, 2);
+    assert.equal(stmt.body.body[0].kind, "constructor");
+    assert.equal(stmt.body.body[1].kind, "method");
+  });
+
+  it("extends をパースできる", () => {
+    const ast = parse("class Bar extends Foo {}");
+    const stmt = ast.body[0];
+    assert.equal(stmt.type, "ClassDeclaration");
+    assert.equal(stmt.superClass.type, "Identifier");
+    assert.equal(stmt.superClass.name, "Foo");
+  });
+});
+
+describe("Parser - Step 3: 分割代入", () => {
+  it("オブジェクト分割代入をパースできる", () => {
+    const ast = parse("var { x, y } = obj;");
+    const id = ast.body[0].declarations[0].id;
+    assert.equal(id.type, "ObjectPattern");
+    assert.equal(id.properties.length, 2);
+  });
+
+  it("配列分割代入をパースできる", () => {
+    const ast = parse("var [a, b] = arr;");
+    const id = ast.body[0].declarations[0].id;
+    assert.equal(id.type, "ArrayPattern");
+    assert.equal(id.elements.length, 2);
+  });
+});
+
+describe("Parser - Step 3: スプレッド / レスト", () => {
+  it("配列スプレッドをパースできる", () => {
+    const ast = parse("var x = [1, ...arr, 2];");
+    const init = ast.body[0].declarations[0].init;
+    assert.equal(init.type, "ArrayExpression");
+    assert.equal(init.elements[1].type, "SpreadElement");
+  });
+
+  it("オブジェクトスプレッドをパースできる", () => {
+    const ast = parse("var x = { ...a, y: 1 };");
+    const init = ast.body[0].declarations[0].init;
+    assert.equal(init.type, "ObjectExpression");
+    assert.equal(init.properties[0].type, "SpreadElement");
+  });
+
+  it("レストパラメータをパースできる", () => {
+    const ast = parse("function f(a, ...rest) {}");
+    const params = ast.body[0].params;
+    assert.equal(params.length, 2);
+    assert.equal(params[1].type, "RestElement");
+    assert.equal(params[1].argument.name, "rest");
+  });
+});
+
+describe("Parser - Step 3: for...of", () => {
+  it("for...of をパースできる", () => {
+    const ast = parse("for (var x of arr) {}");
+    const stmt = ast.body[0];
+    assert.equal(stmt.type, "ForOfStatement");
+    assert.equal(stmt.left.type, "VariableDeclaration");
+    assert.equal(stmt.left.kind, "var");
+    assert.equal(stmt.right.type, "Identifier");
+  });
+
+  it("for...of で let をパースできる", () => {
+    const ast = parse("for (let x of arr) {}");
+    const stmt = ast.body[0];
+    assert.equal(stmt.type, "ForOfStatement");
+    assert.equal(stmt.left.kind, "let");
+  });
+
+  it("for...of で分割代入をパースできる", () => {
+    const ast = parse("for (var [a, b] of arr) {}");
+    const stmt = ast.body[0];
+    assert.equal(stmt.type, "ForOfStatement");
+    assert.equal(stmt.left.declarations[0].id.type, "ArrayPattern");
+  });
+});

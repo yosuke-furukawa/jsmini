@@ -2,6 +2,12 @@ export type TokenType =
   // Literals
   | "Number"
   | "String"
+  | "NoSubstitutionTemplate"  // `hello`        (式埋め込みなし)
+  | "TemplateHead"            // `hello ${      (先頭〜最初の${)
+  | "TemplateMiddle"          // } ... ${       (} 〜 次の${)
+  | "TemplateTail"            // } ... `        (} 〜 閉じ`)
+
+
   // Identifiers & Keywords
   | "Identifier"
   | "Var"              // var
@@ -23,6 +29,10 @@ export type TokenType =
   | "Finally"          // finally
   | "New"              // new
   | "This"             // this
+  | "Class"            // class
+  | "Extends"          // extends
+  | "Super"            // super
+  | "Of"               // of
   // undefined は予約語ではないのでキーワードに含めない
   // Operators
   | "Plus"             // +
@@ -31,6 +41,7 @@ export type TokenType =
   | "Slash"            // /
   | "Percent"          // %
   | "Equals"           // =
+  | "Arrow"            // =>
   | "EqualEqual"       // ==
   | "EqualEqualEqual"  // ===
   | "Bang"             // !
@@ -49,6 +60,7 @@ export type TokenType =
   | "RightBrace"       // }
   | "LeftBracket"      // [
   | "RightBracket"     // ]
+  | "DotDotDot"        // ...
   | "Colon"            // :
   | "Dot"              // .
   | "Comma"            // ,

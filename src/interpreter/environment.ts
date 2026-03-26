@@ -74,6 +74,31 @@ export class Environment {
     throw new ReferenceError(`${name} is not defined`);
   }
 
+  // 全スコープチェーンの変数をダンプ（デバッグ用）
+  dump(): { scope: string; variables: Record<string, unknown> }[] {
+    const result: { scope: string; variables: Record<string, unknown> }[] = [];
+    let env: Environment | null = this;
+    let depth = 0;
+    while (env) {
+      const variables: Record<string, unknown> = {};
+      for (const [key, val] of env.values) {
+        if (env.readOnly.has(key)) continue; // undefined, console 等の組み込みはスキップ
+        if (typeof val === "object" && val !== null && "params" in val && "body" in val) {
+          variables[key] = "[Function]";
+        } else {
+          variables[key] = val;
+        }
+      }
+      if (Object.keys(variables).length > 0) {
+        const scope = depth === 0 ? "local" : env.parent ? `scope[${depth}]` : "global";
+        result.push({ scope, variables });
+      }
+      env = env.parent;
+      depth++;
+    }
+    return result;
+  }
+
   set(name: string, value: unknown): void {
     if (this.values.has(name)) {
       if (this.readOnly.has(name)) return; // undefined 等の書き換え不可は無視

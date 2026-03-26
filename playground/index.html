@@ -190,6 +190,54 @@ main {
   font-style: italic;
   font-size: 13px;
 }
+
+/* Step controls */
+.step-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.step-controls button {
+  padding: 4px 10px;
+  background: #333;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.step-controls button:hover { background: #444; }
+.step-controls button:disabled { opacity: 0.4; cursor: default; }
+.step-counter {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 80px;
+}
+
+/* Env panel */
+.env-scope {
+  margin-bottom: 12px;
+}
+.env-scope-title {
+  font-size: 11px;
+  color: var(--accent);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.env-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 12px;
+}
+.env-table td {
+  padding: 2px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.env-var-name { color: var(--accent); }
+.env-var-value { color: var(--green); }
+.env-var-type { color: var(--text-muted); font-size: 10px; }
 </style>
 </head>
 <body>
@@ -197,6 +245,12 @@ main {
   <h1>jsmini playground</h1>
   <button id="run-btn">Run</button>
   <span class="shortcut-hint">Cmd+Enter</span>
+  <div class="step-controls">
+    <button id="step-back-btn" disabled>&lt;</button>
+    <button id="step-fwd-btn" disabled>Step &gt;</button>
+    <button id="step-reset-btn" disabled>Reset</button>
+    <span id="step-counter" class="step-counter"></span>
+  </div>
 </header>
 <main>
   <div id="editor-pane"></div>
@@ -205,6 +259,7 @@ main {
       <button class="tab-btn active" data-tab="tokens">Tokens <span id="badge-tokens" class="tab-badge"></span></button>
       <button class="tab-btn" data-tab="ast">AST <span id="badge-ast" class="tab-badge"></span></button>
       <button class="tab-btn" data-tab="result">Result</button>
+      <button class="tab-btn" data-tab="env">Env</button>
     </div>
     <div id="panel-tokens" class="panel active">
       <p class="empty-msg">Run to see tokens</p>
@@ -215,36 +270,97 @@ main {
     <div id="panel-result" class="panel">
       <p class="empty-msg">Run to see result</p>
     </div>
+    <div id="panel-env" class="panel">
+      <p class="empty-msg">Run then use Step to see environment</p>
+    </div>
   </div>
 </main>
 
 <script src="jsmini.bundle.js"></script>
 <script>
-const { basicSetup, javascript, oneDark, EditorView, keymap, Prec } = jsmini;
+const { basicSetup, javascript, oneDark, EditorView, keymap, Prec, StateEffect, StateField, Decoration, RangeSet } = jsmini;
+
+// ========== Step highlight decoration ==========
+const setStepHighlight = StateEffect.define();
+const clearStepHighlight = StateEffect.define();
+
+const stepLineDeco = Decoration.line({ class: "cm-step-line" });
+const stepTextDeco = Decoration.mark({ class: "cm-step-text" });
+
+const stepHighlightField = StateField.define({
+  create() { return Decoration.none; },
+  update(decos, tr) {
+    for (const e of tr.effects) {
+      if (e.is(clearStepHighlight)) return Decoration.none;
+      if (e.is(setStepHighlight)) {
+        const { from, to } = e.value;
+        const doc = tr.state.doc;
+        const startLine = doc.lineAt(from);
+        const endLine = doc.lineAt(to);
+        const marks = [];
+        // 行ごとに背景をつける
+        for (let ln = startLine.number; ln <= endLine.number; ln++) {
+          marks.push(stepLineDeco.range(doc.line(ln).from));
+        }
+        // テキスト範囲をマーク
+        marks.push(stepTextDeco.range(from, to));
+        marks.sort((a, b) => a.from - b.from || a.startSide - b.startSide);
+        return RangeSet.of(marks);
+      }
+    }
+    return decos;
+  },
+  provide: f => EditorView.decorations.from(f),
+});
 
 // ========== CodeMirror setup ==========
-const defaultCode = `// jsmini playground
+const defaultCode = `// jsmini playground - Phase 3 demo
+
+// Phase 1: var, function, if/else, for, console.log
 var x = 10;
-var y = 20;
+function double(n) { return n * 2; }
+console.log(double(x));
 
-function add(a, b) {
-  return a + b;
+// Phase 2: let/const, object, array, try/catch, typeof
+let point = { x: 1, y: 2 };
+const nums = [10, 20, 30];
+console.log(point.x + point.y);
+console.log(nums.length);
+console.log(typeof point);
+
+try {
+  throw new Error("oops");
+} catch (e) {
+  console.log(e.message);
 }
 
-var result = add(x, y);
-console.log(result);
+// Phase 3: arrow, template literal, class, for...of, destructuring
+const add = (a, b) => a + b;
+console.log(\`add(3,4) = \${add(3, 4)}\`);
 
-if (result > 25) {
-  console.log("large");
-} else {
-  console.log("small");
+class Counter {
+  constructor(start) {
+    this.count = start;
+  }
+  increment() {
+    this.count = this.count + 1;
+    return this.count;
+  }
 }
 
-var sum = 0;
-for (var i = 0; i < 5; i = i + 1) {
-  sum = sum + i;
+const c = new Counter(0);
+console.log(c.increment());
+console.log(c.increment());
+
+const arr = [1, 2, 3];
+let sum = 0;
+for (const n of arr) {
+  sum = sum + n;
 }
-console.log(sum);
+console.log(\`sum = \${sum}\`);
+
+const { x: px, y: py } = point;
+console.log(\`point: (\${px}, \${py})\`);
 `;
 
 const runKeymap = Prec.highest(keymap.of([{
@@ -252,9 +368,19 @@ const runKeymap = Prec.highest(keymap.of([{
   run: () => { runCode(); return true; }
 }]));
 
+const stepHighlightTheme = EditorView.baseTheme({
+  ".cm-step-line": {
+    backgroundColor: "rgba(86, 156, 214, 0.15)",
+  },
+  ".cm-step-text": {
+    backgroundColor: "rgba(86, 156, 214, 0.35)",
+    borderBottom: "2px solid #569cd6",
+  },
+});
+
 const view = new EditorView({
   doc: defaultCode,
-  extensions: [basicSetup, javascript(), oneDark, runKeymap],
+  extensions: [basicSetup, javascript(), oneDark, runKeymap, stepHighlightField, stepHighlightTheme],
   parent: document.getElementById("editor-pane"),
 });
 
@@ -264,6 +390,7 @@ const panels = {
   tokens: document.getElementById("panel-tokens"),
   ast: document.getElementById("panel-ast"),
   result: document.getElementById("panel-result"),
+  env: document.getElementById("panel-env"),
 };
 
 function switchTab(name) {
@@ -570,10 +697,15 @@ let lastSource = "";
 
 function highlightRange(from, to) {
   view.dispatch({
+    effects: setStepHighlight.of({ from, to }),
     selection: { anchor: from, head: to },
     scrollIntoView: true,
   });
   view.focus();
+}
+
+function clearHighlight() {
+  view.dispatch({ effects: clearStepHighlight.of(null) });
 }
 
 function tokenCharOffset(token) {
@@ -589,6 +721,7 @@ function tokenSourceLength(token) {
 
 // ========== Run ==========
 function runCode() {
+  clearHighlight();
   const source = view.state.doc.toString();
   lastSource = source;
   lastLineOffsets = computeLineOffsets(source);
@@ -620,19 +753,182 @@ function runCode() {
     document.getElementById("badge-ast").textContent = "!";
   }
 
-  // Result
+  // Result + Step 記録
   const logs = [];
   let returnValue;
   let error = null;
+  steps = [];
+  stepIndex = -1;
   try {
-    returnValue = jsmini.evaluate(source, { log: (...args) => logs.push(args) });
+    returnValue = jsmini.evaluate(source, {
+      console: { log: (...args) => logs.push(args) },
+      onStep: (info) => steps.push(info),
+    });
   } catch (e) {
     error = `${e.constructor?.name || "Error"}: ${e.message}`;
   }
   renderResult(logs, returnValue, error, panels.result);
 
+  // Step 用のソース範囲を事前計算
+  if (tokens && ast) {
+    stmtSourceRanges = collectStatementRanges(ast, tokens);
+  }
+
+  // Step UI 初期化
+  if (steps.length > 0) {
+    stepIndex = steps.length - 1; // 最終状態を表示
+    updateStepUI();
+  } else {
+    updateStepUI();
+  }
+
   switchTab("result");
 }
+
+// ========== Step execution ==========
+let steps = [];
+let stepIndex = -1;
+// 各ステップの文の位置を記録するために、AST の文を事前に走査
+let stmtSourceRanges = [];
+
+function collectStatementRanges(ast, tokens) {
+  // AST の全文を深さ優先で走査し、文の種類と順番を記録
+  // 対応する行をトークンの位置からヒューリスティックに推定
+  const ranges = [];
+  let tIdx = 0;
+
+  function findTokenByLine(stmtType) {
+    // 次のキーワードトークンを探す
+    const keywordMap = {
+      VariableDeclaration: new Set(["Var"]),
+      FunctionDeclaration: new Set(["Function"]),
+      ReturnStatement: new Set(["Return"]),
+      IfStatement: new Set(["If"]),
+      WhileStatement: new Set(["While"]),
+      ForStatement: new Set(["For"]),
+      ExpressionStatement: null, // 次のトークンなんでも
+    };
+    const expected = keywordMap[stmtType];
+    while (tIdx < tokens.length) {
+      const t = tokens[tIdx];
+      if (t.type === "EOF") break;
+      if (!expected || expected.has(t.type)) {
+        const start = tokenCharOffset(t);
+        // 文の終わりは次のセミコロンか閉じ波括弧まで
+        let end = start + tokenSourceLength(t);
+        // 次のセミコロンまでスキャン
+        for (let j = tIdx + 1; j < tokens.length; j++) {
+          const tj = tokens[j];
+          end = tokenCharOffset(tj) + tokenSourceLength(tj);
+          if (tj.type === "Semicolon" || tj.type === "RightBrace") break;
+        }
+        tIdx++;
+        return { start, end };
+      }
+      tIdx++;
+    }
+    return null;
+  }
+
+  function walkStmts(stmts) {
+    for (const stmt of stmts) {
+      if (stmt.type === "BlockStatement") {
+        walkStmts(stmt.body);
+      } else if (stmt.type === "IfStatement") {
+        ranges.push(findTokenByLine("IfStatement"));
+        walkStmts([stmt.consequent]);
+        if (stmt.alternate) walkStmts([stmt.alternate]);
+      } else if (stmt.type === "WhileStatement") {
+        ranges.push(findTokenByLine("WhileStatement"));
+        walkStmts([stmt.body]);
+      } else if (stmt.type === "ForStatement") {
+        ranges.push(findTokenByLine("ForStatement"));
+        walkStmts([stmt.body]);
+      } else if (stmt.type === "FunctionDeclaration") {
+        ranges.push(findTokenByLine("FunctionDeclaration"));
+        // body の中身は呼び出し時に実行されるので事前走査しない
+      } else {
+        ranges.push(findTokenByLine(stmt.type));
+      }
+    }
+  }
+  walkStmts(ast.body);
+  return ranges;
+}
+
+function renderEnv(envDump) {
+  if (!envDump || envDump.length === 0) {
+    panels.env.innerHTML = `<p class="empty-msg">No variables</p>`;
+    return;
+  }
+  let html = "";
+  for (const { scope, variables } of envDump) {
+    html += `<div class="env-scope"><div class="env-scope-title">${escapeHtml(scope)}</div>`;
+    html += `<table class="env-table">`;
+    for (const [name, value] of Object.entries(variables)) {
+      const type = value === null ? "null" : typeof value;
+      const display = value === undefined ? "undefined"
+        : value === null ? "null"
+        : typeof value === "string" ? `"${value}"`
+        : String(value);
+      html += `<tr><td class="env-var-name">${escapeHtml(name)}</td><td class="env-var-value">${escapeHtml(display)}</td><td class="env-var-type">${type}</td></tr>`;
+    }
+    html += `</table></div>`;
+  }
+  panels.env.innerHTML = html;
+}
+
+function updateStepUI() {
+  const backBtn = document.getElementById("step-back-btn");
+  const fwdBtn = document.getElementById("step-fwd-btn");
+  const resetBtn = document.getElementById("step-reset-btn");
+  const counter = document.getElementById("step-counter");
+
+  if (steps.length === 0) {
+    backBtn.disabled = true;
+    fwdBtn.disabled = true;
+    resetBtn.disabled = true;
+    counter.textContent = "";
+    return;
+  }
+
+  backBtn.disabled = stepIndex <= 0;
+  fwdBtn.disabled = stepIndex >= steps.length - 1;
+  resetBtn.disabled = false;
+  counter.textContent = `${stepIndex + 1} / ${steps.length}`;
+
+  // 現在のステップの環境を表示
+  if (stepIndex >= 0 && stepIndex < steps.length) {
+    renderEnv(steps[stepIndex].env);
+    // 対応するソース範囲をハイライト
+    const range = stmtSourceRanges[stepIndex];
+    if (range) {
+      highlightRange(range.start, range.end);
+    }
+  }
+}
+
+document.getElementById("step-fwd-btn").addEventListener("click", () => {
+  if (stepIndex < steps.length - 1) {
+    stepIndex++;
+    updateStepUI();
+    switchTab("env");
+  }
+});
+
+document.getElementById("step-back-btn").addEventListener("click", () => {
+  if (stepIndex > 0) {
+    stepIndex--;
+    updateStepUI();
+    switchTab("env");
+  }
+});
+
+document.getElementById("step-reset-btn").addEventListener("click", () => {
+  stepIndex = 0;
+  updateStepUI();
+  switchTab("env");
+});
 
 // Run button
 document.getElementById("run-btn").addEventListener("click", runCode);

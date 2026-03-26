@@ -1,6 +1,7 @@
 import type { Token, TokenType } from "./token.js";
 
-const KEYWORDS: Record<string, TokenType> = {
+const KEYWORDS: Record<string, TokenType> = Object.create(null);
+Object.assign(KEYWORDS, {
   var: "Var",
   let: "Let",
   const: "Const",
@@ -20,14 +21,24 @@ const KEYWORDS: Record<string, TokenType> = {
   finally: "Finally",
   new: "New",
   this: "This",
+  class: "Class",
+  extends: "Extends",
+  super: "Super",
+  of: "Of",
   // undefined は予約語ではないのでキーワードに含めない
-};
+});
 
 export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
   let column = 1;
+
+  // テンプレートリテラルのネスト管理
+  // スタックに template の深さを積む。} が来たときにスタックが空でなければ
+  // テンプレート文字列モードに戻る
+  const templateDepthStack: number[] = [];
+  let braceDepth = 0;
 
   function peek(offset = 0): string {
     return source[pos + offset] ?? "";
@@ -117,6 +128,12 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
+    // テンプレートリテラル
+    if (ch === "`") {
+      scanTemplate(false);
+      continue;
+    }
+
     // 識別子・キーワード
     if (isAlpha(ch)) {
       const start = pos;
@@ -136,6 +153,10 @@ export function tokenize(source: string): Token[] {
     }
     if (ch === "=" && peek(1) === "=") {
       pushToken("EqualEqual", "==", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "=" && peek(1) === ">") {
+      pushToken("Arrow", "=>", startCol);
       pos += 2; column += 2; continue;
     }
     if (ch === "!" && peek(1) === "=" && peek(2) === "=") {
@@ -162,13 +183,36 @@ export function tokenize(source: string): Token[] {
       pushToken("PipePipe", "||", startCol);
       pos += 2; column += 2; continue;
     }
+    if (ch === "." && peek(1) === "." && peek(2) === ".") {
+      pushToken("DotDotDot", "...", startCol);
+      pos += 3; column += 3; continue;
+    }
+
+    // 波括弧: テンプレートリテラルのネスト管理のため特別扱い
+    if (ch === "{") {
+      braceDepth++;
+      pushToken("LeftBrace", ch, startCol);
+      advance();
+      continue;
+    }
+    if (ch === "}") {
+      if (templateDepthStack.length > 0 && braceDepth === templateDepthStack[templateDepthStack.length - 1]) {
+        // テンプレートリテラルの ${...} の閉じ → テンプレート文字列モードに復帰
+        templateDepthStack.pop();
+        scanTemplate(true);
+        continue;
+      }
+      if (braceDepth > 0) braceDepth--;
+      pushToken("RightBrace", ch, startCol);
+      advance();
+      continue;
+    }
 
     // 単一文字トークン
     const singleCharMap: Record<string, TokenType> = {
       "+": "Plus", "-": "Minus", "*": "Star", "/": "Slash", "%": "Percent",
       "=": "Equals", "!": "Bang", "<": "Less", ">": "Greater",
       "(": "LeftParen", ")": "RightParen",
-      "{": "LeftBrace", "}": "RightBrace",
       "[": "LeftBracket", "]": "RightBracket",
       ":": "Colon", ".": "Dot", ",": "Comma",
       ";": "Semicolon",
@@ -185,6 +229,65 @@ export function tokenize(source: string): Token[] {
 
   tokens.push({ type: "EOF", value: "", line, column });
   return tokens;
+
+  // テンプレートリテラルをスキャン
+  // isContinuation: true = `}` からの復帰 (TemplateMiddle or TemplateTail)
+  //                 false = `` ` `` からの開始 (NoSubstitutionTemplate or TemplateHead)
+  function scanTemplate(isContinuation: boolean): void {
+    const startCol = column;
+    if (!isContinuation) {
+      advance(); // skip opening `
+    }
+    // } からの復帰の場合、} は既に消費されていないので消費
+    if (isContinuation) {
+      advance(); // skip }
+    }
+
+    let str = "";
+    while (pos < source.length) {
+      const c = peek();
+      if (c === "`") {
+        advance(); // skip closing `
+        if (isContinuation) {
+          pushToken("TemplateTail", str, startCol);
+        } else {
+          pushToken("NoSubstitutionTemplate", str, startCol);
+        }
+        return;
+      }
+      if (c === "$" && peek(1) === "{") {
+        advance(); // $
+        advance(); // {
+        templateDepthStack.push(braceDepth);
+        if (isContinuation) {
+          pushToken("TemplateMiddle", str, startCol);
+        } else {
+          pushToken("TemplateHead", str, startCol);
+        }
+        return;
+      }
+      if (c === "\\") {
+        advance();
+        const esc = advance();
+        switch (esc) {
+          case "n": str += "\n"; break;
+          case "t": str += "\t"; break;
+          case "r": str += "\r"; break;
+          case "\\": str += "\\"; break;
+          case "`": str += "`"; break;
+          case "$": str += "$"; break;
+          case "\n": break; // 行継続: バックスラッシュ+改行 → 何も追加しない
+          default: str += "\\" + esc; // 未知のエスケープはそのまま保持
+        }
+      } else if (c === "\n") {
+        str += "\n";
+        pos++; line++; column = 1;
+      } else {
+        str += advance();
+      }
+    }
+    throw new SyntaxError(`Unterminated template literal at line ${line}, column ${startCol}`);
+  }
 }
 
 function isDigit(ch: string): boolean {

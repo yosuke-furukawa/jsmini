@@ -25,15 +25,44 @@ export function parse(source: string): Program {
   function parseProgram(): Program {
     const body: Statement[] = [];
     while (current().type !== "EOF") {
-      body.push(parseStatement());
+      body.push(parseStatementOrDeclaration());
     }
     return { type: "Program", body };
   }
 
-  function parseStatement(): Statement {
-    if (current().type === "Var" || current().type === "Let" || current().type === "Const") {
+  // Declaration = LexicalDeclaration (let/const) | FunctionDeclaration
+  function isDeclarationStart(): boolean {
+    return current().type === "Let" || current().type === "Const" || current().type === "Function" || current().type === "Class";
+  }
+
+  // Statement | Declaration — ブロック内やトップレベルで使う
+  function parseStatementOrDeclaration(): Statement {
+    if (isDeclarationStart()) {
+      return parseDeclaration();
+    }
+    return parseStatement();
+  }
+
+  // Declaration のみ
+  function parseDeclaration(): Statement {
+    if (current().type === "Let" || current().type === "Const") {
       return parseVariableDeclaration();
     }
+    if (current().type === "Function") return parseFunctionDeclaration();
+    if (current().type === "Class") return parseClassDeclaration();
+    throw new SyntaxError(
+      `Unexpected token ${current().type} at line ${current().line}, column ${current().column}`
+    );
+  }
+
+  // Statement のみ — if/while/for の body など、宣言が来てはいけない場所
+  function parseStatement(): Statement {
+    if (current().type === "Let" || current().type === "Const") {
+      throw new SyntaxError(
+        `Lexical declaration (${current().value}) not allowed in single-statement context`
+      );
+    }
+    if (current().type === "Var") return parseVariableDeclaration();
     if (current().type === "Function") return parseFunctionDeclaration();
     if (current().type === "Return") return parseReturnStatement();
     if (current().type === "Throw") return parseThrowStatement();
@@ -48,11 +77,11 @@ export function parse(source: string): Program {
     return { type: "ExpressionStatement", expression };
   }
 
-  // VariableDeclaration = ('var' | 'let' | 'const') Identifier ('=' Expression)? ';'
+  // VariableDeclaration = ('var' | 'let' | 'const') Pattern ('=' Expression)? ';'
   function parseVariableDeclaration(): Statement {
     const kindToken = eat(current().type);
     const kind = kindToken.value as "var" | "let" | "const";
-    const id = parseIdentifier();
+    const id = parseBindingPattern();
     let init: Expression | null = null;
     if (current().type === "Equals") {
       eat("Equals");
@@ -74,17 +103,65 @@ export function parse(source: string): Program {
     eat("Function");
     const id = parseIdentifier();
     eat("LeftParen");
+    resetParamState();
     const params: { type: "Identifier"; name: string }[] = [];
     if (current().type !== "RightParen") {
-      params.push(parseIdentifier());
+      params.push(parseParam());
       while (current().type === "Comma") {
         eat("Comma");
-        params.push(parseIdentifier());
+        params.push(parseParam());
       }
     }
     eat("RightParen");
     const body = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
     return { type: "FunctionDeclaration", id, params, body };
+  }
+
+  // ClassDeclaration = 'class' Identifier ('extends' Expression)? '{' MethodDefinition* '}'
+  function parseClassDeclaration(): Statement {
+    eat("Class");
+    const id = parseIdentifier();
+
+    let superClass: Expression | null = null;
+    if (current().type === "Extends") {
+      eat("Extends");
+      superClass = parseAssignment();
+    }
+
+    eat("LeftBrace");
+    const methods: any[] = [];
+    while (current().type !== "RightBrace") {
+      const key = parseIdentifier();
+      eat("LeftParen");
+      resetParamState();
+      const params: any[] = [];
+      if (current().type !== "RightParen") {
+        params.push(parseParam());
+        while (current().type === "Comma") {
+          eat("Comma");
+          params.push(parseParam());
+        }
+      }
+      eat("RightParen");
+      const body = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
+
+      const kind = key.name === "constructor" ? "constructor" : "method";
+      methods.push({
+        type: "MethodDefinition",
+        key,
+        value: { type: "FunctionExpression", id: null, params, body },
+        kind,
+        static: false,
+      });
+    }
+    eat("RightBrace");
+
+    return {
+      type: "ClassDeclaration",
+      id,
+      superClass,
+      body: { type: "ClassBody", body: methods },
+    };
   }
 
   // ReturnStatement = 'return' Expression? ';'
@@ -158,27 +235,66 @@ export function parse(source: string): Program {
     return { type: "WhileStatement", test, body };
   }
 
-  // ForStatement = 'for' '(' (var decl | expr | ε) ';' expr? ';' expr? ')' Statement
+  // ForStatement or ForOfStatement
   function parseForStatement(): Statement {
     eat("For");
     eat("LeftParen");
 
-    // init
-    let init: any = null;
+    // for (var/let/const ...  of  expr) → ForOfStatement
+    // for (var/let/const ... ;    ...) → ForStatement
     if (current().type === "Var" || current().type === "Let" || current().type === "Const") {
-      init = parseVariableDeclaration(); // includes ';'
-    } else if (current().type !== "Semicolon") {
+      const kindToken = eat(current().type);
+      const kind = kindToken.value as "var" | "let" | "const";
+      const id = parseBindingPattern();
+
+      // for...of
+      if (current().type === "Of") {
+        eat("Of");
+        const right = parseExpression();
+        eat("RightParen");
+        const body = parseStatement();
+        const left: any = {
+          type: "VariableDeclaration",
+          declarations: [{ type: "VariableDeclarator", id, init: null }],
+          kind,
+        };
+        return { type: "ForOfStatement", left, right, body };
+      }
+
+      // 通常の for — init は VariableDeclaration
+      let init: Expression | null = null;
+      if (current().type === "Equals") {
+        eat("Equals");
+        init = parseExpression();
+      }
+      eat("Semicolon");
+      const varDecl: any = {
+        type: "VariableDeclaration",
+        declarations: [{ type: "VariableDeclarator", id, init }],
+        kind,
+      };
+
+      let test: Expression | null = null;
+      if (current().type !== "Semicolon") test = parseExpression();
+      eat("Semicolon");
+      let update: Expression | null = null;
+      if (current().type !== "RightParen") update = parseExpression();
+      eat("RightParen");
+      const body = parseStatement();
+      return { type: "ForStatement", init: varDecl, test, update, body };
+    }
+
+    // init が式 or 空
+    let init: any = null;
+    if (current().type !== "Semicolon") {
       init = parseExpression();
       eat("Semicolon");
     } else {
       eat("Semicolon");
     }
 
-    // test
     let test: Expression | null = null;
-    if (current().type !== "Semicolon") {
-      test = parseExpression();
-    }
+    if (current().type !== "Semicolon") test = parseExpression();
     eat("Semicolon");
 
     // update
@@ -197,10 +313,67 @@ export function parse(source: string): Program {
     eat("LeftBrace");
     const body: Statement[] = [];
     while (current().type !== "RightBrace") {
-      body.push(parseStatement());
+      body.push(parseStatementOrDeclaration());
     }
     eat("RightBrace");
     return { type: "BlockStatement", body };
+  }
+
+  // パラメータ1つをパース（...rest 対応）
+  let _lastParamWasRest = false;
+  function parseParam(): any {
+    if (_lastParamWasRest) {
+      throw new SyntaxError("Rest parameter must be last formal parameter");
+    }
+    if (current().type === "DotDotDot") {
+      eat("DotDotDot");
+      _lastParamWasRest = true;
+      return { type: "RestElement", argument: parseIdentifier() };
+    }
+    return parseBindingPattern();
+  }
+  function resetParamState(): void {
+    _lastParamWasRest = false;
+  }
+
+  // Pattern = Identifier | ObjectPattern | ArrayPattern
+  function parseBindingPattern(): any {
+    if (current().type === "LeftBrace") return parseObjectPattern();
+    if (current().type === "LeftBracket") return parseArrayPattern();
+    return parseIdentifier();
+  }
+
+  // ObjectPattern = '{' (Identifier (',' Identifier)*)? '}'
+  // ネスト対応: { a: { b } } → key: a, value: ObjectPattern
+  function parseObjectPattern(): any {
+    eat("LeftBrace");
+    const properties: any[] = [];
+    while (current().type !== "RightBrace") {
+      const key = parseIdentifier();
+      let value: any;
+      if (current().type === "Colon") {
+        eat("Colon");
+        value = parseBindingPattern();
+      } else {
+        value = { type: "Identifier", name: key.name };
+      }
+      properties.push({ type: "Property", key, value, kind: "init" });
+      if (current().type === "Comma") eat("Comma");
+    }
+    eat("RightBrace");
+    return { type: "ObjectPattern", properties };
+  }
+
+  // ArrayPattern = '[' (Pattern (',' Pattern)*)? ']'
+  function parseArrayPattern(): any {
+    eat("LeftBracket");
+    const elements: any[] = [];
+    while (current().type !== "RightBracket") {
+      elements.push(parseBindingPattern());
+      if (current().type === "Comma") eat("Comma");
+    }
+    eat("RightBracket");
+    return { type: "ArrayPattern", elements };
   }
 
   function parseIdentifier() {
@@ -208,23 +381,133 @@ export function parse(source: string): Program {
     return { type: "Identifier" as const, name: token.value };
   }
 
-  // Expression = Assignment
+  // Expression = Assignment (',' Assignment)*
   function parseExpression(): Expression {
-    return parseAssignment();
+    let expr = parseAssignment();
+    if (current().type === "Comma") {
+      const expressions: Expression[] = [expr];
+      while (current().type === "Comma") {
+        eat("Comma");
+        expressions.push(parseAssignment());
+      }
+      return { type: "SequenceExpression", expressions };
+    }
+    return expr;
   }
 
-  // Assignment = LogicalOr ('=' Assignment)?
+  // Assignment = ArrowFunction | LogicalOr ('=' Assignment)?
   function parseAssignment(): Expression {
+    // 単一引数アロー: `ident =>`
+    if (current().type === "Identifier" && tokens[pos + 1]?.type === "Arrow") {
+      const param = parseIdentifier();
+      eat("Arrow");
+      return parseArrowBody([param]);
+    }
+
+    // 括弧付きアロー: `() =>`, `(a) =>`, `(a, b) =>` を先読みで判定
+    if (current().type === "LeftParen" && isArrowParams()) {
+      const params = parseArrowParams();
+      eat("Arrow");
+      return parseArrowBody(params);
+    }
+
     const left = parseLogicalOr();
+
     if (current().type === "Equals") {
       eat("Equals");
       const right = parseAssignment();
+      // カバー文法: ObjectExpression / ArrayExpression をパターンに変換
+      if (left.type === "ObjectExpression") {
+        return { type: "AssignmentExpression", operator: "=", left: exprToObjectPattern(left), right };
+      }
+      if (left.type === "ArrayExpression") {
+        return { type: "AssignmentExpression", operator: "=", left: exprToArrayPattern(left), right };
+      }
       if (left.type !== "Identifier" && left.type !== "MemberExpression") {
         throw new SyntaxError("Invalid left-hand side in assignment");
       }
       return { type: "AssignmentExpression", operator: "=", left, right };
     }
     return left;
+  }
+
+  // カバー文法: ObjectExpression → ObjectPattern に変換
+  function exprToObjectPattern(expr: any): any {
+    const properties = expr.properties.map((prop: any) => {
+      // { a: expr } → { key: a, value: Pattern }
+      // { a } → shorthand: { key: a, value: Identifier(a) }
+      let value: any;
+      if (prop.value.type === "Identifier") {
+        value = prop.value;
+      } else if (prop.value.type === "ObjectExpression") {
+        value = exprToObjectPattern(prop.value);
+      } else if (prop.value.type === "ArrayExpression") {
+        value = exprToArrayPattern(prop.value);
+      } else {
+        throw new SyntaxError("Invalid destructuring assignment target");
+      }
+      return { type: "Property", key: prop.key, value, kind: "init" };
+    });
+    return { type: "ObjectPattern", properties };
+  }
+
+  // カバー文法: ArrayExpression → ArrayPattern に変換
+  function exprToArrayPattern(expr: any): any {
+    const elements = expr.elements.map((el: any) => {
+      if (!el) return null;
+      if (el.type === "Identifier") return el;
+      if (el.type === "ObjectExpression") return exprToObjectPattern(el);
+      if (el.type === "ArrayExpression") return exprToArrayPattern(el);
+      throw new SyntaxError("Invalid destructuring assignment target");
+    });
+    return { type: "ArrayPattern", elements };
+  }
+
+  // 先読みで (ident, ident, ...) => パターンかどうかを判定
+  function isArrowParams(): boolean {
+    let i = pos + 1; // LeftParen の次
+    // () => のケース
+    if (tokens[i]?.type === "RightParen" && tokens[i + 1]?.type === "Arrow") return true;
+    // (ident) => or (ident, ident, ...) => のケース
+    while (i < tokens.length) {
+      if (tokens[i]?.type !== "Identifier") return false;
+      i++;
+      if (tokens[i]?.type === "RightParen") {
+        return tokens[i + 1]?.type === "Arrow";
+      }
+      if (tokens[i]?.type === "Comma") {
+        i++;
+        continue;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  // アロー関数のパラメータリストをパース
+  function parseArrowParams(): { type: "Identifier"; name: string }[] {
+    eat("LeftParen");
+    resetParamState();
+    const params: { type: "Identifier"; name: string }[] = [];
+    if (current().type !== "RightParen") {
+      params.push(parseParam());
+      while (current().type === "Comma") {
+        eat("Comma");
+        params.push(parseParam());
+      }
+    }
+    eat("RightParen");
+    return params;
+  }
+
+  // アロー関数の本体をパース
+  function parseArrowBody(params: { type: "Identifier"; name: string }[]): Expression {
+    if (current().type === "LeftBrace") {
+      const body = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
+      return { type: "ArrowFunctionExpression", params, body, expression: false };
+    }
+    const body = parseAssignment();
+    return { type: "ArrowFunctionExpression", params, body, expression: true };
   }
 
   // LogicalOr = LogicalAnd ('||' LogicalAnd)*
@@ -335,19 +618,34 @@ export function parse(source: string): Program {
     eat("New");
     // callee は Primary のみ（MemberExpression チェーンはしない）
     const callee = parsePrimary();
-    let args: Expression[] = [];
+    let args: any[] = [];
     if (current().type === "LeftParen") {
       eat("LeftParen");
-      if (current().type !== "RightParen") {
-        args.push(parseExpression());
-        while (current().type === "Comma") {
-          eat("Comma");
-          args.push(parseExpression());
-        }
-      }
+      args = parseArguments();
       eat("RightParen");
     }
     return { type: "NewExpression", callee, arguments: args };
+  }
+
+  // 引数リストのパース（SpreadElement 対応）
+  function parseArguments(): any[] {
+    const args: any[] = [];
+    if (current().type !== "RightParen") {
+      args.push(parseCallArgument());
+      while (current().type === "Comma") {
+        eat("Comma");
+        args.push(parseCallArgument());
+      }
+    }
+    return args;
+  }
+
+  function parseCallArgument(): any {
+    if (current().type === "DotDotDot") {
+      eat("DotDotDot");
+      return { type: "SpreadElement", argument: parseAssignment() };
+    }
+    return parseAssignment();
   }
 
   // CallExpression = Primary (('(' Arguments ')') | ('.' Identifier) | ('[' Expression ']'))*
@@ -356,14 +654,7 @@ export function parse(source: string): Program {
     while (true) {
       if (current().type === "LeftParen") {
         eat("LeftParen");
-        const args: Expression[] = [];
-        if (current().type !== "RightParen") {
-          args.push(parseExpression());
-          while (current().type === "Comma") {
-            eat("Comma");
-            args.push(parseExpression());
-          }
-        }
+        const args = parseArguments();
         eat("RightParen");
         expr = { type: "CallExpression", callee: expr, arguments: args };
       } else if (current().type === "Dot") {
@@ -407,8 +698,20 @@ export function parse(source: string): Program {
       case "This":
         eat("This");
         return { type: "ThisExpression" };
+      case "Super":
+        eat("Super");
+        return { type: "Identifier", name: "__super__" };
       case "Function":
         return parseFunctionExpression();
+      case "NoSubstitutionTemplate":
+        eat("NoSubstitutionTemplate");
+        return {
+          type: "TemplateLiteral",
+          quasis: [{ type: "TemplateElement", value: { raw: token.value, cooked: token.value }, tail: true }],
+          expressions: [],
+        };
+      case "TemplateHead":
+        return parseTemplateLiteral();
       case "LeftBrace":
         return parseObjectExpression();
       case "LeftBracket":
@@ -434,12 +737,13 @@ export function parse(source: string): Program {
       id = parseIdentifier();
     }
     eat("LeftParen");
+    resetParamState();
     const params: { type: "Identifier"; name: string }[] = [];
     if (current().type !== "RightParen") {
-      params.push(parseIdentifier());
+      params.push(parseParam());
       while (current().type === "Comma") {
         eat("Comma");
-        params.push(parseIdentifier());
+        params.push(parseParam());
       }
     }
     eat("RightParen");
@@ -447,11 +751,39 @@ export function parse(source: string): Program {
     return { type: "FunctionExpression", id, params, body };
   }
 
-  // ObjectExpression = '{' (Property (',' Property)*)? '}'
+  // TemplateLiteral = TemplateHead Expression (TemplateMiddle Expression)* TemplateTail
+  function parseTemplateLiteral(): Expression {
+    const quasis: { type: "TemplateElement"; value: { raw: string; cooked: string }; tail: boolean }[] = [];
+    const expressions: Expression[] = [];
+
+    const head = eat("TemplateHead");
+    quasis.push({ type: "TemplateElement", value: { raw: head.value, cooked: head.value }, tail: false });
+    expressions.push(parseExpression());
+
+    while (current().type === "TemplateMiddle") {
+      const mid = eat("TemplateMiddle");
+      quasis.push({ type: "TemplateElement", value: { raw: mid.value, cooked: mid.value }, tail: false });
+      expressions.push(parseExpression());
+    }
+
+    const tail = eat("TemplateTail");
+    quasis.push({ type: "TemplateElement", value: { raw: tail.value, cooked: tail.value }, tail: true });
+
+    return { type: "TemplateLiteral", quasis, expressions };
+  }
+
+  // ObjectExpression = '{' (Property | SpreadElement (',' ...))* '}'
   function parseObjectExpression(): Expression {
     eat("LeftBrace");
-    const properties: { type: "Property"; key: any; value: Expression; kind: "init" }[] = [];
+    const properties: any[] = [];
     while (current().type !== "RightBrace") {
+      // SpreadElement: { ...obj }
+      if (current().type === "DotDotDot") {
+        eat("DotDotDot");
+        properties.push({ type: "SpreadElement", argument: parseAssignment() });
+        if (current().type === "Comma") eat("Comma");
+        continue;
+      }
       let key: { type: "Identifier"; name: string } | { type: "Literal"; value: string | number };
       if (current().type === "Identifier") {
         const t = eat("Identifier");
@@ -467,8 +799,17 @@ export function parse(source: string): Program {
           `Unexpected token ${current().type} as object key at line ${current().line}, column ${current().column}`
         );
       }
-      eat("Colon");
-      const value = parseExpression();
+      let value: Expression;
+      if (current().type === "Colon") {
+        eat("Colon");
+        value = parseAssignment();
+      } else {
+        // ショートハンド: { a } → { a: a }
+        if (key.type !== "Identifier") {
+          throw new SyntaxError("Shorthand property must be an identifier");
+        }
+        value = { type: "Identifier", name: key.name };
+      }
       properties.push({ type: "Property", key, value, kind: "init" });
       if (current().type === "Comma") {
         eat("Comma");
@@ -478,16 +819,24 @@ export function parse(source: string): Program {
     return { type: "ObjectExpression", properties };
   }
 
-  // ArrayExpression = '[' (Expression (',' Expression)* ','?)? ']'
+  // ArrayExpression = '[' (Element (',' Element)* ','?)? ']'
+  function parseArrayElement(): any {
+    if (current().type === "DotDotDot") {
+      eat("DotDotDot");
+      return { type: "SpreadElement", argument: parseAssignment() };
+    }
+    return parseAssignment();
+  }
+
   function parseArrayExpression(): Expression {
     eat("LeftBracket");
-    const elements: Expression[] = [];
+    const elements: any[] = [];
     if (current().type !== "RightBracket") {
-      elements.push(parseExpression());
+      elements.push(parseArrayElement());
       while (current().type === "Comma") {
         eat("Comma");
-        if (current().type === "RightBracket") break; // trailing comma
-        elements.push(parseExpression());
+        if (current().type === "RightBracket") break;
+        elements.push(parseArrayElement());
       }
     }
     eat("RightBracket");
