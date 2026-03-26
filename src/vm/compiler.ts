@@ -15,6 +15,8 @@ class BytecodeCompiler {
   private locals: Map<string, number> = new Map();
   private localCount = 0;
   private paramCount = 0;
+  // スコープスタック: ブロックスコープに入る時にローカルのスナップショットを保存
+  private scopeStack: Map<string, number>[] = [];
   private handlers: ExceptionHandler[] = [];
   private parent: BytecodeCompiler | null;
   private isFunction: boolean;
@@ -100,6 +102,40 @@ class BytecodeCompiler {
     };
   }
 
+  // 変数バインディング: スタックトップの値を変数に格納して Pop
+  compileBindingTarget(id: any): void {
+    if (id.type === "Identifier") {
+      if (this.isFunction) {
+        const slot = this.resolveLocal(id.name) ?? this.declareLocal(id.name);
+        this.emit("StaLocal", slot);
+      } else {
+        const nameIdx = this.addConstant(id.name);
+        this.emit("StaGlobal", nameIdx);
+      }
+      this.emit("Pop");
+    } else if (id.type === "ObjectPattern") {
+      // stack: obj → 各プロパティを取り出す
+      for (const prop of id.properties) {
+        this.emit("Dup"); // obj を残す
+        const nameIdx = this.addConstant(prop.key.name);
+        this.emit("GetProperty", nameIdx);
+        this.compileBindingTarget(prop.value);
+      }
+      this.emit("Pop"); // obj を捨てる
+    } else if (id.type === "ArrayPattern") {
+      // stack: arr → 各要素を取り出す
+      for (let i = 0; i < id.elements.length; i++) {
+        if (id.elements[i]) {
+          this.emit("Dup"); // arr を残す
+          this.emit("LdaConst", this.addConstant(i));
+          this.emit("GetPropertyComputed");
+          this.compileBindingTarget(id.elements[i]);
+        }
+      }
+      this.emit("Pop"); // arr を捨てる
+    }
+  }
+
   compileProgram(program: Program): void {
     for (let i = 0; i < program.body.length; i++) {
       const stmt = program.body[i];
@@ -141,16 +177,7 @@ class BytecodeCompiler {
           } else {
             this.emit("LdaUndefined");
           }
-          if (decl.id.type === "Identifier") {
-            if (this.isFunction) {
-              const slot = this.resolveLocal(decl.id.name) ?? this.declareLocal(decl.id.name);
-              this.emit("StaLocal", slot);
-            } else {
-              const nameIdx = this.addConstant(decl.id.name);
-              this.emit("StaGlobal", nameIdx);
-            }
-            this.emit("Pop");
-          }
+          this.compileBindingTarget(decl.id);
         }
         break;
       }
@@ -293,9 +320,78 @@ class BytecodeCompiler {
       }
 
       case "BlockStatement": {
+        const hasBlockScoped = this.isFunction && stmt.body.some(
+          (s: any) => s.type === "VariableDeclaration" && s.kind !== "var"
+        );
+        if (hasBlockScoped) {
+          // スコープを push — 同名変数は新しいスロットに割り当てられる
+          this.scopeStack.push(new Map(this.locals));
+          // ブロック内の let/const 変数を強制的に新スロットに割り当て
+          for (const s of stmt.body) {
+            if ((s as any).type === "VariableDeclaration" && (s as any).kind !== "var") {
+              for (const decl of (s as any).declarations) {
+                if (decl.id.type === "Identifier") {
+                  // 既存のマッピングを削除して新スロットを強制
+                  this.locals.delete(decl.id.name);
+                }
+              }
+            }
+          }
+        }
         for (const s of stmt.body) {
           this.compileStatement(s);
         }
+        if (hasBlockScoped) {
+          this.locals = this.scopeStack.pop()!;
+        }
+        break;
+      }
+
+      case "ClassDeclaration": {
+        // constructor を BytecodeFunction にコンパイル
+        const ctorMethod = stmt.body.body.find((m: any) => m.kind === "constructor");
+        if (ctorMethod) {
+          const fnCompiler = new BytecodeCompiler(this);
+          fnCompiler.compileFunctionBody(ctorMethod.value.params, ctorMethod.value.body.body);
+          const ctorFunc = fnCompiler.finish(stmt.id.name);
+          // prototype を事前に付与
+          (ctorFunc as any).prototype = {};
+          const ctorIdx = this.addConstant(ctorFunc);
+          this.emit("LdaConst", ctorIdx);
+        } else {
+          const fnCompiler = new BytecodeCompiler(this);
+          fnCompiler.compileFunctionBody([], []);
+          const ctorFunc = fnCompiler.finish(stmt.id.name);
+          (ctorFunc as any).prototype = {};
+          const ctorIdx = this.addConstant(ctorFunc);
+          this.emit("LdaConst", ctorIdx);
+        }
+        // メソッドを prototype に設定
+        for (const method of stmt.body.body) {
+          if (method.kind === "method") {
+            this.emit("Dup"); // ctorFunc を残す
+            const protoNameIdx = this.addConstant("prototype");
+            this.emit("GetProperty", protoNameIdx);
+            // prototype はオブジェクトなのでスタックに載る
+            const fnCompiler = new BytecodeCompiler(this);
+            fnCompiler.compileFunctionBody(method.value.params, method.value.body.body);
+            const methodFunc = fnCompiler.finish(method.key.name);
+            const methodIdx = this.addConstant(methodFunc);
+            this.emit("LdaConst", methodIdx);
+            const methodNameIdx = this.addConstant(method.key.name);
+            this.emit("SetProperty", methodNameIdx);
+            this.emit("Pop"); // prototype を捨てる
+          }
+        }
+        // クラス名を登録
+        if (this.isFunction) {
+          const slot = this.resolveLocal(stmt.id.name) ?? this.declareLocal(stmt.id.name);
+          this.emit("StaLocal", slot);
+        } else {
+          const nameIdx = this.addConstant(stmt.id.name);
+          this.emit("StaGlobal", nameIdx);
+        }
+        this.emit("Pop");
         break;
       }
 
@@ -399,6 +495,28 @@ class BytecodeCompiler {
         break;
       }
 
+      case "ThisExpression":
+        this.emit("LoadThis");
+        break;
+
+      case "NewExpression": {
+        for (const arg of expr.arguments) {
+          this.compileExpression(arg as Expression);
+        }
+        this.compileExpression(expr.callee);
+        this.emit("Construct", expr.arguments.length);
+        break;
+      }
+
+      case "FunctionExpression": {
+        const fnCompiler = new BytecodeCompiler(this);
+        fnCompiler.compileFunctionBody(expr.params, expr.body.body);
+        const fnBytecode = fnCompiler.finish(expr.id?.name ?? "<anonymous>");
+        const fnIndex = this.addConstant(fnBytecode);
+        this.emit("LdaConst", fnIndex);
+        break;
+      }
+
       case "AssignmentExpression": {
         if (expr.left.type === "MemberExpression") {
           // stack: value, obj → SetPropertyAssign → pop obj, pop value, assign, push value
@@ -459,10 +577,25 @@ class BytecodeCompiler {
       }
 
       case "ArrayExpression": {
-        for (const el of expr.elements) {
-          this.compileExpression(el);
+        const hasSpread = expr.elements.some((el: any) => el.type === "SpreadElement");
+        if (hasSpread) {
+          // SpreadElement がある場合: 空配列を作って push/spread
+          this.emit("CreateArray", 0);
+          for (const el of expr.elements) {
+            if ((el as any).type === "SpreadElement") {
+              this.compileExpression((el as any).argument);
+              this.emit("ArraySpread");
+            } else {
+              this.compileExpression(el);
+              this.emit("ArrayPush");
+            }
+          }
+        } else {
+          for (const el of expr.elements) {
+            this.compileExpression(el);
+          }
+          this.emit("CreateArray", expr.elements.length);
         }
-        this.emit("CreateArray", expr.elements.length);
         break;
       }
 
@@ -502,6 +635,7 @@ class BytecodeCompiler {
           "!=": "NotEqual", "!==": "StrictNotEqual",
           "<": "LessThan", ">": "GreaterThan",
           "<=": "LessEqual", ">=": "GreaterEqual",
+          "in": "In", "instanceof": "Instanceof",
         };
         const op = opMap[expr.operator];
         if (!op) throw new Error(`Unsupported binary operator: ${expr.operator}`);

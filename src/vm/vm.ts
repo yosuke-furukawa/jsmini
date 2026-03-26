@@ -4,6 +4,7 @@ type CallFrame = {
   func: BytecodeFunction;
   pc: number;
   locals: unknown[];
+  thisValue: unknown;
 };
 
 // スタックベースの Bytecode VM
@@ -35,6 +36,7 @@ export class VM {
       func,
       pc: 0,
       locals: new Array(func.localCount).fill(undefined),
+      thisValue: undefined,
     });
 
     return this.run();
@@ -249,6 +251,42 @@ export class VM {
           break;
         }
 
+        // 配列操作
+        case "ArrayPush": {
+          const value = this.pop();
+          const arr = this.peek() as unknown[];
+          arr.push(value);
+          break;
+        }
+        case "ArraySpread": {
+          const iterable = this.pop() as unknown[];
+          const arr = this.peek() as unknown[];
+          arr.push(...iterable);
+          break;
+        }
+
+        // in / instanceof
+        case "In": {
+          const right = this.pop() as Record<string, unknown>;
+          const left = this.pop();
+          this.push(String(left) in right);
+          break;
+        }
+        case "Instanceof": {
+          const right = this.pop() as any;
+          const left = this.pop() as any;
+          // 簡易: prototype チェーンを辿る
+          const proto = right?.prototype;
+          let current = left?.__proto__;
+          let found = false;
+          while (current) {
+            if (current === proto) { found = true; break; }
+            current = current.__proto__;
+          }
+          this.push(found);
+          break;
+        }
+
         // typeof
         case "TypeOf": {
           const val = this.pop();
@@ -307,7 +345,7 @@ export class VM {
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals });
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined });
           } else {
             throw new Error("Not a function");
           }
@@ -329,24 +367,68 @@ export class VM {
             const result = (method as Function).apply(thisObj, args);
             this.push(result);
           } else if (typeof method === "object" && method !== null && "bytecode" in method) {
-            // BytecodeFunction メソッド — TODO: this バインド
             const fn = method as BytecodeFunction;
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals });
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj });
           } else {
             throw new Error("Not a function");
           }
           break;
         }
 
+        // this
+        case "LoadThis":
+          this.push(frame.thisValue);
+          break;
+
+        // new
+        case "Construct": {
+          const argc = instr.operand!;
+          const ctor = this.pop() as any;
+          const args: unknown[] = [];
+          for (let i = 0; i < argc; i++) {
+            args.unshift(this.pop());
+          }
+          // prototype が未設定なら作成
+          if (ctor.bytecode && !ctor.prototype) {
+            ctor.prototype = {};
+          }
+          const newObj: Record<string, unknown> = {};
+          if (ctor.prototype) {
+            newObj.__proto__ = ctor.prototype;
+          }
+          if (ctor.bytecode) {
+            // BytecodeFunction
+            const locals = new Array(ctor.localCount).fill(undefined);
+            for (let i = 0; i < ctor.paramCount; i++) {
+              locals[i] = args[i] ?? undefined;
+            }
+            this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj });
+            // Construct は Return 時に特殊処理が必要
+            // → Return で戻り値がオブジェクトでなければ newObj を返す
+            // 簡易: __constructing フラグで管理
+            (frame as any).__pendingNewObj = newObj;
+          }
+          break;
+        }
+
         // Return
         case "Return": {
-          const returnValue = this.pop();
+          let returnValue = this.pop();
           this.frames.pop();
+          // Construct からの戻り: returnValue がオブジェクトでなければ this (newObj) を返す
           if (this.frames.length > 0) {
+            const callerFrame = this.frames[this.frames.length - 1] as any;
+            if (callerFrame.__pendingNewObj !== undefined) {
+              const newObj = callerFrame.__pendingNewObj;
+              delete callerFrame.__pendingNewObj;
+              if (typeof returnValue !== "object" || returnValue === null) {
+                returnValue = newObj;
+              }
+            }
             this.push(returnValue);
           } else {
             return returnValue;

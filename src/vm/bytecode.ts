@@ -44,6 +44,12 @@ export type Opcode =
   | "GetPropertyComputed" // pop key, pop obj, push obj[key]
   | "SetPropertyComputed" // pop value, pop key, peek obj, obj[key] = value
   | "CreateArray"     // CreateArray <count> — pop count 個の要素、配列を push
+  | "ArrayPush"       // pop value, peek array, array.push(value)
+  | "ArraySpread"     // pop iterable, peek array, array.push(...iterable)
+
+  // in / instanceof
+  | "In"              // pop right, pop left, push (left in right)
+  | "Instanceof"      // pop right, pop left, push (left instanceof right)
 
   // typeof / throw
   | "TypeOf"          // pop 1つ、typeof 文字列を push
@@ -58,6 +64,8 @@ export type Opcode =
   // 関数
   | "Call"            // Call <argc> — スタックから関数 + argc 個の引数を pop、呼び出し
   | "CallMethod"      // CallMethod <argc> — メソッド呼び出し (スタック: ...args, obj, method)
+  | "Construct"       // Construct <argc> — new 演算子
+  | "LoadThis"        // 現在の this を push
 
   // 制御フロー
   | "Jump"            // Jump <offset> — 無条件ジャンプ (pc = operand)
