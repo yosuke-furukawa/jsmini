@@ -254,30 +254,209 @@ npm start -- --print-bytecode 'function add(a, b) { return a + b; }'
 
 ---
 
-## 実装順序
+## 実装ステップ (詳細)
+
+Phase 1 の時と同じく、最小のパイプラインを最初に貫通させて構文を足していく。
+
+---
+
+### Step 4-1 [P0] パイプライン貫通: `1 + 2 * 3` がバイトコード経由で動く
+
+**最重要。ここで Compiler → Bytecode → VM の全パイプラインを繋ぐ。**
+
+- [ ] `src/vm/bytecode.ts` — Opcode 定義 + Instruction 型
+  - 最初は `LdaConst`, `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Negate`, `Pop`, `Return` だけ
+- [ ] `src/vm/compiler.ts` — BytecodeCompiler
+  - `NumericLiteral` → `LdaConst`
+  - `BinaryExpression` → 左コンパイル、右コンパイル、`Add`/`Sub`/...
+  - `ExpressionStatement` → 式コンパイル + `Pop`
+  - `Program` → 各文をコンパイル
+  - 定数テーブル管理
+- [ ] `src/vm/vm.ts` — VM
+  - オペランドスタック (`unknown[]`)
+  - メインループ: `while (pc < code.length) { switch ... }`
+  - 定数ロード + 算術演算のみ
+- [ ] `src/vm/vm.test.ts` — テスト
+  - `"1 + 2 * 3"` → `7`
+  - `"(1 + 2) * 3"` → `9`
+  - `"10 % 3"` → `1`
+- [ ] `vmEvaluate(source)` 関数を export（tree-walking の `evaluate` と同じ I/F）
 
 ```
-Step 4-1: 命令セット設計 + bytecode.ts
-    ↓
-Step 4-2a: コンパイラ基本 (リテラル + 算術)
-    ↓
-Step 4-2b: コンパイラ (変数 + 制御フロー)
-    ↓
-Step 4-2c: コンパイラ (関数)
-    ↓
-Step 4-3a: VM 基本 (算術 + 変数)
-    ↓
-Step 4-3b: VM (制御フロー + 関数)
-    ↓
-Step 4-4: エントリポイント統合 + --print-bytecode
-    ↓
-Step 4-5: 全テスト通過確認
-    ↓
-Step 4-6: Phase 2-3 構文の VM 対応
+ゴール: vmEvaluate("1 + 2 * 3;") === 7
 ```
 
-方針: **最初は Phase 1 相当 (数値演算 + 変数 + if + for + 関数) だけを VM で動かす。**
-Phase 2-3 の構文 (オブジェクト、クラス、分割代入等) は後から段階的に追加。
+---
+
+### Step 4-2 [P0] 変数 + 制御フロー
+
+- [ ] Opcode 追加:
+  - `LdaGlobal`, `StaGlobal` (グローバル変数)
+  - `LdaLocal`, `StaLocal` (ローカル変数スロット)
+  - `LdaUndefined`, `LdaNull`, `LdaTrue`, `LdaFalse`
+  - `Jump`, `JumpIfFalse`, `JumpIfTrue`
+  - `Equal`, `StrictEqual`, `NotEqual`, `StrictNotEqual`
+  - `LessThan`, `GreaterThan`, `LessEqual`, `GreaterEqual`
+  - `LogicalNot`
+- [ ] Compiler 拡張:
+  - `VariableDeclaration` → ローカルスロット割り当て + `StaLocal`
+  - `Identifier` → `LdaLocal` / `LdaGlobal`
+  - `AssignmentExpression` → 右辺コンパイル + `StaLocal` / `StaGlobal`
+  - `IfStatement` → `JumpIfFalse` + パッチバック
+  - `WhileStatement` → ループ先頭 + `JumpIfFalse` + `Jump`（パッチバック）
+  - `ForStatement` → init + [test + `JumpIfFalse` + body + update + `Jump`]
+  - `BlockStatement`
+- [ ] VM 拡張:
+  - グローバル変数テーブル
+  - ローカル変数スロット
+  - ジャンプ命令
+- [ ] テスト
+  - `var x = 10; x + 5` → `15`
+  - `if (true) { 1; } else { 2; }` → `1`
+  - `var sum = 0; for (var i = 0; i < 5; i = i + 1) { sum = sum + i; } sum;` → `10`
+
+```
+ゴール: 変数、if/else、while、for が VM で動く
+```
+
+---
+
+### Step 4-3 [P1] 関数
+
+- [ ] Opcode 追加:
+  - `Call <argc>`
+  - `Return`
+- [ ] Compiler 拡張:
+  - `FunctionDeclaration` → 内部関数を別途コンパイル、定数テーブルに格納
+  - `CallExpression` → 引数コンパイル + 関数ロード + `Call`
+  - `ReturnStatement` → `Return`
+- [ ] VM 拡張:
+  - `CallFrame` (pc, bp, locals, func)
+  - `Call`: 新しい CallFrame を push、引数をローカルスロットにバインド
+  - `Return`: CallFrame を pop、戻り値をスタックに push
+- [ ] テスト
+  - `function add(a, b) { return a + b; } add(3, 4)` → `7`
+  - 再帰: `factorial(5)` → `120`
+  - クロージャ: 外側の変数をキャプチャ
+
+```
+ゴール: Phase 1 相当の全テストが VM で通る
+```
+
+---
+
+### Step 4-4 [P1] `--print-bytecode` + エントリポイント統合
+
+- [ ] バイトコードの逆アセンブラ (disassembler)
+  - バイトコード列を人間が読める形式に変換
+  - 各命令のアドレス、オペコード名、オペランドを表示
+- [ ] `src/index.ts` 修正: `--vm`, `--print-bytecode` フラグ対応
+- [ ] テスト
+
+```bash
+$ npm start -- --print-bytecode 'function add(a, b) { return a + b; }'
+
+== add ==
+  0000: LdaLocal 0       ; a
+  0002: LdaLocal 1       ; b
+  0004: Add
+  0005: Return
+
+$ npm start -- --vm 'console.log(1 + 2);'
+3
+```
+
+```
+ゴール: browser-book の node --print-bytecode と同じ体験ができる
+```
+
+---
+
+### Step 4-5 [P2] 文字列 + console.log の VM 対応
+
+- [ ] `StringLiteral` → `LdaConst`
+- [ ] 文字列連結: `Add` で型チェック
+- [ ] `console.log` → 組み込み関数呼び出し
+- [ ] テスト
+
+```
+ゴール: console.log("hello " + "world") が VM で動く
+```
+
+---
+
+### Step 4-6 [P2] Phase 2 構文の VM 対応
+
+段階的に1構文ずつ追加:
+
+- [ ] オブジェクトリテラル + プロパティアクセス
+  - `CreateObject`, `SetProperty`, `GetProperty`
+- [ ] 配列リテラル
+  - `CreateArray`
+- [ ] `let` / `const` (ブロックスコープ)
+  - スコープ管理を VM 側に実装
+- [ ] `typeof`
+  - `TypeOf` 命令
+- [ ] `try` / `catch` / `throw`
+  - 例外ハンドラテーブル
+- [ ] `new`
+  - `Construct` 命令
+- [ ] `this`
+  - CallFrame に this を保持
+
+---
+
+### Step 4-7 [P3] Phase 3 構文の VM 対応
+
+- [ ] アロー関数
+- [ ] テンプレートリテラル
+- [ ] プロトタイプチェーン
+- [ ] クラス
+- [ ] 分割代入
+- [ ] スプレッド / レスト
+- [ ] `for...of`
+- [ ] `++` / `--`, 複合代入
+- [ ] `break` / `continue`
+- [ ] `in`, `instanceof`
+
+---
+
+### Step 4-8 [P3] 全テスト通過確認 + パフォーマンス比較
+
+- [ ] 全 272 ユニットテストが `vmEvaluate` でも通過
+- [ ] Test262 を VM モードで実行し、tree-walking と同じ通過率を達成
+- [ ] パフォーマンス比較: tree-walking vs bytecode VM
+  - ループの多いベンチマーク (fibonacci, sum 等)
+  - 結果を README に記載
+
+---
+
+## 実装フロー (全体)
+
+```
+Step 4-1: 1 + 2 * 3 が動く (パイプライン貫通)
+    ↓
+Step 4-2: 変数 + if/else + while/for
+    ↓
+Step 4-3: 関数 (CallFrame)
+    ↓
+  ここで Phase 1 相当が VM で動く
+    ↓
+Step 4-4: --print-bytecode + エントリポイント
+    ↓
+  ここで browser-book の解像度が上がる
+    ↓
+Step 4-5: 文字列 + console.log
+    ↓
+Step 4-6: Phase 2 構文 (オブジェクト, 配列, let/const, try/catch, new, this)
+    ↓
+Step 4-7: Phase 3 構文 (アロー, class, 分割代入, spread, for-of 等)
+    ↓
+Step 4-8: 全テスト通過 + パフォーマンス比較
+```
+
+**最初のマイルストーンは Step 4-1**。`1 + 2 * 3` → `7` がバイトコード経由で動けば、
+残りは構文を足す作業。Phase 1 の Step 1-1 と同じ「パイプライン貫通」の考え方。
 
 ---
 
@@ -287,5 +466,7 @@ Phase 2-3 の構文 (オブジェクト、クラス、分割代入等) は後か
 |---|---|
 | バイトコードジェネレータが AST からバイトコードを生成 | `BytecodeCompiler` が AST → バイトコード列 |
 | `Ldar`, `Add`, `Return` のようなバイトコード | 自分で設計した命令セット |
-| インタープリタがバイトコードを機械語に翻訳 | VM の `switch` ディスパッチループ |
+| インタープリタがバイトコードから機械語を生成し実行 | VM の `switch` ディスパッチループ |
 | `node --print-bytecode` の出力 | `--print-bytecode` で同様の出力 |
+| tree-walking → bytecode への移行の意味 | 実際に両方を実装して比較 |
+| 統計情報の収集 (Phase 5 への布石) | VM 実行中に型情報を記録する仕組みを仕込める |
