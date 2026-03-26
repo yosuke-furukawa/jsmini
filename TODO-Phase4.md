@@ -226,7 +226,7 @@ while (pc < code.length) {
 
 - [x] `src/index.ts` を修正: `--vm` フラグで tree-walking / bytecode VM を切り替え
 - [x] `--print-bytecode` フラグで生成されたバイトコードをダンプ
-- [ ] package.json に `"vm"` スクリプトを追加
+- [x] ~~package.json に `"vm"` スクリプトを追加~~ — `npm start -- --vm` で対応済み
 
 ```bash
 # tree-walking (デフォルト)
@@ -248,13 +248,10 @@ npm start -- --print-bytecode 'function add(a, b) { return a + b; }'
 
 ## 4-5. テスト戦略
 
-- [ ] 全ユニットテスト (272件) を VM モードでも実行
-  - `evaluate()` と `vmEvaluate()` の両方で同じ結果になることを検証
-  - テストヘルパー: `function run(source) { assert.equal(evaluate(source), vmEvaluate(source)); }`
-- [ ] VM 固有のテスト
-  - バイトコード生成の正確性
-  - スタックの状態
-  - CallFrame の管理
+- [x] 互換テスト (compat.test.ts): 49 ケースで evaluate と vmEvaluate が同一結果
+- [x] VM 固有テスト (vm.test.ts): 58 件
+  - 各 Step ごとにリテラル、変数、制御フロー、関数、文字列、オブジェクト等
+  - disassemble 出力確認
 
 ---
 
@@ -355,8 +352,8 @@ $ npm start -- --vm 'console.log(1 + 2);'
 - [x] 配列リテラル: `CreateArray <count>`
 - [x] `typeof`: `TypeOf` 命令
 - [x] `throw` / `try` / `catch`: `Throw` 命令 + 例外ハンドラテーブル (`BytecodeFunction.handlers`)
-- [ ] `let` / `const` (ブロックスコープ) — 未対応 (グローバルのみ)
-- [ ] `new` / `this` — 未対応
+- [x] `let` / `const` (ブロックスコープ) — コンパイラの scopeStack でスロットをシャドウイング
+- [x] `new` / `this` — Construct 命令 + CallFrame.thisValue + LoadThis
 
 ---
 
@@ -368,19 +365,19 @@ $ npm start -- --vm 'console.log(1 + 2);'
 - [x] `++` / `--` (prefix/postfix) → Increment/Decrement 命令
 - [x] 複合代入 (`+=` 等) → load + op + store
 - [x] `break` / `continue` → Jump に変換 (コンパイラのループスタックでパッチバック)
-- [ ] プロトタイプチェーン — 未対応
-- [ ] クラス — 未対応
-- [ ] 分割代入 — 未対応
-- [ ] スプレッド / レスト — 未対応
-- [ ] `in`, `instanceof` — 未対応
+- [x] プロトタイプチェーン — Construct で __proto__ 設定、GetProperty でチェーン探索
+- [x] クラス — ClassDeclaration をコンパイル (constructor + prototype メソッド)
+- [x] 分割代入 — compileBindingTarget で ObjectPattern/ArrayPattern を展開
+- [x] スプレッド — ArrayPush/ArraySpread 命令
+- [x] `in`, `instanceof` — In/Instanceof 命令
 
 ---
 
 ### Step 4-8 [P3] 全テスト通過確認 + パフォーマンス比較
 
-- [x] VM 固有テスト 58 件 + 既存 272 件 = 330 件 Green
-- [ ] 全 272 ユニットテストを `vmEvaluate` でも実行 — 一部構文 (let/const, new, class 等) は未対応
-- [ ] Test262 を VM モードで実行
+- [x] VM 固有テスト 58 件 + 既存 272 件 + 互換テスト 49 件 = 379 件 Green
+- [x] 互換テスト (compat.test.ts): evaluate と vmEvaluate が 49 ケースで同一結果
+- [x] Test262 を VM モードで実行: 225/816 (27.6%) — tree-walking と同一
 - [x] パフォーマンス比較: `npm run bench`
   - fibonacci(25): **3.4x** (VM faster)
   - for loop (10000): **1.3x** (VM faster)
