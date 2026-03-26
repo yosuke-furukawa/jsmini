@@ -3,7 +3,8 @@ import type { BytecodeFunction, Instruction } from "./bytecode.js";
 // スタックベースの Bytecode VM
 export class VM {
   private stack: unknown[] = [];
-  private sp = -1; // スタックポインタ
+  private sp = -1;
+  private globals: Map<string, unknown> = new Map(); // グローバル変数
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -140,9 +141,40 @@ export class VM {
           break;
         }
 
+        // 変数
+        case "LdaGlobal": {
+          const name = constants[instr.operand!] as string;
+          const val = this.globals.get(name);
+          this.push(val !== undefined ? val : undefined);
+          break;
+        }
+        case "StaGlobal": {
+          const name = constants[instr.operand!] as string;
+          this.globals.set(name, this.peek());
+          break;
+        }
+
+        // 制御フロー
+        case "Jump":
+          pc = instr.operand!;
+          break;
+        case "JumpIfFalse": {
+          const val = this.pop();
+          if (!val) pc = instr.operand!;
+          break;
+        }
+        case "JumpIfTrue": {
+          const val = this.pop();
+          if (val) pc = instr.operand!;
+          break;
+        }
+
         // スタック操作
         case "Pop":
           this.pop();
+          break;
+        case "Dup":
+          this.push(this.peek());
           break;
 
         case "Return":

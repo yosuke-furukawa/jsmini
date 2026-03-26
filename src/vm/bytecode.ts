@@ -30,8 +30,18 @@ export type Opcode =
   // 論理
   | "LogicalNot"      // !
 
+  // 変数
+  | "LdaGlobal"       // LdaGlobal <nameIndex> — グローバル変数を push
+  | "StaGlobal"       // StaGlobal <nameIndex> — スタックトップをグローバル変数に格納 (pop しない)
+
+  // 制御フロー
+  | "Jump"            // Jump <offset> — 無条件ジャンプ (pc = operand)
+  | "JumpIfFalse"     // JumpIfFalse <offset> — falsy なら pc = operand (pop する)
+  | "JumpIfTrue"      // JumpIfTrue <offset> — truthy なら pc = operand (pop する)
+
   // スタック操作
   | "Pop"             // スタックトップを捨てる
+  | "Dup"             // スタックトップを複製
   | "Return";         // 関数から戻る (スタックトップが戻り値)
 
 // 1つの命令

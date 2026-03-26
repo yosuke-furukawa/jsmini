@@ -80,3 +80,80 @@ describe("VM - disassemble", () => {
     assert.ok(output.includes("Add"));
   });
 });
+
+describe("VM - Step 4-2: 変数 + 制御フロー", () => {
+  it("var 宣言と変数参照ができる", () => {
+    assert.equal(vmEvaluate("var x = 10; x;"), 10);
+  });
+
+  it("変数を使った演算ができる", () => {
+    assert.equal(vmEvaluate("var x = 10; x + 5;"), 15);
+  });
+
+  it("変数同士の演算ができる", () => {
+    assert.equal(vmEvaluate("var x = 10; var y = 20; x + y;"), 30);
+  });
+
+  it("変数に式の結果を代入できる", () => {
+    assert.equal(vmEvaluate("var x = 10; var y = x + 5; y;"), 15);
+  });
+
+  it("変数を再代入できる", () => {
+    assert.equal(vmEvaluate("var x = 10; x = 20; x;"), 20);
+  });
+
+  it("初期化なしの var は undefined になる", () => {
+    assert.equal(vmEvaluate("var x; x;"), undefined);
+  });
+
+  it("if 文の consequent が実行される", () => {
+    assert.equal(vmEvaluate("var x = 0; if (true) { x = 1; } x;"), 1);
+  });
+
+  it("if 文の alternate が実行される", () => {
+    assert.equal(vmEvaluate("var x = 0; if (false) { x = 1; } else { x = 2; } x;"), 2);
+  });
+
+  it("if 文で条件式を評価できる", () => {
+    assert.equal(vmEvaluate(`
+      var x = 10;
+      var y = 0;
+      if (x > 5) { y = 1; } else { y = 2; }
+      y;
+    `), 1);
+  });
+
+  it("while で合計を計算できる", () => {
+    assert.equal(vmEvaluate(`
+      var sum = 0;
+      var i = 0;
+      while (i < 5) {
+        sum = sum + i;
+        i = i + 1;
+      }
+      sum;
+    `), 10);
+  });
+
+  it("for で合計を計算できる", () => {
+    assert.equal(vmEvaluate(`
+      var sum = 0;
+      for (var i = 0; i < 5; i = i + 1) {
+        sum = sum + i;
+      }
+      sum;
+    `), 10);
+  });
+
+  it("for のネストができる", () => {
+    assert.equal(vmEvaluate(`
+      var sum = 0;
+      for (var i = 0; i < 3; i = i + 1) {
+        for (var j = 0; j < 3; j = j + 1) {
+          sum = sum + 1;
+        }
+      }
+      sum;
+    `), 9);
+  });
+});
