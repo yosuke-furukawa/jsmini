@@ -261,16 +261,27 @@ export function parse(source: string): Program {
         return { type: "ForOfStatement", left, right, body };
       }
 
-      // 通常の for — init は VariableDeclaration
-      let init: Expression | null = null;
+      // 通常の for — init は VariableDeclaration (複数宣言子対応)
+      let firstInit: Expression | null = null;
       if (current().type === "Equals") {
         eat("Equals");
-        init = parseExpression();
+        firstInit = parseAssignment();
+      }
+      const declarations: any[] = [{ type: "VariableDeclarator", id, init: firstInit }];
+      while (current().type === "Comma") {
+        eat("Comma");
+        const nextId = parseBindingPattern();
+        let nextInit: Expression | null = null;
+        if (current().type === "Equals") {
+          eat("Equals");
+          nextInit = parseAssignment();
+        }
+        declarations.push({ type: "VariableDeclarator", id: nextId, init: nextInit });
       }
       eat("Semicolon");
       const varDecl: any = {
         type: "VariableDeclaration",
-        declarations: [{ type: "VariableDeclarator", id, init }],
+        declarations,
         kind,
       };
 

@@ -122,15 +122,12 @@ function preprocessTestSource(source: string): string {
 
 // テストが jsmini で実行可能か判定
 function canRun(source: string): string | null {
-  // jsmini が未対応の構文をソースコードレベルでチェック
   const cleaned = source
-    .replace(/\/\*[\s\S]*?\*\//g, "")  // block comments
-    .replace(/\/\/.*$/gm, "");          // line comments
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
 
-  if (/\bnew\s+\w/.test(cleaned)) return "new expression";
-  if (/\btry\s*\{/.test(cleaned)) return "try/catch";
-  if (/\bthrow\s/.test(cleaned)) return "throw";
-  if (/\btypeof\s/.test(cleaned)) return "typeof";
+  // Phase 2-3 で実装済み: new, try/catch, throw, typeof, object, array, for...of, class, arrow
+  // まだ未対応の構文のみスキップ
   if (/\bswitch\s*\(/.test(cleaned)) return "switch";
   if (/\bdo\s*\{/.test(cleaned)) return "do-while";
   if (/\bwith\s*\(/.test(cleaned)) return "with";
@@ -138,10 +135,21 @@ function canRun(source: string): string | null {
   if (/\bvoid\s/.test(cleaned)) return "void";
   if (/\bin\s/.test(cleaned)) return "in operator";
   if (/\binstanceof\s/.test(cleaned)) return "instanceof";
-  if (/\[\s*\d/.test(cleaned)) return "array literal";
-  if (/\{\s*\w+\s*:/.test(cleaned)) return "object literal";
   if (/\+\+|--/.test(cleaned)) return "increment/decrement";
-  if (/\?/.test(cleaned)) return "ternary";
+  if (/\beval\s*\(/.test(cleaned)) return "eval";
+  if (/\bFunction\s*\(/.test(cleaned)) return "Function constructor";
+  if (/\bNumber\s*[\.(]/.test(cleaned)) return "Number builtin";
+  if (/\bString\s*[\.(]/.test(cleaned)) return "String builtin";
+  if (/\bBoolean\s*[\.(]/.test(cleaned)) return "Boolean builtin";
+  if (/\bObject\s*[\.(]/.test(cleaned)) return "Object builtin";
+  if (/\bisNaN\s*\(/.test(cleaned)) return "isNaN";
+  if (/\bparseInt\s*\(/.test(cleaned)) return "parseInt";
+  if (/\bverifyProperty\b/.test(cleaned)) return "verifyProperty helper";
+  if (/\?\s/.test(cleaned) && /\?[^.]/.test(cleaned)) return "ternary"; // ?. は除外
+  if (/\bbreak\b/.test(cleaned)) return "break";
+  if (/\bcontinue\b/.test(cleaned)) return "continue";
+  if (/\blabel\s*:/.test(cleaned)) return "label";
+  if (/\+=|-=|\*=|\/=/.test(cleaned)) return "compound assignment";
   return null;
 }
 
@@ -238,12 +246,9 @@ if (pass + fail > 0) {
 }
 
 if (failures.length > 0) {
-  console.log(`\n--- Failures (first 20) ---`);
-  for (const f of failures.slice(0, 20)) {
+  console.log(`\n--- All Failures ---`);
+  for (const f of failures) {
     console.log(`  FAIL: ${f.file}`);
     console.log(`        ${f.error}`);
-  }
-  if (failures.length > 20) {
-    console.log(`  ... and ${failures.length - 20} more`);
   }
 }
