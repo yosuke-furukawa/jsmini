@@ -342,3 +342,46 @@ describe("VM - Step 4-6: Phase 2 構文", () => {
     `), 11);
   });
 });
+
+describe("VM - Step 4-7: Phase 3 構文", () => {
+  it("アロー関数が動く", () => {
+    assert.equal(vmEvaluate(`
+      var add = (a, b) => a + b;
+      add(3, 4);
+    `), 7);
+  });
+
+  it("テンプレートリテラルが動く", () => {
+    assert.equal(vmEvaluate('var name = "world"; `hello ${name}`;'), "hello world");
+  });
+
+  it("for...of が動く", () => {
+    assert.equal(vmEvaluate(`
+      var sum = 0;
+      for (var x of [10, 20, 30]) {
+        sum = sum + x;
+      }
+      sum;
+    `), 60);
+  });
+
+  it("++/-- が動く", () => {
+    assert.equal(vmEvaluate("var x = 5; x++; x;"), 6);
+    assert.equal(vmEvaluate("var x = 5; ++x;"), 6);
+  });
+
+  it("+= が動く", () => {
+    assert.equal(vmEvaluate("var x = 10; x += 5; x;"), 15);
+  });
+
+  it("break が動く", () => {
+    assert.equal(vmEvaluate(`
+      var sum = 0;
+      for (var i = 0; i < 10; i = i + 1) {
+        if (i === 5) { break; }
+        sum = sum + i;
+      }
+      sum;
+    `), 10);
+  });
+});

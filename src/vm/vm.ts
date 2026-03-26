@@ -257,6 +257,14 @@ export class VM {
           break;
         }
 
+        // 更新
+        case "Increment":
+          this.push((this.pop() as number) + 1);
+          break;
+        case "Decrement":
+          this.push((this.pop() as number) - 1);
+          break;
+
         // throw
         case "Throw": {
           const throwValue = this.pop();

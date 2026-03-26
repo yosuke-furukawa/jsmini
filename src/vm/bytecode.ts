@@ -49,6 +49,12 @@ export type Opcode =
   | "TypeOf"          // pop 1つ、typeof 文字列を push
   | "Throw"           // pop 1つ、例外を投げる
 
+  // 更新
+  | "Increment"       // pop 1つ、+1 して push
+  | "Decrement"       // pop 1つ、-1 して push
+
+  // ループ制御 (Break/Continue はコンパイラが Jump に変換するので opcode 不要)
+
   // 関数
   | "Call"            // Call <argc> — スタックから関数 + argc 個の引数を pop、呼び出し
   | "CallMethod"      // CallMethod <argc> — メソッド呼び出し (スタック: ...args, obj, method)
