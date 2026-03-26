@@ -169,8 +169,9 @@ function runTest(filePath: string): TestResult {
   if (meta.flags.includes("module")) return { file: relPath, status: "skip", error: "module" };
   if (meta.flags.includes("async")) return { file: relPath, status: "skip", error: "async" };
   if (meta.flags.includes("raw")) return { file: relPath, status: "skip", error: "raw" };
-  if (meta.flags.includes("noStrict") === false && meta.flags.includes("onlyStrict")) {
-    return { file: relPath, status: "skip", error: "onlyStrict" };
+  // jsmini は strict mode 前提で動作する。non-strict 限定テストはスキップ
+  if (meta.flags.includes("noStrict")) {
+    return { file: relPath, status: "skip", error: "noStrict (jsmini is strict-mode only)" };
   }
   if (meta.features.some((f) => UNSUPPORTED_FEATURES.includes(f))) {
     return { file: relPath, status: "skip", error: "unsupported feature" };
