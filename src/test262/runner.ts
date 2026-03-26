@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { evaluate } from "../interpreter/evaluator.js";
+import { vmEvaluate } from "../vm/index.js";
+
+const useVM = process.argv.includes("--vm");
+const run = useVM ? (s: string) => vmEvaluate(s) : (s: string) => evaluate(s);
 
 const TEST262_ROOT = path.resolve(import.meta.dirname, "../../test262");
 
@@ -134,7 +138,7 @@ function runTest(filePath: string): TestResult {
   if (meta.negative) {
     // negative test: エラーが投げられることを期待する
     try {
-      evaluate(fullSource);
+      run(fullSource);
       return { file: relPath, status: "fail", error: "Expected error but none was thrown" };
     } catch {
       return { file: relPath, status: "pass" };
@@ -197,7 +201,7 @@ for (const testFile of allTests) {
   }
 }
 
-console.log(`\n=== Test262 Results ===`);
+console.log(`\n=== Test262 Results (${useVM ? "bytecode VM" : "tree-walking"}) ===`);
 console.log(`Total: ${allTests.length}`);
 console.log(`Pass:  ${pass}`);
 console.log(`Fail:  ${fail}`);
