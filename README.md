@@ -53,7 +53,7 @@ npm install
 
 ## Playground
 
-ブラウザで試せます: https://yosuke-furukawa.github.io/jsmini/playground/
+ブラウザで試せます: https://yosuke-furukawa.github.io/jsmini/
 
 ## 使い方
 
