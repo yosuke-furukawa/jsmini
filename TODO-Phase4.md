@@ -308,11 +308,11 @@ Phase 1 の時と同じく、最小のパイプラインを最初に貫通させ
 
 ### Step 4-4 [P1] `--print-bytecode` + エントリポイント統合
 
-- [ ] バイトコードの逆アセンブラ (disassembler)
-  - バイトコード列を人間が読める形式に変換
-  - 各命令のアドレス、オペコード名、オペランドを表示
-- [ ] `src/index.ts` 修正: `--vm`, `--print-bytecode` フラグ対応
-- [ ] テスト
+- [x] バイトコードの逆アセンブラ (disassembler)
+  - 定数値、変数名、ジャンプ先、argc をコメント表示
+  - ネスト関数も再帰的にダンプ
+- [x] `src/index.ts` 修正: `--vm`, `--print-bytecode` フラグ対応
+- [x] テスト
 
 ```bash
 $ npm start -- --print-bytecode 'function add(a, b) { return a + b; }'
@@ -349,47 +349,42 @@ $ npm start -- --vm 'console.log(1 + 2);'
 
 ### Step 4-6 [P2] Phase 2 構文の VM 対応
 
-段階的に1構文ずつ追加:
-
-- [ ] オブジェクトリテラル + プロパティアクセス
-  - `CreateObject`, `SetProperty`, `GetProperty`
-- [ ] 配列リテラル
-  - `CreateArray`
-- [ ] `let` / `const` (ブロックスコープ)
-  - スコープ管理を VM 側に実装
-- [ ] `typeof`
-  - `TypeOf` 命令
-- [ ] `try` / `catch` / `throw`
-  - 例外ハンドラテーブル
-- [ ] `new`
-  - `Construct` 命令
-- [ ] `this`
-  - CallFrame に this を保持
+- [x] オブジェクトリテラル: `CreateObject` + `SetProperty` (Dup でチェーン)
+- [x] プロパティアクセス: `GetProperty`, `GetPropertyComputed`
+- [x] プロパティ代入: `SetPropertyAssign`
+- [x] 配列リテラル: `CreateArray <count>`
+- [x] `typeof`: `TypeOf` 命令
+- [x] `throw` / `try` / `catch`: `Throw` 命令 + 例外ハンドラテーブル (`BytecodeFunction.handlers`)
+- [ ] `let` / `const` (ブロックスコープ) — 未対応 (グローバルのみ)
+- [ ] `new` / `this` — 未対応
 
 ---
 
 ### Step 4-7 [P3] Phase 3 構文の VM 対応
 
-- [ ] アロー関数
-- [ ] テンプレートリテラル
-- [ ] プロトタイプチェーン
-- [ ] クラス
-- [ ] 分割代入
-- [ ] スプレッド / レスト
-- [ ] `for...of`
-- [ ] `++` / `--`, 複合代入
-- [ ] `break` / `continue`
-- [ ] `in`, `instanceof`
+- [x] アロー関数 → BytecodeFunction として compile
+- [x] テンプレートリテラル → LdaConst + Add チェーン
+- [x] `for...of` → カウンタベースのループに desugar
+- [x] `++` / `--` (prefix/postfix) → Increment/Decrement 命令
+- [x] 複合代入 (`+=` 等) → load + op + store
+- [x] `break` / `continue` → Jump に変換 (コンパイラのループスタックでパッチバック)
+- [ ] プロトタイプチェーン — 未対応
+- [ ] クラス — 未対応
+- [ ] 分割代入 — 未対応
+- [ ] スプレッド / レスト — 未対応
+- [ ] `in`, `instanceof` — 未対応
 
 ---
 
 ### Step 4-8 [P3] 全テスト通過確認 + パフォーマンス比較
 
-- [ ] 全 272 ユニットテストが `vmEvaluate` でも通過
-- [ ] Test262 を VM モードで実行し、tree-walking と同じ通過率を達成
-- [ ] パフォーマンス比較: tree-walking vs bytecode VM
-  - ループの多いベンチマーク (fibonacci, sum 等)
-  - 結果を README に記載
+- [x] VM 固有テスト 58 件 + 既存 272 件 = 330 件 Green
+- [ ] 全 272 ユニットテストを `vmEvaluate` でも実行 — 一部構文 (let/const, new, class 等) は未対応
+- [ ] Test262 を VM モードで実行
+- [x] パフォーマンス比較: `npm run bench`
+  - fibonacci(25): **3.4x** (VM faster)
+  - for loop (10000): **1.3x** (VM faster)
+  - nested loop (100x100): **1.9x** (VM faster)
 
 ---
 
