@@ -2,14 +2,26 @@
 
 TypeScript で段階的に構築する教育用 JavaScript エンジン。
 
-[browser-book](https://github.com/nicknisi/nicknisi-browser-book) Part 02 / 第12章「JavaScript エンジン」の執筆における解像度向上を目的として、Lexer, Parser, Tree-Walking Interpreter を一から実装しています。
+[browser-book](https://github.com/yosuke-furukawa/browser-book) Part 02 / 第12章「JavaScript エンジン」の執筆における解像度向上を目的として、Lexer, Parser, Tree-Walking Interpreter, Bytecode VM を一から実装しています。
 
 ## 特徴
 
 - **手書きの再帰下降パーサ** (パーサジェネレータ不使用)
 - **ESTree 準拠の AST**
-- **Tree-Walking Interpreter** (将来 Bytecode VM、Wasm JIT に移行予定)
+- **2つの実行エンジン**: Tree-Walking Interpreter と Bytecode VM
 - **Test262** で仕様準拠を検証 (strict mode 前提)
+- **`--print-bytecode`** で V8 の `node --print-bytecode` と同じ体験
+
+## アーキテクチャ
+
+```
+Source Code
+  → Lexer (字句解析)
+    → Parser (構文解析, 再帰下降)
+      → AST (ESTree 準拠)
+        ├→ Tree-Walking Interpreter (AST を直接辿って評価)
+        └→ Bytecode Compiler → Bytecode → Stack VM (命令列を順次実行)
+```
 
 ## 対応している構文
 
@@ -40,22 +52,33 @@ TypeScript で段階的に構築する教育用 JavaScript エンジン。
 - クラス (`class` / `extends` / `super`)
 - 分割代入 (`var { x } = obj`、`var [a, b] = arr`、代入式でのカバー文法)
 - スプレッド / レスト (`...`)
-- `for...of`
-- `++` / `--`、複合代入 (`+=` 等)
-- `break` / `continue`
-- `in` 演算子
-- カンマ演算子
-- Statement vs Declaration の区別
+- `for...of`、`++` / `--`、複合代入 (`+=` 等)
+- `break` / `continue`、`in` 演算子、カンマ演算子
+
+### Phase 4 — Bytecode VM
+
+- スタックベースの VM（オペランドスタック + CallFrame）
+- AST → バイトコードコンパイラ（パッチバック、ローカルスロット割り当て）
+- `--print-bytecode` でバイトコードダンプ
+- 例外ハンドラテーブルによる try/catch
+- Phase 1〜3 の全構文に対応
+
+## パフォーマンス比較
+
+| Benchmark | Tree-Walking | Bytecode VM | Speedup |
+|-----------|-------------|-------------|---------|
+| fibonacci(25) | 138ms | 40ms | **3.4x** |
+| for loop (10000) | 2.1ms | 1.6ms | **1.3x** |
+| nested loop (100x100) | 2.3ms | 1.2ms | **1.9x** |
 
 ## Test262 準拠率
 
-| 対象 | Pass | Fail | Skip | Total | Pass Rate |
-|------|------|------|------|-------|-----------|
-| 現在 | 225 | 591 | 25 | 841 | **27.6%** |
+| エンジン | Pass | Fail | Skip | Total | Pass Rate |
+|----------|------|------|------|-------|-----------|
+| Tree-Walking | 225 | 591 | 25 | 841 | **27.6%** |
+| Bytecode VM | 225 | 591 | 25 | 841 | **27.6%** |
 
-*Skip は noStrict (非厳格モード限定テスト) のみ。それ以外は全て実行。*
-
-対象カテゴリ: `expressions/addition`, `expressions/subtraction`, `expressions/multiplication`, `expressions/division`, `statements/variable`, `statements/if`, `statements/while`, `statements/for`
+*両エンジンで同一の結果。Skip は noStrict (非厳格モード限定テスト) のみ。*
 
 ## セットアップ
 
@@ -72,27 +95,48 @@ npm install
 ### JS コードを実行
 
 ```bash
+# Tree-Walking (デフォルト)
 npm start -- '1 + 2 * 3;'
-# => 7
+
+# Bytecode VM
+npm start -- --vm '1 + 2 * 3;'
 ```
 
+### バイトコードダンプ
+
 ```bash
-npm start -- 'var add = (a, b) => a + b; console.log(add(3, 4));'
-# => 7
+npm start -- --print-bytecode 'function add(a, b) { return a + b; }'
+```
+
+```
+== <script> (params: 0, locals: 0) ==
+  0000: LdaConst         0 ; <function add>
+  0001: StaGlobal        1 ; add
+  0002: Pop
+
+== add (params: 2, locals: 2) ==
+  0000: LdaLocal         0
+  0001: LdaLocal         1
+  0002: Add
+  0003: Return
 ```
 
 ### テストを実行
 
 ```bash
-# ユニットテスト (272 tests)
+# ユニットテスト (379 tests)
 npm test
+
+# ベンチマーク
+npm run bench
 
 # Test262
 # 初回のみ test262 リポジトリの取得が必要:
 git clone --depth 1 --filter=blob:none --sparse https://github.com/tc39/test262.git test262
 cd test262 && git sparse-checkout set harness test/language/expressions/addition test/language/expressions/subtraction test/language/expressions/multiplication test/language/expressions/division test/language/statements/variable test/language/statements/if test/language/statements/while test/language/statements/for test/language/types && cd ..
 
-npm run test262
+npm run test262            # tree-walking
+npm run test262 -- --vm    # bytecode VM
 ```
 
 ## プロジェクト構成
@@ -114,9 +158,17 @@ src/
     evaluator.test.ts   # Phase 1 テスト
     core.test.ts        # Phase 2 テスト
     features.test.ts    # Phase 3 テスト
+  vm/
+    bytecode.ts         # Opcode 定義、命令型、disassembler
+    compiler.ts         # AST → バイトコードコンパイラ
+    vm.ts               # スタックベース VM
+    vm.test.ts          # VM テスト
+    compat.test.ts      # Tree-Walking と VM の互換テスト
+    index.ts            # vmEvaluate() エントリポイント
   test262/
-    runner.ts           # Test262 テストランナー
-  index.ts              # エントリポイント
+    runner.ts           # Test262 テストランナー (--vm 対応)
+  bench.ts              # ベンチマーク
+  index.ts              # CLI エントリポイント (--vm, --print-bytecode)
 ```
 
 ## ロードマップ
@@ -124,7 +176,7 @@ src/
 - [x] **Phase 1** — Lexer + Parser + 最小 Tree-Walking Interpreter
 - [x] **Phase 2** — オブジェクト、配列、let/const、typeof、try/catch、new、this
 - [x] **Phase 3** — アロー関数、テンプレートリテラル、クラス、分割代入、スプレッド/レスト、for...of
-- [ ] **Phase 4** — Bytecode VM 移行
+- [x] **Phase 4** — Bytecode VM (スタックベース、`--print-bytecode`、3.4x 高速化)
 - [ ] **Phase 5** — Wasm JIT (ホットコード検出 → Wasm 生成 → 脱最適化)
 
 詳細は [PLAN.md](./PLAN.md) を参照。
