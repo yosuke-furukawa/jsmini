@@ -1,6 +1,13 @@
 import { parse } from "../parser/parser.js";
 import type { Program, Statement, Expression, Identifier, BlockStatement, MemberExpression } from "../parser/ast.js";
 import { Environment } from "./environment.js";
+import {
+  ReturnSignal, ThrowSignal, BreakSignal, ContinueSignal,
+  JS_FUNCTION_BRAND, PROTO_KEY,
+  type JSObject, type JSFunction,
+  isJSFunction, createJSFunction, getProperty,
+  collectBoundNames, bindPattern, assignPattern,
+} from "./values.js";
 
 // MemberExpression のキーを解決する共通ヘルパー
 function resolveMemberKey(expr: MemberExpression, env: Environment): string {
@@ -12,70 +19,6 @@ function resolveMemberKey(expr: MemberExpression, env: Environment): string {
 
 // Step コールバック (evaluate 実行中のみ有効)
 let _currentOnStep: ((info: StepInfo) => void) | null = null;
-
-// return 文の制御フローを例外で表現する
-class ReturnSignal {
-  value: unknown;
-  constructor(value: unknown) {
-    this.value = value;
-  }
-}
-
-// throw 文の制御フローを例外で表現する
-class ThrowSignal {
-  value: unknown;
-  constructor(value: unknown) {
-    this.value = value;
-  }
-}
-
-class BreakSignal {}
-class ContinueSignal {}
-
-// 関数オブジェクトの内部表現
-const JS_FUNCTION_BRAND = Symbol("JSFunction");
-const PROTO_KEY = "__proto__";
-
-type JSObject = Record<string, unknown>;
-
-type JSFunction = {
-  [JS_FUNCTION_BRAND]: true;
-  params: Identifier[];
-  body: BlockStatement;
-  closure: Environment;
-  isArrow?: boolean;
-  isClass?: boolean;
-  prototype: JSObject; // Ctor.prototype
-  [key: string]: unknown; // 関数もプロパティを持てる
-};
-
-function isJSFunction(value: unknown): value is JSFunction {
-  return typeof value === "object" && value !== null && JS_FUNCTION_BRAND in value;
-}
-
-// プロトタイプチェーンを辿ってプロパティを取得
-function getProperty(obj: JSObject, key: string): unknown {
-  let current: JSObject | null = obj;
-  while (current !== null && current !== undefined) {
-    if (Object.prototype.hasOwnProperty.call(current, key)) {
-      return current[key];
-    }
-    current = (current[PROTO_KEY] as JSObject | null) ?? null;
-  }
-  return undefined;
-}
-
-// プロトタイプチェーン上にプロパティがあるか
-function hasProperty(obj: JSObject, key: string): boolean {
-  let current: JSObject | null = obj;
-  while (current !== null && current !== undefined) {
-    if (Object.prototype.hasOwnProperty.call(current, key)) {
-      return true;
-    }
-    current = (current[PROTO_KEY] as JSObject | null) ?? null;
-  }
-  return false;
-}
 
 type ConsoleOptions = {
   log: (...args: unknown[]) => void;
@@ -262,52 +205,7 @@ function evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, en
   return undefined;
 }
 
-// Pattern から束縛される変数名を全て収集する (BoundNames)
-function collectBoundNames(pattern: any): string[] {
-  if (pattern.type === "Identifier") return [pattern.name];
-  if (pattern.type === "ObjectPattern") {
-    const names: string[] = [];
-    for (const prop of pattern.properties) {
-      names.push(...collectBoundNames(prop.value));
-    }
-    return names;
-  }
-  if (pattern.type === "ArrayPattern") {
-    const names: string[] = [];
-    for (const el of pattern.elements) {
-      if (el) names.push(...collectBoundNames(el));
-    }
-    return names;
-  }
-  return [];
-}
-
-// パターンに対して値を分解して環境に定義する
-function bindPattern(pattern: any, value: unknown, env: Environment, kind: "var" | "let" | "const"): void {
-  if (pattern.type === "Identifier") {
-    if (kind === "const") {
-      env.defineConst(pattern.name, value);
-    } else if (kind === "let") {
-      env.define(pattern.name, value);
-    } else {
-      const varEnv = env.findVarScope();
-      varEnv.define(pattern.name, value);
-    }
-  } else if (pattern.type === "ObjectPattern") {
-    const obj = value as Record<string, unknown>;
-    for (const prop of pattern.properties) {
-      const propValue = obj ? getProperty(obj as JSObject, prop.key.name) : undefined;
-      bindPattern(prop.value, propValue, env, kind);
-    }
-  } else if (pattern.type === "ArrayPattern") {
-    const arr = value as unknown[];
-    for (let i = 0; i < pattern.elements.length; i++) {
-      if (pattern.elements[i]) {
-        bindPattern(pattern.elements[i], arr?.[i], env, kind);
-      }
-    }
-  }
-}
+// collectBoundNames, bindPattern, assignPattern は values.ts に移動済み
 
 // 引数リストを評価（SpreadElement を展開）
 function evalArguments(argNodes: any[], env: Environment): unknown[] {
@@ -321,26 +219,6 @@ function evalArguments(argNodes: any[], env: Environment): unknown[] {
     }
   }
   return result;
-}
-
-// 代入式の分割代入: 既存変数に値を set する
-function assignPattern(pattern: any, value: unknown, env: Environment): void {
-  if (pattern.type === "Identifier") {
-    env.set(pattern.name, value);
-  } else if (pattern.type === "ObjectPattern") {
-    const obj = value as Record<string, unknown>;
-    for (const prop of pattern.properties) {
-      const propValue = obj ? getProperty(obj as JSObject, prop.key.name) : undefined;
-      assignPattern(prop.value, propValue, env);
-    }
-  } else if (pattern.type === "ArrayPattern") {
-    const arr = value as unknown[];
-    for (let i = 0; i < pattern.elements.length; i++) {
-      if (pattern.elements[i]) {
-        assignPattern(pattern.elements[i], arr?.[i], env);
-      }
-    }
-  }
 }
 
 function evalStatement(stmt: Statement, env: Environment): unknown {

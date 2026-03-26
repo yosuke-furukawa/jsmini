@@ -43,22 +43,6 @@ function parseFrontmatter(source: string) {
 }
 
 // サポートしていない機能を使うテストをスキップ
-const UNSUPPORTED_FEATURES = [
-  "Symbol", "Symbol.toPrimitive", "Symbol.toStringTag",
-  "BigInt", "Proxy", "Reflect",
-  "async-functions", "async-iteration",
-  "generators", "destructuring-binding",
-  "template", "arrow-function",
-  "class", "super", "new.target",
-  "WeakRef", "FinalizationRegistry",
-  "Temporal", "SharedArrayBuffer", "Atomics",
-  "regexp-named-groups", "regexp-lookbehind",
-  "TypedArray", "Map", "Set", "Promise",
-  "computed-property-names", "object-spread",
-  "optional-chaining", "nullish-coalescing",
-  "for-of", "let", "const", "default-parameters",
-];
-
 // ハーネス関数をネイティブの JS で実装して注入するための前置コード
 // jsmini がまだ対応していない構文（オブジェクト、throw/try、new 等）が
 // ハーネスに含まれるため、ハーネスを jsmini で実行するのではなく、
@@ -134,15 +118,13 @@ function runTest(filePath: string): TestResult {
   const source = fs.readFileSync(filePath, "utf-8");
   const meta = parseFrontmatter(source);
 
-  // テストの実行方式が合わない場合のみスキップ
+  // 実行方式が根本的に異なるもののみスキップ
   if (meta.flags.includes("module")) return { file: relPath, status: "skip", error: "module" };
   if (meta.flags.includes("async")) return { file: relPath, status: "skip", error: "async" };
   if (meta.flags.includes("raw")) return { file: relPath, status: "skip", error: "raw" };
+  // jsmini は strict mode 前提
   if (meta.flags.includes("noStrict")) {
-    return { file: relPath, status: "skip", error: "noStrict (jsmini is strict-mode only)" };
-  }
-  if (meta.features.some((f) => UNSUPPORTED_FEATURES.includes(f))) {
-    return { file: relPath, status: "skip", error: "unsupported feature" };
+    return { file: relPath, status: "skip", error: "noStrict" };
   }
 
   const harness = createHarnessSource();
