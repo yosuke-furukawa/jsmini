@@ -64,24 +64,62 @@ export type BytecodeFunction = {
   constants: unknown[];
 };
 
-// バイトコードを人間が読める形式にダンプ
+// バイトコードを人間が読める形式にダンプ（ネスト関数も再帰的に表示）
 export function disassemble(func: BytecodeFunction): string {
   const lines: string[] = [];
-  lines.push(`== ${func.name || "<script>"} ==`);
+  disassembleFunc(func, lines, "");
+  return lines.join("\n");
+}
+
+function disassembleFunc(func: BytecodeFunction, lines: string[], indent: string): void {
+  lines.push(`${indent}== ${func.name || "<script>"} (params: ${func.paramCount}, locals: ${func.localCount}) ==`);
   for (let i = 0; i < func.bytecode.length; i++) {
     const instr = func.bytecode[i];
     const addr = String(i).padStart(4, "0");
+    const comment = formatOperandComment(instr, func.constants);
     if (instr.operand !== undefined) {
-      const constVal = instr.op === "LdaConst" ? ` (${formatValue(func.constants[instr.operand])})` : "";
-      lines.push(`  ${addr}: ${instr.op} ${instr.operand}${constVal}`);
+      lines.push(`${indent}  ${addr}: ${instr.op.padEnd(16)} ${instr.operand}${comment}`);
     } else {
-      lines.push(`  ${addr}: ${instr.op}`);
+      lines.push(`${indent}  ${addr}: ${instr.op}`);
     }
   }
-  return lines.join("\n");
+
+  // ネストした関数をダンプ
+  for (const c of func.constants) {
+    if (isBytecodeFunction(c)) {
+      lines.push("");
+      disassembleFunc(c, lines, indent);
+    }
+  }
+}
+
+function formatOperandComment(instr: Instruction, constants: unknown[]): string {
+  if (instr.operand === undefined) return "";
+  switch (instr.op) {
+    case "LdaConst": {
+      const val = constants[instr.operand];
+      if (isBytecodeFunction(val)) return ` ; <function ${val.name}>`;
+      return ` ; ${formatValue(val)}`;
+    }
+    case "LdaGlobal":
+    case "StaGlobal":
+      return ` ; ${constants[instr.operand]}`;
+    case "Jump":
+    case "JumpIfFalse":
+    case "JumpIfTrue":
+      return ` ; -> ${String(instr.operand).padStart(4, "0")}`;
+    case "Call":
+      return ` ; argc=${instr.operand}`;
+    default:
+      return "";
+  }
 }
 
 function formatValue(val: unknown): string {
   if (typeof val === "string") return `"${val}"`;
   return String(val);
+}
+
+function isBytecodeFunction(val: unknown): val is BytecodeFunction {
+  return typeof val === "object" && val !== null && "bytecode" in val && "constants" in val;
 }

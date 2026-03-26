@@ -72,12 +72,29 @@ describe("VM - Step 4-1: パイプライン貫通 (リテラル + 算術)", () =
 });
 
 describe("VM - disassemble", () => {
-  it("バイトコードをダンプできる", () => {
+  it("算術のバイトコードをダンプできる", () => {
     const func = compile("1 + 2 * 3;");
     const output = disassemble(func);
     assert.ok(output.includes("LdaConst"));
     assert.ok(output.includes("Mul"));
     assert.ok(output.includes("Add"));
+    assert.ok(output.includes("<script>"));
+  });
+
+  it("関数のバイトコードをダンプできる", () => {
+    const func = compile("function add(a, b) { return a + b; }");
+    const output = disassemble(func);
+    assert.ok(output.includes("== add"));
+    assert.ok(output.includes("LdaLocal"));
+    assert.ok(output.includes("Add"));
+    assert.ok(output.includes("Return"));
+  });
+
+  it("制御フローのジャンプ先が表示される", () => {
+    const func = compile("var x = 0; if (true) { x = 1; }");
+    const output = disassemble(func);
+    assert.ok(output.includes("JumpIfFalse"));
+    assert.ok(output.includes("->"));
   });
 });
 
