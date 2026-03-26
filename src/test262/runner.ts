@@ -120,37 +120,8 @@ function preprocessTestSource(source: string): string {
   return code;
 }
 
-// テストが jsmini で実行可能か判定
-function canRun(source: string): string | null {
-  const cleaned = source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/.*$/gm, "");
-
-  // Phase 2-3 で実装済み: new, try/catch, throw, typeof, object, array, for...of, class, arrow
-  // まだ未対応の構文のみスキップ
-  if (/\bswitch\s*\(/.test(cleaned)) return "switch";
-  if (/\bdo\s*\{/.test(cleaned)) return "do-while";
-  if (/\bwith\s*\(/.test(cleaned)) return "with";
-  if (/\bdelete\s/.test(cleaned)) return "delete";
-  if (/\bvoid\s/.test(cleaned)) return "void";
-  if (/\bin\s/.test(cleaned)) return "in operator";
-  // 実装済み: ++/--, +=/-= 等, break, continue, in, instanceof
-  if (/\bReferenceError\b/.test(cleaned)) return "ReferenceError builtin";
-  if (/\bTypeError\b/.test(cleaned)) return "TypeError builtin";
-  if (/\bSyntaxError\b/.test(cleaned)) return "SyntaxError builtin";
-  if (/\beval\s*\(/.test(cleaned)) return "eval";
-  if (/\bFunction\s*\(/.test(cleaned)) return "Function constructor";
-  if (/\bNumber\s*[\.(]/.test(cleaned)) return "Number builtin";
-  if (/\bString\s*[\.(]/.test(cleaned)) return "String builtin";
-  if (/\bBoolean\s*[\.(]/.test(cleaned)) return "Boolean builtin";
-  if (/\bObject\s*[\.(]/.test(cleaned)) return "Object builtin";
-  if (/\bisNaN\s*\(/.test(cleaned)) return "isNaN";
-  if (/\bparseInt\s*\(/.test(cleaned)) return "parseInt";
-  if (/\bverifyProperty\b/.test(cleaned)) return "verifyProperty helper";
-  if (/\?\s/.test(cleaned) && /\?[^.]/.test(cleaned)) return "ternary";
-  if (/\blabel\s*:/.test(cleaned)) return "label";
-  return null;
-}
+// canRun は廃止。構文未対応のテストも実行して正直に Fail にする。
+// Skip は「テストの実行方式が合わない」場合のみ（メタデータで判定）。
 
 type TestResult = {
   file: string;
@@ -163,12 +134,10 @@ function runTest(filePath: string): TestResult {
   const source = fs.readFileSync(filePath, "utf-8");
   const meta = parseFrontmatter(source);
 
-  // メタデータによるスキップ
-  if (meta.negative) return { file: relPath, status: "skip", error: "negative test" };
+  // テストの実行方式が合わない場合のみスキップ
   if (meta.flags.includes("module")) return { file: relPath, status: "skip", error: "module" };
   if (meta.flags.includes("async")) return { file: relPath, status: "skip", error: "async" };
   if (meta.flags.includes("raw")) return { file: relPath, status: "skip", error: "raw" };
-  // jsmini は strict mode 前提で動作する。non-strict 限定テストはスキップ
   if (meta.flags.includes("noStrict")) {
     return { file: relPath, status: "skip", error: "noStrict (jsmini is strict-mode only)" };
   }
@@ -176,13 +145,19 @@ function runTest(filePath: string): TestResult {
     return { file: relPath, status: "skip", error: "unsupported feature" };
   }
 
-  // ソースコードによるスキップ
-  const cantRun = canRun(source);
-  if (cantRun) return { file: relPath, status: "skip", error: cantRun };
-
   const harness = createHarnessSource();
   const testCode = preprocessTestSource(source);
   const fullSource = harness + "\n" + testCode;
+
+  if (meta.negative) {
+    // negative test: エラーが投げられることを期待する
+    try {
+      evaluate(fullSource);
+      return { file: relPath, status: "fail", error: "Expected error but none was thrown" };
+    } catch {
+      return { file: relPath, status: "pass" };
+    }
+  }
 
   try {
     evaluate(fullSource);
