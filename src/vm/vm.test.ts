@@ -157,3 +157,85 @@ describe("VM - Step 4-2: 変数 + 制御フロー", () => {
     `), 9);
   });
 });
+
+describe("VM - Step 4-3: 関数", () => {
+  it("関数を宣言して呼び出せる", () => {
+    assert.equal(vmEvaluate(`
+      function add(a, b) {
+        return a + b;
+      }
+      add(3, 4);
+    `), 7);
+  });
+
+  it("関数は引数をローカルで持つ", () => {
+    assert.equal(vmEvaluate(`
+      var x = 100;
+      function f(x) {
+        return x + 1;
+      }
+      f(10);
+    `), 11);
+  });
+
+  it("関数の外の変数は変わらない", () => {
+    assert.equal(vmEvaluate(`
+      var x = 100;
+      function f(x) {
+        return x + 1;
+      }
+      f(10);
+      x;
+    `), 100);
+  });
+
+  it("return がない関数は undefined を返す", () => {
+    assert.equal(vmEvaluate(`
+      function noop() {}
+      noop();
+    `), undefined);
+  });
+
+  it("return で関数を途中で抜けられる", () => {
+    assert.equal(vmEvaluate(`
+      function early(x) {
+        if (x > 0) {
+          return x;
+        }
+        return 0;
+      }
+      early(5);
+    `), 5);
+  });
+
+  it("再帰関数が動く", () => {
+    assert.equal(vmEvaluate(`
+      function factorial(n) {
+        if (n <= 1) {
+          return 1;
+        }
+        return n * factorial(n - 1);
+      }
+      factorial(5);
+    `), 120);
+  });
+
+  it("引数が足りない場合は undefined になる", () => {
+    assert.equal(vmEvaluate(`
+      function f(a, b) {
+        return b;
+      }
+      f(1);
+    `), undefined);
+  });
+
+  it("関数からグローバル変数を参照できる", () => {
+    assert.equal(vmEvaluate(`
+      var x = 100;
+      function f() {
+        return x;
+      }
+      f();
+    `), 100);
+  });
+});

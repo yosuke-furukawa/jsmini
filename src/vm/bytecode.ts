@@ -33,6 +33,11 @@ export type Opcode =
   // 変数
   | "LdaGlobal"       // LdaGlobal <nameIndex> — グローバル変数を push
   | "StaGlobal"       // StaGlobal <nameIndex> — スタックトップをグローバル変数に格納 (pop しない)
+  | "LdaLocal"        // LdaLocal <slot> — ローカル変数を push
+  | "StaLocal"        // StaLocal <slot> — スタックトップをローカル変数に格納 (pop しない)
+
+  // 関数
+  | "Call"            // Call <argc> — スタックから関数 + argc 個の引数を pop、呼び出し
 
   // 制御フロー
   | "Jump"            // Jump <offset> — 無条件ジャンプ (pc = operand)
@@ -53,6 +58,8 @@ export type Instruction = {
 // コンパイル結果: 1つの関数のバイトコード
 export type BytecodeFunction = {
   name: string;
+  paramCount: number;       // パラメータ数
+  localCount: number;       // ローカル変数スロット数 (パラメータ含む)
   bytecode: Instruction[];
   constants: unknown[];
 };

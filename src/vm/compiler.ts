@@ -2,10 +2,9 @@ import { parse } from "../parser/parser.js";
 import type { Program, Statement, Expression } from "../parser/ast.js";
 import type { Instruction, BytecodeFunction, Opcode } from "./bytecode.js";
 
-// AST → バイトコードコンパイラ
 export function compile(source: string): BytecodeFunction {
   const ast = parse(source);
-  const compiler = new BytecodeCompiler();
+  const compiler = new BytecodeCompiler(null);
   compiler.compileProgram(ast);
   return compiler.finish("<script>");
 }
@@ -13,8 +12,16 @@ export function compile(source: string): BytecodeFunction {
 class BytecodeCompiler {
   private bytecode: Instruction[] = [];
   private constants: unknown[] = [];
-  // グローバル変数名 → 定数テーブル内のインデックス
-  private globals: Map<string, number> = new Map();
+  private locals: Map<string, number> = new Map();
+  private localCount = 0;
+  private paramCount = 0;
+  private parent: BytecodeCompiler | null;
+  private isFunction: boolean; // true = 関数内, false = トップレベル
+
+  constructor(parent: BytecodeCompiler | null) {
+    this.parent = parent;
+    this.isFunction = parent !== null;
+  }
 
   emit(op: Opcode, operand?: number): number {
     const index = this.bytecode.length;
@@ -22,7 +29,6 @@ class BytecodeCompiler {
     return index;
   }
 
-  // 命令のオペランドを後から書き換える（パッチバック）
   patch(index: number, operand: number): void {
     this.bytecode[index].operand = operand;
   }
@@ -32,23 +38,59 @@ class BytecodeCompiler {
   }
 
   addConstant(value: unknown): number {
-    const existing = this.constants.indexOf(value);
-    if (existing !== -1) return existing;
+    // BytecodeFunction は参照比較なので indexOf で重複排除しない
+    if (typeof value === "number" || typeof value === "string" || typeof value === "boolean") {
+      const existing = this.constants.indexOf(value);
+      if (existing !== -1) return existing;
+    }
     this.constants.push(value);
     return this.constants.length - 1;
   }
 
-  // グローバル変数名のインデックスを取得（なければ定数テーブルに追加）
-  globalNameIndex(name: string): number {
-    if (this.globals.has(name)) return this.globals.get(name)!;
-    const index = this.addConstant(name);
-    this.globals.set(name, index);
-    return index;
+  // ローカル変数のスロットを確保
+  declareLocal(name: string): number {
+    if (this.locals.has(name)) return this.locals.get(name)!;
+    const slot = this.localCount++;
+    this.locals.set(name, slot);
+    return slot;
+  }
+
+  resolveLocal(name: string): number | null {
+    return this.locals.get(name) ?? null;
+  }
+
+  // 変数のロード: 関数内ならローカル、トップレベルならグローバル
+  emitLoad(name: string): void {
+    if (this.isFunction) {
+      const slot = this.resolveLocal(name);
+      if (slot !== null) {
+        this.emit("LdaLocal", slot);
+        return;
+      }
+    }
+    // グローバル
+    const nameIdx = this.addConstant(name);
+    this.emit("LdaGlobal", nameIdx);
+  }
+
+  // 変数のストア
+  emitStore(name: string): void {
+    if (this.isFunction) {
+      const slot = this.resolveLocal(name);
+      if (slot !== null) {
+        this.emit("StaLocal", slot);
+        return;
+      }
+    }
+    const nameIdx = this.addConstant(name);
+    this.emit("StaGlobal", nameIdx);
   }
 
   finish(name: string): BytecodeFunction {
     return {
       name,
+      paramCount: this.paramCount,
+      localCount: this.localCount,
       bytecode: this.bytecode,
       constants: this.constants,
     };
@@ -59,18 +101,33 @@ class BytecodeCompiler {
       const stmt = program.body[i];
       const isLast = i === program.body.length - 1;
       this.compileStatement(stmt);
-      // 式文の結果: 最後以外は pop
       if (stmt.type === "ExpressionStatement" && !isLast) {
         this.emit("Pop");
       }
     }
   }
 
+  compileFunctionBody(params: any[], body: Statement[]): void {
+    // パラメータをローカルスロットに登録
+    this.paramCount = params.length;
+    for (const param of params) {
+      if (param.type === "Identifier") {
+        this.declareLocal(param.name);
+      }
+    }
+    // 本体をコンパイル
+    for (const stmt of body) {
+      this.compileStatement(stmt);
+    }
+    // 明示的 return がない場合は undefined を返す
+    this.emit("LdaUndefined");
+    this.emit("Return");
+  }
+
   compileStatement(stmt: Statement): void {
     switch (stmt.type) {
       case "ExpressionStatement":
         this.compileExpression(stmt.expression);
-        // 式文の結果はスタックに残す（最後の文の値を返すため）
         break;
 
       case "VariableDeclaration": {
@@ -81,20 +138,52 @@ class BytecodeCompiler {
             this.emit("LdaUndefined");
           }
           if (decl.id.type === "Identifier") {
-            const nameIdx = this.globalNameIndex(decl.id.name);
-            this.emit("StaGlobal", nameIdx);
+            if (this.isFunction) {
+              const slot = this.resolveLocal(decl.id.name) ?? this.declareLocal(decl.id.name);
+              this.emit("StaLocal", slot);
+            } else {
+              const nameIdx = this.addConstant(decl.id.name);
+              this.emit("StaGlobal", nameIdx);
+            }
             this.emit("Pop");
           }
         }
         break;
       }
 
+      case "FunctionDeclaration": {
+        const fnCompiler = new BytecodeCompiler(this);
+        fnCompiler.compileFunctionBody(stmt.params, stmt.body.body);
+        const fnBytecode = fnCompiler.finish(stmt.id.name);
+        const fnIndex = this.addConstant(fnBytecode);
+        this.emit("LdaConst", fnIndex);
+        if (this.isFunction) {
+          const slot = this.resolveLocal(stmt.id.name) ?? this.declareLocal(stmt.id.name);
+          this.emit("StaLocal", slot);
+        } else {
+          const nameIdx = this.addConstant(stmt.id.name);
+          this.emit("StaGlobal", nameIdx);
+        }
+        this.emit("Pop");
+        break;
+      }
+
+      case "ReturnStatement": {
+        if (stmt.argument) {
+          this.compileExpression(stmt.argument);
+        } else {
+          this.emit("LdaUndefined");
+        }
+        this.emit("Return");
+        break;
+      }
+
       case "IfStatement": {
         this.compileExpression(stmt.test);
-        const jumpIfFalse = this.emit("JumpIfFalse", 0); // パッチバック対象
+        const jumpIfFalse = this.emit("JumpIfFalse", 0);
         this.compileStatement(stmt.consequent);
         if (stmt.alternate) {
-          const jumpOver = this.emit("Jump", 0); // パッチバック対象
+          const jumpOver = this.emit("Jump", 0);
           this.patch(jumpIfFalse, this.currentOffset());
           this.compileStatement(stmt.alternate);
           this.patch(jumpOver, this.currentOffset());
@@ -115,7 +204,6 @@ class BytecodeCompiler {
       }
 
       case "ForStatement": {
-        // init
         if (stmt.init) {
           if (stmt.init.type === "VariableDeclaration") {
             this.compileStatement(stmt.init);
@@ -124,7 +212,6 @@ class BytecodeCompiler {
             this.emit("Pop");
           }
         }
-        // loop
         const loopStart = this.currentOffset();
         let exitJump = -1;
         if (stmt.test) {
@@ -172,20 +259,28 @@ class BytecodeCompiler {
       }
 
       case "Identifier": {
-        const nameIdx = this.globalNameIndex(expr.name);
-        this.emit("LdaGlobal", nameIdx);
+        this.emitLoad(expr.name);
         break;
       }
 
       case "AssignmentExpression": {
         this.compileExpression(expr.right);
         if (expr.left.type === "Identifier") {
-          const nameIdx = this.globalNameIndex(expr.left.name);
-          this.emit("StaGlobal", nameIdx);
-          // 代入式の値をスタックに残す
+          this.emitStore(expr.left.name);
         } else {
           throw new Error(`Unsupported assignment target: ${expr.left.type}`);
         }
+        break;
+      }
+
+      case "CallExpression": {
+        // 引数を左から右に push
+        for (const arg of expr.arguments) {
+          this.compileExpression(arg as Expression);
+        }
+        // 関数を push
+        this.compileExpression(expr.callee);
+        this.emit("Call", expr.arguments.length);
         break;
       }
 
@@ -206,18 +301,17 @@ class BytecodeCompiler {
       }
 
       case "LogicalExpression": {
-        // 短絡評価
         this.compileExpression(expr.left);
         if (expr.operator === "&&") {
           this.emit("Dup");
           const skipRight = this.emit("JumpIfFalse", 0);
-          this.emit("Pop"); // truthy なら左の値を捨てて右を評価
+          this.emit("Pop");
           this.compileExpression(expr.right);
           this.patch(skipRight, this.currentOffset());
         } else if (expr.operator === "||") {
           this.emit("Dup");
           const skipRight = this.emit("JumpIfTrue", 0);
-          this.emit("Pop"); // falsy なら左の値を捨てて右を評価
+          this.emit("Pop");
           this.compileExpression(expr.right);
           this.patch(skipRight, this.currentOffset());
         }
