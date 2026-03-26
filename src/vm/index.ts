@@ -10,7 +10,6 @@ export function vmEvaluate(source: string, consoleOpts?: ConsoleOptions): unknow
   const func = compile(source);
   const vm = new VM();
 
-  // 組み込みグローバルを登録
   vm.setGlobal("undefined", undefined);
 
   const consoleObj: Record<string, Function> = {

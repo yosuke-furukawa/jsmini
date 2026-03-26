@@ -36,8 +36,18 @@ export type Opcode =
   | "LdaLocal"        // LdaLocal <slot> — ローカル変数を push
   | "StaLocal"        // StaLocal <slot> — スタックトップをローカル変数に格納 (pop しない)
 
-  // プロパティ
+  // オブジェクト / 配列
+  | "CreateObject"    // 空オブジェクトを push
+  | "SetProperty"     // SetProperty <nameIndex> — pop value, peek obj, obj[name] = value (obj stays)
+  | "SetPropertyAssign" // pop obj, pop value, obj[name] = value, push value (for assignment)
   | "GetProperty"     // GetProperty <nameIndex> — pop obj, push obj[name]
+  | "GetPropertyComputed" // pop key, pop obj, push obj[key]
+  | "SetPropertyComputed" // pop value, pop key, peek obj, obj[key] = value
+  | "CreateArray"     // CreateArray <count> — pop count 個の要素、配列を push
+
+  // typeof / throw
+  | "TypeOf"          // pop 1つ、typeof 文字列を push
+  | "Throw"           // pop 1つ、例外を投げる
 
   // 関数
   | "Call"            // Call <argc> — スタックから関数 + argc 個の引数を pop、呼び出し
@@ -47,6 +57,10 @@ export type Opcode =
   | "Jump"            // Jump <offset> — 無条件ジャンプ (pc = operand)
   | "JumpIfFalse"     // JumpIfFalse <offset> — falsy なら pc = operand (pop する)
   | "JumpIfTrue"      // JumpIfTrue <offset> — truthy なら pc = operand (pop する)
+
+  // AST フォールバック (未対応構文用)
+  | "ExecStmt"        // ExecStmt <index> — 定数テーブルの AST ノードを tree-walking で実行
+  | "ExecExpr"        // ExecExpr <index> — 定数テーブルの AST ノードを tree-walking で評価し push
 
   // スタック操作
   | "Pop"             // スタックトップを捨てる
@@ -60,12 +74,22 @@ export type Instruction = {
 };
 
 // コンパイル結果: 1つの関数のバイトコード
+export type ExceptionHandler = {
+  tryStart: number;     // try ブロック開始アドレス
+  tryEnd: number;       // try ブロック終了アドレス
+  catchStart: number;   // catch ブロック開始アドレス (なければ -1)
+  catchVarSlot: number; // catch 変数のスロット (-1 = global)
+  catchVarName: string; // catch 変数名
+  finallyStart: number; // finally ブロック開始アドレス (なければ -1)
+};
+
 export type BytecodeFunction = {
   name: string;
-  paramCount: number;       // パラメータ数
-  localCount: number;       // ローカル変数スロット数 (パラメータ含む)
+  paramCount: number;
+  localCount: number;
   bytecode: Instruction[];
   constants: unknown[];
+  handlers: ExceptionHandler[];
 };
 
 // バイトコードを人間が読める形式にダンプ（ネスト関数も再帰的に表示）

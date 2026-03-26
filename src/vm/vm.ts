@@ -207,13 +207,79 @@ export class VM {
           break;
         }
 
-        // プロパティ
+        // オブジェクト / 配列
+        case "CreateObject":
+          this.push({});
+          break;
+        case "CreateArray": {
+          const count = instr.operand!;
+          const arr: unknown[] = [];
+          for (let i = 0; i < count; i++) {
+            arr.unshift(this.pop());
+          }
+          this.push(arr);
+          break;
+        }
+        case "SetProperty": {
+          const value = this.pop();
+          const obj = this.peek() as Record<string, unknown>;
+          const name = constants[instr.operand!] as string;
+          obj[name] = value;
+          // obj はスタックに残る（連続プロパティ設定用）
+          break;
+        }
+        case "SetPropertyAssign": {
+          const obj = this.pop() as Record<string, unknown>;
+          const value = this.pop();
+          const name = constants[instr.operand!] as string;
+          obj[name] = value;
+          this.push(value); // 代入式の値を残す
+          break;
+        }
         case "GetProperty": {
           const obj = this.pop() as Record<string, unknown>;
           const name = constants[instr.operand!] as string;
           this.push(obj[name]);
           break;
         }
+        case "GetPropertyComputed": {
+          const key = this.pop();
+          const obj = this.pop() as Record<string, unknown>;
+          this.push(obj[String(key)]);
+          break;
+        }
+
+        // typeof
+        case "TypeOf": {
+          const val = this.pop();
+          if (val === null) this.push("object");
+          else this.push(typeof val);
+          break;
+        }
+
+        // throw
+        case "Throw": {
+          const throwValue = this.pop();
+          // 例外ハンドラテーブルからハンドラを探す
+          const handler = frame.func.handlers?.find(
+            h => frame.pc - 1 >= h.tryStart && frame.pc - 1 < h.tryEnd && h.catchStart >= 0
+          );
+          if (handler) {
+            // catch ブロックにジャンプ、例外値をスタックに push
+            this.push(throwValue);
+            frame.pc = handler.catchStart;
+          } else {
+            // ハンドラがない: 上位にプロパゲート
+            throw { __thrown: true, value: throwValue };
+          }
+          break;
+        }
+
+        // AST フォールバック (将来用、現在未使用)
+        case "ExecStmt":
+        case "ExecExpr":
+          throw new Error(`ExecStmt/ExecExpr not implemented in VM`);
+
 
         // 関数呼び出し
         case "Call": {

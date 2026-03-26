@@ -288,3 +288,57 @@ describe("VM - Step 4-5: 文字列 + console.log", () => {
     assert.deepEqual(logs, [42]);
   });
 });
+
+describe("VM - Step 4-6: Phase 2 構文", () => {
+  it("オブジェクトリテラルが動く", () => {
+    assert.equal(vmEvaluate("var p = { x: 10, y: 20 }; p.x + p.y;"), 30);
+  });
+
+  it("ブラケットアクセスが動く", () => {
+    assert.equal(vmEvaluate('var p = { x: 10 }; p["x"];'), 10);
+  });
+
+  it("プロパティ代入が動く", () => {
+    assert.equal(vmEvaluate("var p = { x: 10 }; p.x = 99; p.x;"), 99);
+  });
+
+  it("配列リテラルが動く", () => {
+    assert.equal(vmEvaluate("var arr = [10, 20, 30]; arr[1];"), 20);
+  });
+
+  it("配列の length が動く", () => {
+    assert.equal(vmEvaluate("var arr = [1, 2, 3]; arr.length;"), 3);
+  });
+
+  it("typeof が動く", () => {
+    assert.equal(vmEvaluate('typeof 42;'), "number");
+    assert.equal(vmEvaluate('typeof "hello";'), "string");
+    assert.equal(vmEvaluate("typeof true;"), "boolean");
+    assert.equal(vmEvaluate("typeof undefined;"), "undefined");
+    assert.equal(vmEvaluate("typeof null;"), "object");
+  });
+
+  it("throw / try / catch が動く", () => {
+    assert.equal(vmEvaluate(`
+      var result = 0;
+      try {
+        throw "error";
+      } catch (e) {
+        result = e;
+      }
+      result;
+    `), "error");
+  });
+
+  it("finally が動く", () => {
+    assert.equal(vmEvaluate(`
+      var result = 0;
+      try {
+        result = 1;
+      } finally {
+        result = result + 10;
+      }
+      result;
+    `), 11);
+  });
+});

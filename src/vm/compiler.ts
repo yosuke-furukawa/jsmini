@@ -1,6 +1,6 @@
 import { parse } from "../parser/parser.js";
 import type { Program, Statement, Expression } from "../parser/ast.js";
-import type { Instruction, BytecodeFunction, Opcode } from "./bytecode.js";
+import type { Instruction, BytecodeFunction, ExceptionHandler, Opcode } from "./bytecode.js";
 
 export function compile(source: string): BytecodeFunction {
   const ast = parse(source);
@@ -15,8 +15,9 @@ class BytecodeCompiler {
   private locals: Map<string, number> = new Map();
   private localCount = 0;
   private paramCount = 0;
+  private handlers: ExceptionHandler[] = [];
   private parent: BytecodeCompiler | null;
-  private isFunction: boolean; // true = 関数内, false = トップレベル
+  private isFunction: boolean;
 
   constructor(parent: BytecodeCompiler | null) {
     this.parent = parent;
@@ -93,6 +94,7 @@ class BytecodeCompiler {
       localCount: this.localCount,
       bytecode: this.bytecode,
       constants: this.constants,
+      handlers: this.handlers,
     };
   }
 
@@ -175,6 +177,53 @@ class BytecodeCompiler {
           this.emit("LdaUndefined");
         }
         this.emit("Return");
+        break;
+      }
+
+      case "ThrowStatement": {
+        this.compileExpression(stmt.argument);
+        this.emit("Throw");
+        break;
+      }
+
+      case "TryStatement": {
+        const tryStart = this.currentOffset();
+        this.compileStatement(stmt.block);
+        const jumpOverCatch = this.emit("Jump", 0);
+        const tryEnd = this.currentOffset();
+
+        // catch ブロック
+        const catchStart = stmt.handler ? this.currentOffset() : -1;
+        let catchVarSlot = -1;
+        let catchVarName = "";
+        if (stmt.handler) {
+          catchVarName = stmt.handler.param.name;
+          if (this.isFunction) {
+            catchVarSlot = this.declareLocal(catchVarName);
+          }
+          // VM が例外値をスタックに push してここにジャンプする
+          // 例外値を catch 変数に格納
+          if (catchVarSlot >= 0) {
+            this.emit("StaLocal", catchVarSlot);
+          } else {
+            const nameIdx = this.addConstant(catchVarName);
+            this.emit("StaGlobal", nameIdx);
+          }
+          this.emit("Pop");
+          this.compileStatement(stmt.handler.body);
+        }
+        this.patch(jumpOverCatch, this.currentOffset());
+
+        // finally ブロック
+        const finallyStart = stmt.finalizer ? this.currentOffset() : -1;
+        if (stmt.finalizer) {
+          this.compileStatement(stmt.finalizer);
+        }
+
+        this.handlers.push({
+          tryStart, tryEnd, catchStart,
+          catchVarSlot, catchVarName, finallyStart,
+        });
         break;
       }
 
@@ -264,6 +313,16 @@ class BytecodeCompiler {
       }
 
       case "AssignmentExpression": {
+        if (expr.left.type === "MemberExpression") {
+          // stack: value, obj → SetPropertyAssign → pop obj, pop value, assign, push value
+          this.compileExpression(expr.right);       // stack: value
+          this.compileExpression(expr.left.object); // stack: value, obj
+          if (!expr.left.computed && expr.left.property.type === "Identifier") {
+            const nameIdx = this.addConstant(expr.left.property.name);
+            this.emit("SetPropertyAssign", nameIdx);
+          }
+          break;
+        }
         this.compileExpression(expr.right);
         if (expr.left.type === "Identifier") {
           this.emitStore(expr.left.name);
@@ -279,8 +338,33 @@ class BytecodeCompiler {
           const nameIdx = this.addConstant(expr.property.name);
           this.emit("GetProperty", nameIdx);
         } else {
-          throw new Error("Computed member expression not yet supported in VM");
+          this.compileExpression(expr.property);
+          this.emit("GetPropertyComputed");
         }
+        break;
+      }
+
+      case "ObjectExpression": {
+        this.emit("CreateObject");
+        for (const prop of expr.properties) {
+          if (prop.type === "SpreadElement") {
+            // TODO: spread
+            continue;
+          }
+          this.emit("Dup"); // obj を残す
+          this.compileExpression(prop.value);
+          const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+          const nameIdx = this.addConstant(key);
+          this.emit("SetProperty", nameIdx);
+        }
+        break;
+      }
+
+      case "ArrayExpression": {
+        for (const el of expr.elements) {
+          this.compileExpression(el);
+        }
+        this.emit("CreateArray", expr.elements.length);
         break;
       }
 
@@ -351,14 +435,20 @@ class BytecodeCompiler {
           this.emit("Negate");
         } else if (expr.operator === "!") {
           this.emit("LogicalNot");
+        } else if (expr.operator === "typeof") {
+          this.emit("TypeOf");
         } else {
           throw new Error(`Unsupported unary operator: ${expr.operator}`);
         }
         break;
       }
 
-      default:
-        throw new Error(`Unsupported expression: ${expr.type}`);
+      default: {
+        // 未対応の式は AST を定数テーブルに入れて VM 側で tree-walking 実行
+        const exprIndex = this.addConstant(expr);
+        this.emit("ExecExpr", exprIndex);
+        break;
+      }
     }
   }
 }
