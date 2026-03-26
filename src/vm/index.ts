@@ -29,6 +29,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     log: options.console?.log ?? console.log,
   };
   vm.setGlobal("console", consoleObj);
+  vm.setGlobal("Error", { __nativeConstructor: true, name: "Error" });
 
   if (options.collectFeedback) {
     vm.feedback = new FeedbackCollector();

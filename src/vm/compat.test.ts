@@ -81,6 +81,9 @@ const cases: [string, string][] = [
 
   // Phase 3: in / instanceof
   ["in 演算子", 'var o = { x: 1 }; "x" in o;'],
+
+  // throw new Error
+  ["throw new Error + catch", 'var msg = ""; try { throw new Error("oops"); } catch (e) { msg = e.message; } msg;'],
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {

@@ -402,17 +402,23 @@ export class VM {
           if (ctor.prototype) {
             newObj.__proto__ = ctor.prototype;
           }
-          if (ctor.bytecode) {
+          if (ctor.__nativeConstructor) {
+            // ネイティブコンストラクタ (Error 等)
+            if (ctor.name === "Error") {
+              this.push({ message: args[0] ?? "" });
+            } else {
+              throw new Error(`Unknown native constructor: ${ctor.name}`);
+            }
+          } else if (ctor.bytecode) {
             // BytecodeFunction
             const locals = new Array(ctor.localCount).fill(undefined);
             for (let i = 0; i < ctor.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
             this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj });
-            // Construct は Return 時に特殊処理が必要
-            // → Return で戻り値がオブジェクトでなければ newObj を返す
-            // 簡易: __constructing フラグで管理
             (frame as any).__pendingNewObj = newObj;
+          } else {
+            throw new Error("Not a constructor");
           }
           break;
         }
