@@ -1,4 +1,5 @@
 import type { BytecodeFunction, Instruction } from "./bytecode.js";
+import type { FeedbackCollector } from "../jit/feedback.js";
 
 type CallFrame = {
   func: BytecodeFunction;
@@ -13,6 +14,7 @@ export class VM {
   private sp = -1;
   private globals: Map<string, unknown> = new Map();
   private frames: CallFrame[] = [];
+  feedback: FeedbackCollector | null = null;
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -338,10 +340,10 @@ export class VM {
           }
 
           if (typeof callee === "object" && callee !== null && "bytecode" in callee) {
-            // BytecodeFunction
             const fn = callee as BytecodeFunction;
+            // 型フィードバック記録
+            if (this.feedback) this.feedback.recordCall(fn, args);
             const locals = new Array(fn.localCount).fill(undefined);
-            // パラメータをローカルスロットにバインド
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
@@ -418,6 +420,10 @@ export class VM {
         // Return
         case "Return": {
           let returnValue = this.pop();
+          // 型フィードバック: 戻り値の型を記録
+          if (this.feedback) {
+            this.feedback.recordReturn(frame.func, returnValue);
+          }
           this.frames.pop();
           // Construct からの戻り: returnValue がオブジェクトでなければ this (newObj) を返す
           if (this.frames.length > 0) {
