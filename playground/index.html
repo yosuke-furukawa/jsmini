@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>jsmini playground</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #1e1e1e;
+  --panel: #252526;
+  --border: #3c3c3c;
+  --text: #cccccc;
+  --text-muted: #808080;
+  --accent: #569cd6;
+  --green: #6a9955;
+  --orange: #ce9178;
+  --red: #f44747;
+  --purple: #c586c0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 48px 1fr;
+}
+
+/* Header */
+header {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  gap: 16px;
+}
+header h1 { font-size: 16px; font-weight: 600; color: var(--accent); }
+#run-btn {
+  padding: 6px 16px;
+  background: #0e639c;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+}
+#run-btn:hover { background: #1177bb; }
+#run-btn:active { background: #0d5689; }
+.shortcut-hint { font-size: 11px; color: var(--text-muted); }
+
+/* Main layout */
+main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+}
+
+/* Editor pane */
+#editor-pane {
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+#editor-pane .cm-editor {
+  flex: 1;
+  height: 100%;
+}
+#editor-pane .cm-scroller { overflow: auto; }
+
+/* Output pane */
+#output-pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Tabs */
+.tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex-shrink: 0;
+}
+.tab-btn {
+  padding: 8px 16px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab-badge {
+  font-size: 10px;
+  background: var(--border);
+  padding: 1px 5px;
+  border-radius: 8px;
+  margin-left: 4px;
+}
+
+/* Panels */
+.panel { display: none; flex: 1; overflow: auto; padding: 12px; }
+.panel.active { display: block; }
+
+/* Token table */
+#token-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: "SF Mono", "Fira Code", monospace;
+}
+#token-table th {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-weight: 500;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+#token-table td { padding: 3px 8px; }
+#token-table tbody tr { cursor: pointer; }
+#token-table tbody tr:hover { background: rgba(255,255,255,0.08); }
+.tok-keyword { color: var(--accent); }
+.tok-literal { color: var(--green); }
+.tok-operator { color: var(--orange); }
+.tok-delimiter { color: var(--text-muted); }
+.tok-identifier { color: var(--text); }
+.tok-eof { color: var(--text-muted); font-style: italic; }
+
+/* AST panel */
+#ast-container { position: relative; }
+#ast-svg { display: block; }
+#ast-svg .ast-node { cursor: pointer; }
+#ast-svg .ast-node:hover rect { filter: brightness(1.3); }
+.ast-zoom {
+  position: sticky;
+  top: 0;
+  display: flex;
+  gap: 4px;
+  padding-bottom: 8px;
+}
+.ast-zoom button {
+  padding: 2px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* Result panel */
+.log-line {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 13px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.return-value {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 13px;
+}
+.return-value span { color: var(--text); }
+.error-box {
+  background: rgba(244, 71, 71, 0.1);
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 13px;
+  color: var(--red);
+  white-space: pre-wrap;
+}
+.empty-msg {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 13px;
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>jsmini playground</h1>
+  <button id="run-btn">Run</button>
+  <span class="shortcut-hint">Cmd+Enter</span>
+</header>
+<main>
+  <div id="editor-pane"></div>
+  <div id="output-pane">
+    <div class="tab-bar">
+      <button class="tab-btn active" data-tab="tokens">Tokens <span id="badge-tokens" class="tab-badge"></span></button>
+      <button class="tab-btn" data-tab="ast">AST <span id="badge-ast" class="tab-badge"></span></button>
+      <button class="tab-btn" data-tab="result">Result</button>
+    </div>
+    <div id="panel-tokens" class="panel active">
+      <p class="empty-msg">Run to see tokens</p>
+    </div>
+    <div id="panel-ast" class="panel">
+      <p class="empty-msg">Run to see AST</p>
+    </div>
+    <div id="panel-result" class="panel">
+      <p class="empty-msg">Run to see result</p>
+    </div>
+  </div>
+</main>
+
+<script src="jsmini.bundle.js"></script>
+<script>
+const { basicSetup, javascript, oneDark, EditorView, keymap, Prec } = jsmini;
+
+// ========== CodeMirror setup ==========
+const defaultCode = `// jsmini playground
+var x = 10;
+var y = 20;
+
+function add(a, b) {
+  return a + b;
+}
+
+var result = add(x, y);
+console.log(result);
+
+if (result > 25) {
+  console.log("large");
+} else {
+  console.log("small");
+}
+
+var sum = 0;
+for (var i = 0; i < 5; i = i + 1) {
+  sum = sum + i;
+}
+console.log(sum);
+`;
+
+const runKeymap = Prec.highest(keymap.of([{
+  key: "Mod-Enter",
+  run: () => { runCode(); return true; }
+}]));
+
+const view = new EditorView({
+  doc: defaultCode,
+  extensions: [basicSetup, javascript(), oneDark, runKeymap],
+  parent: document.getElementById("editor-pane"),
+});
+
+// ========== Tab switching ==========
+const tabBtns = document.querySelectorAll(".tab-btn");
+const panels = {
+  tokens: document.getElementById("panel-tokens"),
+  ast: document.getElementById("panel-ast"),
+  result: document.getElementById("panel-result"),
+};
+
+function switchTab(name) {
+  tabBtns.forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  Object.entries(panels).forEach(([k, el]) => el.classList.toggle("active", k === name));
+}
+
+tabBtns.forEach(btn => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
+
+// ========== Token rendering ==========
+const KEYWORD_TYPES = new Set(["Var","If","Else","True","False","Null","While","For","Function","Return"]);
+const LITERAL_TYPES = new Set(["Number","String"]);
+const OPERATOR_TYPES = new Set(["Plus","Minus","Star","Slash","Percent","Equals","EqualEqual","EqualEqualEqual","Bang","BangEqual","BangEqualEqual","Less","Greater","LessEqual","GreaterEqual","AmpersandAmpersand","PipePipe"]);
+const DELIMITER_TYPES = new Set(["LeftParen","RightParen","LeftBrace","RightBrace","LeftBracket","RightBracket","Colon","Dot","Comma","Semicolon"]);
+
+function tokenClass(type) {
+  if (type === "EOF") return "tok-eof";
+  if (KEYWORD_TYPES.has(type)) return "tok-keyword";
+  if (LITERAL_TYPES.has(type)) return "tok-literal";
+  if (OPERATOR_TYPES.has(type)) return "tok-operator";
+  if (DELIMITER_TYPES.has(type)) return "tok-delimiter";
+  return "tok-identifier";
+}
+
+function renderTokens(tokens, container) {
+  let html = `<table id="token-table"><thead><tr><th>#</th><th>Type</th><th>Value</th><th>Line</th><th>Col</th></tr></thead><tbody>`;
+  tokens.forEach((t, i) => {
+    const cls = tokenClass(t.type);
+    const val = t.type === "EOF" ? "" : escapeHtml(t.value);
+    html += `<tr data-token-idx="${i}"><td>${i}</td><td class="${cls}">${t.type}</td><td>${val}</td><td>${t.line}</td><td>${t.column}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+  container.innerHTML = html;
+
+  // Token クリック → エディタハイライト
+  container.querySelectorAll("tr[data-token-idx]").forEach(row => {
+    row.addEventListener("click", () => {
+      const idx = Number(row.dataset.tokenIdx);
+      const t = tokens[idx];
+      if (t.type === "EOF") return;
+      const from = tokenCharOffset(t);
+      const to = from + tokenSourceLength(t);
+      highlightRange(from, to);
+    });
+  });
+}
+
+// ========== AST rendering (SVG) ==========
+const NODE_W = 130;
+const NODE_H = 44;
+const V_GAP = 40;
+const H_GAP = 12;
+
+const CHILD_FIELDS = {
+  Program: ["body"],
+  ExpressionStatement: ["expression"],
+  VariableDeclaration: ["declarations"],
+  VariableDeclarator: ["id", "init"],
+  FunctionDeclaration: ["id", "params", "body"],
+  BlockStatement: ["body"],
+  IfStatement: ["test", "consequent", "alternate"],
+  WhileStatement: ["test", "body"],
+  ForStatement: ["init", "test", "update", "body"],
+  ReturnStatement: ["argument"],
+  BinaryExpression: ["left", "right"],
+  LogicalExpression: ["left", "right"],
+  UnaryExpression: ["argument"],
+  AssignmentExpression: ["left", "right"],
+  CallExpression: ["callee", "arguments"],
+  MemberExpression: ["object", "property"],
+  ObjectExpression: ["properties"],
+  ArrayExpression: ["elements"],
+  Property: ["key", "value"],
+  Literal: [],
+  Identifier: [],
+};
+
+const NODE_COLORS = {
+  Program: "#2d4a7a", BlockStatement: "#2d4a7a",
+  ExpressionStatement: "#2d4a7a", VariableDeclaration: "#2d4a7a", VariableDeclarator: "#2d4a7a",
+  FunctionDeclaration: "#3a5e3a",
+  IfStatement: "#5a3e6b", WhileStatement: "#5a3e6b", ForStatement: "#5a3e6b", ReturnStatement: "#5a3e6b",
+  BinaryExpression: "#3a5e3a", LogicalExpression: "#3a5e3a", UnaryExpression: "#3a5e3a",
+  AssignmentExpression: "#3a5e3a", CallExpression: "#3a5e3a", MemberExpression: "#3a5e3a",
+  ObjectExpression: "#3a5e3a", ArrayExpression: "#3a5e3a", Property: "#3a5e3a",
+  Literal: "#6b4226", Identifier: "#6b4226",
+};
+
+// トークンカーソル: AST の葉ノードを左から右へトークンとマッチさせる
+let _tokenCursor = 0;
+let _tokensForAST = [];
+
+// 葉ノードにマッチするトークンタイプ
+const LEAF_TOKEN_MAP = {
+  Literal: new Set(["Number", "String", "True", "False", "Null"]),
+  Identifier: new Set(["Identifier"]),
+};
+
+function matchLeafToken(node) {
+  const expected = LEAF_TOKEN_MAP[node.type];
+  if (!expected) return null;
+  while (_tokenCursor < _tokensForAST.length) {
+    const t = _tokensForAST[_tokenCursor];
+    if (expected.has(t.type)) {
+      _tokenCursor++;
+      return t;
+    }
+    _tokenCursor++;
+  }
+  return null;
+}
+
+function astToDisplayTree(node) {
+  if (!node || typeof node !== "object" || !node.type) return null;
+
+  let label = node.type;
+  if (node.type === "Literal") label += `(${JSON.stringify(node.value)})`;
+  else if (node.type === "Identifier") label += `(${node.name})`;
+  else if (node.type === "BinaryExpression" || node.type === "LogicalExpression")
+    label += ` ${node.operator}`;
+  else if (node.type === "UnaryExpression") label += ` ${node.operator}`;
+  else if (node.type === "AssignmentExpression") label += ` ${node.operator}`;
+  else if (node.type === "VariableDeclaration") label += ` ${node.kind}`;
+
+  const children = [];
+  const fields = CHILD_FIELDS[node.type] || [];
+  for (const field of fields) {
+    const val = node[field];
+    if (val == null) continue;
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        const child = astToDisplayTree(item);
+        if (child) children.push(child);
+      }
+    } else {
+      const child = astToDisplayTree(val);
+      if (child) children.push(child);
+    }
+  }
+
+  // ソース位置: 葉ノードはトークンからマッチ、非葉は子から集約
+  let sourceStart = Infinity, sourceEnd = -1;
+  if (children.length === 0) {
+    const token = matchLeafToken(node);
+    if (token) {
+      sourceStart = tokenCharOffset(token);
+      sourceEnd = sourceStart + tokenSourceLength(token);
+    }
+  } else {
+    for (const c of children) {
+      if (c.sourceStart < sourceStart) sourceStart = c.sourceStart;
+      if (c.sourceEnd > sourceEnd) sourceEnd = c.sourceEnd;
+    }
+  }
+
+  return { label, type: node.type, children, x: 0, y: 0, width: 0, sourceStart, sourceEnd };
+}
+
+function subtreeWidth(node) {
+  if (node.children.length === 0) return NODE_W;
+  let total = 0;
+  for (const c of node.children) total += subtreeWidth(c);
+  total += (node.children.length - 1) * H_GAP;
+  return Math.max(NODE_W, total);
+}
+
+function assignPositions(node, leftX, y) {
+  const sw = subtreeWidth(node);
+  node.x = leftX + sw / 2 - NODE_W / 2;
+  node.y = y;
+  node.width = sw;
+
+  let cx = leftX;
+  for (const child of node.children) {
+    const cw = subtreeWidth(child);
+    assignPositions(child, cx, y + NODE_H + V_GAP);
+    cx += cw + H_GAP;
+  }
+}
+
+function countNodes(node) {
+  let count = 1;
+  for (const c of node.children) count += countNodes(c);
+  return count;
+}
+
+function renderASTSvg(root, container) {
+  assignPositions(root, 20, 20);
+
+  // compute dimensions
+  let maxX = 0, maxY = 0;
+  function scan(n) {
+    maxX = Math.max(maxX, n.x + NODE_W);
+    maxY = Math.max(maxY, n.y + NODE_H);
+    n.children.forEach(scan);
+  }
+  scan(root);
+
+  const w = maxX + 40;
+  const h = maxY + 40;
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" id="ast-svg">`;
+
+  // edges first
+  function drawEdges(n) {
+    const px = n.x + NODE_W / 2;
+    const py = n.y + NODE_H;
+    for (const c of n.children) {
+      const cx = c.x + NODE_W / 2;
+      const cy = c.y;
+      svg += `<line x1="${px}" y1="${py}" x2="${cx}" y2="${cy}" stroke="#555" stroke-width="1.5"/>`;
+      drawEdges(c);
+    }
+  }
+  drawEdges(root);
+
+  // nodes (clickable groups)
+  let nodeId = 0;
+  const nodeMap = {};
+  function drawNodes(n) {
+    const id = nodeId++;
+    nodeMap[id] = n;
+    const color = NODE_COLORS[n.type] || "#444";
+    svg += `<g class="ast-node" data-node-id="${id}">`;
+    svg += `<rect x="${n.x}" y="${n.y}" width="${NODE_W}" height="${NODE_H}" rx="6" fill="${color}" stroke="#666" stroke-width="1"/>`;
+    let display = n.label;
+    if (display.length > 18) display = display.slice(0, 17) + "...";
+    svg += `<text x="${n.x + NODE_W/2}" y="${n.y + NODE_H/2 + 4}" text-anchor="middle" fill="#eee" font-size="11" font-family="monospace">${escapeHtml(display)}</text>`;
+    svg += `</g>`;
+    n.children.forEach(drawNodes);
+  }
+  drawNodes(root);
+
+  svg += `</svg>`;
+
+  // zoom controls
+  let scale = 1;
+  container.innerHTML = `<div class="ast-zoom">
+    <button id="zoom-in">+</button>
+    <button id="zoom-out">-</button>
+    <button id="zoom-reset">Reset</button>
+  </div><div id="ast-scroll" style="overflow:auto;flex:1">${svg}</div>`;
+
+  const svgEl = container.querySelector("#ast-svg");
+  container.querySelector("#zoom-in").onclick = () => { scale = Math.min(scale + 0.2, 3); svgEl.style.transform = `scale(${scale})`; svgEl.style.transformOrigin = "0 0"; };
+  container.querySelector("#zoom-out").onclick = () => { scale = Math.max(scale - 0.2, 0.2); svgEl.style.transform = `scale(${scale})`; svgEl.style.transformOrigin = "0 0"; };
+  container.querySelector("#zoom-reset").onclick = () => { scale = 1; svgEl.style.transform = ""; };
+
+  // AST ノードクリック → エディタハイライト
+  container.querySelectorAll(".ast-node").forEach(g => {
+    g.addEventListener("click", () => {
+      const n = nodeMap[g.dataset.nodeId];
+      if (n && n.sourceStart < Infinity && n.sourceEnd > -1) {
+        highlightRange(n.sourceStart, n.sourceEnd);
+      }
+    });
+  });
+}
+
+// ========== Result rendering ==========
+function renderResult(logs, returnValue, error, container) {
+  let html = "";
+  if (error) {
+    html += `<div class="error-box">${escapeHtml(error)}</div>`;
+  }
+  if (logs.length > 0) {
+    for (const args of logs) {
+      const text = args.map(a => typeof a === "object" && a !== null ? JSON.stringify(a, null, 2) : String(a)).join(" ");
+      html += `<div class="log-line">${escapeHtml(text)}</div>`;
+    }
+  }
+  if (!error) {
+    html += `<div class="return-value">Return: <span>${escapeHtml(formatValue(returnValue))}</span></div>`;
+  }
+  if (!error && logs.length === 0) {
+    html += `<p class="empty-msg">No console output</p>`;
+  }
+  container.innerHTML = html;
+}
+
+function formatValue(val) {
+  if (val === undefined) return "undefined";
+  if (val === null) return "null";
+  if (typeof val === "object") return JSON.stringify(val, null, 2);
+  return String(val);
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// ========== Source highlight ==========
+// ソースの行開始オフセットテーブルを構築
+function computeLineOffsets(source) {
+  const offsets = [0];
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] === "\n") offsets.push(i + 1);
+  }
+  return offsets;
+}
+
+let lastLineOffsets = [];
+let lastSource = "";
+
+function highlightRange(from, to) {
+  view.dispatch({
+    selection: { anchor: from, head: to },
+    scrollIntoView: true,
+  });
+  view.focus();
+}
+
+function tokenCharOffset(token) {
+  if (token.line - 1 >= lastLineOffsets.length) return 0;
+  return lastLineOffsets[token.line - 1] + (token.column - 1);
+}
+
+function tokenSourceLength(token) {
+  if (token.type === "String") return token.value.length + 2; // quotes
+  if (token.type === "EOF") return 0;
+  return token.value.length;
+}
+
+// ========== Run ==========
+function runCode() {
+  const source = view.state.doc.toString();
+  lastSource = source;
+  lastLineOffsets = computeLineOffsets(source);
+
+  // Tokens
+  let tokens = null;
+  try {
+    tokens = jsmini.tokenize(source);
+    renderTokens(tokens, panels.tokens);
+    document.getElementById("badge-tokens").textContent = tokens.length;
+  } catch (e) {
+    panels.tokens.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
+    document.getElementById("badge-tokens").textContent = "!";
+  }
+
+  // AST
+  let ast = null;
+  try {
+    ast = jsmini.parse(source);
+    _tokenCursor = 0;
+    _tokensForAST = tokens || [];
+    const displayTree = astToDisplayTree(ast);
+    if (displayTree) {
+      document.getElementById("badge-ast").textContent = countNodes(displayTree);
+      renderASTSvg(displayTree, panels.ast);
+    }
+  } catch (e) {
+    panels.ast.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
+    document.getElementById("badge-ast").textContent = "!";
+  }
+
+  // Result
+  const logs = [];
+  let returnValue;
+  let error = null;
+  try {
+    returnValue = jsmini.evaluate(source, { log: (...args) => logs.push(args) });
+  } catch (e) {
+    error = `${e.constructor?.name || "Error"}: ${e.message}`;
+  }
+  renderResult(logs, returnValue, error, panels.result);
+
+  switchTab("result");
+}
+
+// Run button
+document.getElementById("run-btn").addEventListener("click", runCode);
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.swp
+.claude/
+test262/
+playground/jsmini.bundle.js
+playground/jsmini.bundle.js.map
+playground/_entry.ts
