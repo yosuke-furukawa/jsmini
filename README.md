@@ -63,13 +63,26 @@ Source Code
 - 例外ハンドラテーブルによる try/catch
 - Phase 1〜3 の全構文に対応
 
+### Phase 5 — Wasm JIT
+
+- 型フィードバック収集 (`--print-feedback`)：callCount, argTypes (int32/uint32/f64), isMonomorphic
+- ホットコード検出 → Wasm バイナリを手で組み立て → `WebAssembly.instantiate()`
+- 型特殊化: int32 → `i32.add`, float → `f64.add`
+- 脱最適化: 型推測が外れたら Bytecode VM にフォールバック
+- 多層実行の可視化 (`--trace-tier`)
+
 ## パフォーマンス比較
 
-| Benchmark | Tree-Walking | Bytecode VM | Speedup |
-|-----------|-------------|-------------|---------|
-| fibonacci(25) | 138ms | 40ms | **3.4x** |
-| for loop (10000) | 2.1ms | 1.6ms | **1.3x** |
-| nested loop (100x100) | 2.3ms | 1.2ms | **1.9x** |
+V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run bench`):
+
+| Benchmark | Tree-Walking | Bytecode VM | jsmini-JIT (Wasm) |
+|-----------|-------------|-------------|-------------------|
+| fibonacci(25) | 757ms | 709ms (1.07x) | — |
+| for loop sum (10K) | 21ms | 32ms (0.64x) | — |
+| hot add (10K calls) | 43ms | 55ms (0.79x) | 47ms (0.91x) |
+| nested loop (100x100) | 22ms | 30ms (0.71x) | — |
+
+*V8-JIT を有効にすると Bytecode VM が 2〜3x 速くなるが、それは V8 の TurboFan が jsmini の VM ループを最適化しているため。詳細は [LEARN-JIT.md](./LEARN-JIT.md) を参照。*
 
 ## Test262 準拠率
 
@@ -119,6 +132,19 @@ npm start -- --print-bytecode 'function add(a, b) { return a + b; }'
   0001: LdaLocal         1
   0002: Add
   0003: Return
+```
+
+### JIT
+
+```bash
+# JIT 有効で実行
+npm start -- --jit 'function add(a,b){return a+b;} for(var i=0;i<200;i=i+1){add(i,1);}'
+
+# 型フィードバック表示
+npm start -- --print-feedback 'function add(a,b){return a+b;} for(var i=0;i<100;i=i+1){add(i,1);}'
+
+# 多層実行トレース
+npm start -- --trace-tier 'function add(a,b){return a+b;} for(var i=0;i<110;i=i+1){add(i,1);} add("a","b");'
 ```
 
 ### テストを実行
@@ -176,8 +202,8 @@ src/
 - [x] **Phase 1** — Lexer + Parser + 最小 Tree-Walking Interpreter
 - [x] **Phase 2** — オブジェクト、配列、let/const、typeof、try/catch、new、this
 - [x] **Phase 3** — アロー関数、テンプレートリテラル、クラス、分割代入、スプレッド/レスト、for...of
-- [x] **Phase 4** — Bytecode VM (スタックベース、`--print-bytecode`、3.4x 高速化)
-- [ ] **Phase 5** — Wasm JIT (ホットコード検出 → Wasm 生成 → 脱最適化)
+- [x] **Phase 4** — Bytecode VM (スタックベース、`--print-bytecode`)
+- [x] **Phase 5** — Wasm JIT (型フィードバック → 型特殊化 → 脱最適化、[学んだこと](./LEARN-JIT.md))
 
 詳細は [PLAN.md](./PLAN.md) を参照。
 

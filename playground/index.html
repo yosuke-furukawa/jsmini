@@ -238,17 +238,29 @@ main {
 .env-var-name { color: var(--accent); }
 .env-var-value { color: var(--green); }
 .env-var-type { color: var(--text-muted); font-size: 10px; }
+
+/* Bytecode panel */
+.bytecode-dump {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 12px;
+  white-space: pre;
+  line-height: 1.6;
+}
+.bytecode-dump .bc-header { color: var(--accent); font-weight: 600; }
+.bytecode-dump .bc-addr { color: var(--text-muted); }
+.bytecode-dump .bc-op { color: var(--orange); }
+.bytecode-dump .bc-comment { color: var(--green); }
 </style>
 </head>
 <body>
 <header>
   <h1>jsmini playground</h1>
+  <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
+    <option value="tree-walking">Tree-Walking</option>
+    <option value="vm">Bytecode VM</option>
+  </select>
   <button id="run-btn">Run</button>
   <span class="shortcut-hint">Cmd+Enter</span>
-  <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-muted);cursor:pointer;">
-    <input type="checkbox" id="vm-toggle">
-    <span>VM mode</span>
-  </label>
   <div class="step-controls">
     <button id="step-back-btn" disabled>&lt;</button>
     <button id="step-fwd-btn" disabled>Step &gt;</button>
@@ -262,6 +274,7 @@ main {
     <div class="tab-bar">
       <button class="tab-btn active" data-tab="tokens">Tokens <span id="badge-tokens" class="tab-badge"></span></button>
       <button class="tab-btn" data-tab="ast">AST <span id="badge-ast" class="tab-badge"></span></button>
+      <button class="tab-btn" data-tab="bytecode">Bytecode</button>
       <button class="tab-btn" data-tab="result">Result</button>
       <button class="tab-btn" data-tab="env">Env</button>
     </div>
@@ -270,6 +283,9 @@ main {
     </div>
     <div id="panel-ast" class="panel">
       <p class="empty-msg">Run to see AST</p>
+    </div>
+    <div id="panel-bytecode" class="panel">
+      <p class="empty-msg">Run in VM mode to see bytecode</p>
     </div>
     <div id="panel-result" class="panel">
       <p class="empty-msg">Run to see result</p>
@@ -282,7 +298,8 @@ main {
 
 <script src="jsmini.bundle.js"></script>
 <script>
-const { basicSetup, javascript, oneDark, EditorView, keymap, Prec, StateEffect, StateField, Decoration, RangeSet } = jsmini;
+const { basicSetup, javascript, oneDark, EditorView, keymap, Prec, StateEffect, StateField, Decoration, RangeSet,
+        vmEvaluate, compile, disassemble } = jsmini;
 
 // ========== Step highlight decoration ==========
 const setStepHighlight = StateEffect.define();
@@ -393,6 +410,7 @@ const tabBtns = document.querySelectorAll(".tab-btn");
 const panels = {
   tokens: document.getElementById("panel-tokens"),
   ast: document.getElementById("panel-ast"),
+  bytecode: document.getElementById("panel-bytecode"),
   result: document.getElementById("panel-result"),
   env: document.getElementById("panel-env"),
 };
@@ -682,6 +700,27 @@ function formatValue(val) {
   return String(val);
 }
 
+// ========== Bytecode rendering ==========
+function renderBytecode(dump, container) {
+  // disassemble の出力をシンタックスハイライト
+  const lines = dump.split("\n").map(line => {
+    // == <name> (params: N, locals: N) == → ヘッダー
+    if (line.match(/^(\s*)== .+ ==/)) {
+      return `<span class="bc-header">${escapeHtml(line)}</span>`;
+    }
+    // 0000: OpCode  operand ; comment
+    const m = line.match(/^(\s*\d{4}: )(\S+)(.*?)(;.*)?$/);
+    if (m) {
+      let result = `<span class="bc-addr">${escapeHtml(m[1])}</span><span class="bc-op">${escapeHtml(m[2])}</span>`;
+      if (m[3]) result += escapeHtml(m[3]);
+      if (m[4]) result += `<span class="bc-comment">${escapeHtml(m[4])}</span>`;
+      return result;
+    }
+    return escapeHtml(line);
+  });
+  container.innerHTML = `<div class="bytecode-dump">${lines.join("\n")}</div>`;
+}
+
 function escapeHtml(str) {
   return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -757,18 +796,31 @@ function runCode() {
     document.getElementById("badge-ast").textContent = "!";
   }
 
+  const mode = document.getElementById("mode-select").value;
+  const isVM = mode === "vm";
+
+  // Bytecode (VM mode only)
+  if (isVM) {
+    try {
+      const func = compile(source);
+      const dump = disassemble(func);
+      renderBytecode(dump, panels.bytecode);
+    } catch (e) {
+      panels.bytecode.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
+    }
+  } else {
+    panels.bytecode.innerHTML = `<p class="empty-msg">Switch to VM mode to see bytecode</p>`;
+  }
+
   // Result + Step 記録
   const logs = [];
   let returnValue;
   let error = null;
   steps = [];
   stepIndex = -1;
-  const useVM = document.getElementById("vm-toggle").checked;
   try {
-    if (useVM) {
-      returnValue = jsmini.vmEvaluate(source, {
-        log: (...args) => logs.push(args),
-      });
+    if (isVM) {
+      returnValue = vmEvaluate(source, { log: (...args) => logs.push(args) });
     } else {
       returnValue = jsmini.evaluate(source, {
         console: { log: (...args) => logs.push(args) },
@@ -780,20 +832,20 @@ function runCode() {
   }
   renderResult(logs, returnValue, error, panels.result);
 
-  // Step 用のソース範囲を事前計算
-  if (tokens && ast) {
+  // Step 用のソース範囲を事前計算 (tree-walking only)
+  if (!isVM && tokens && ast) {
     stmtSourceRanges = collectStatementRanges(ast, tokens);
   }
 
   // Step UI 初期化
   if (steps.length > 0) {
-    stepIndex = steps.length - 1; // 最終状態を表示
+    stepIndex = steps.length - 1;
     updateStepUI();
   } else {
     updateStepUI();
   }
 
-  switchTab("result");
+  switchTab(isVM ? "bytecode" : "result");
 }
 
 // ========== Step execution ==========

@@ -1,4 +1,6 @@
 import type { BytecodeFunction, Instruction } from "./bytecode.js";
+import type { FeedbackCollector } from "../jit/feedback.js";
+import type { JitManager } from "../jit/jit.js";
 
 type CallFrame = {
   func: BytecodeFunction;
@@ -13,6 +15,8 @@ export class VM {
   private sp = -1;
   private globals: Map<string, unknown> = new Map();
   private frames: CallFrame[] = [];
+  feedback: FeedbackCollector | null = null;
+  jit: JitManager | null = null;
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -338,10 +342,18 @@ export class VM {
           }
 
           if (typeof callee === "object" && callee !== null && "bytecode" in callee) {
-            // BytecodeFunction
             const fn = callee as BytecodeFunction;
+            // 型フィードバック記録
+            if (this.feedback) this.feedback.recordCall(fn, args);
+            // JIT: Wasm キャッシュがあればそちらで実行
+            if (this.jit) {
+              const jitResult = this.jit.tryCall(fn, args);
+              if (jitResult !== null) {
+                this.push(jitResult.result);
+                break;
+              }
+            }
             const locals = new Array(fn.localCount).fill(undefined);
-            // パラメータをローカルスロットにバインド
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
@@ -401,10 +413,9 @@ export class VM {
             newObj.__proto__ = ctor.prototype;
           }
           if (ctor.__nativeConstructor) {
-            // 組み込みコンストラクタ (Error 等)
+            // ネイティブコンストラクタ (Error 等)
             if (ctor.name === "Error") {
-              const errObj: Record<string, unknown> = { message: args[0] ?? "" };
-              this.push(errObj);
+              this.push({ message: args[0] ?? "" });
             } else {
               throw new Error(`Unknown native constructor: ${ctor.name}`);
             }
@@ -415,10 +426,9 @@ export class VM {
               locals[i] = args[i] ?? undefined;
             }
             this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj });
-            // Construct は Return 時に特殊処理が必要
-            // → Return で戻り値がオブジェクトでなければ newObj を返す
-            // 簡易: __constructing フラグで管理
             (frame as any).__pendingNewObj = newObj;
+          } else {
+            throw new Error("Not a constructor");
           }
           break;
         }
@@ -426,6 +436,10 @@ export class VM {
         // Return
         case "Return": {
           let returnValue = this.pop();
+          // 型フィードバック: 戻り値の型を記録
+          if (this.feedback) {
+            this.feedback.recordReturn(frame.func, returnValue);
+          }
           this.frames.pop();
           // Construct からの戻り: returnValue がオブジェクトでなければ this (newObj) を返す
           if (this.frames.length > 0) {

@@ -11,6 +11,7 @@ const benchmarks = [
       }
       fib(25);
     `,
+    jitEligible: false, // 再帰 + 比較 + 分岐 → 現 JIT では非対応
   },
   {
     name: "for loop sum (10000)",
@@ -21,6 +22,31 @@ const benchmarks = [
       }
       sum;
     `,
+    jitEligible: false, // ループは VM で実行、JIT は関数単位
+  },
+  {
+    name: "hot function add (10000 calls)",
+    source: `
+      function add(a, b) { return a + b; }
+      var sum = 0;
+      for (var i = 0; i < 10000; i = i + 1) {
+        sum = sum + add(i, 1);
+      }
+      sum;
+    `,
+    jitEligible: true, // add が JIT 対象
+  },
+  {
+    name: "hot function mul (10000 calls)",
+    source: `
+      function mul(a, b) { return a * b; }
+      var sum = 0;
+      for (var i = 0; i < 10000; i = i + 1) {
+        sum = sum + mul(i, 2);
+      }
+      sum;
+    `,
+    jitEligible: true,
   },
   {
     name: "nested loop (100x100)",
@@ -33,6 +59,7 @@ const benchmarks = [
       }
       sum;
     `,
+    jitEligible: false,
   },
 ];
 
@@ -50,16 +77,26 @@ function bench(fn: () => unknown, warmup = 3, runs = 10): { result: unknown; avg
   return { result, avg, min: times[0] };
 }
 
-console.log("=== jsmini Benchmark: Tree-Walking vs Bytecode VM ===\n");
+console.log("=== jsmini Benchmark: Tree-Walking vs Bytecode VM vs Wasm JIT ===\n");
 
-for (const { name, source } of benchmarks) {
+for (const { name, source, jitEligible } of benchmarks) {
   const tw = bench(() => evaluate(source));
   const vm = bench(() => vmEvaluate(source));
-  const speedup = tw.avg / vm.avg;
 
-  console.log(`${name}`);
+  const twVsVm = tw.avg / vm.avg;
+
+  console.log(`${name}${jitEligible ? " [JIT eligible]" : ""}`);
   console.log(`  tree-walking : ${tw.avg.toFixed(2)}ms (min: ${tw.min.toFixed(2)}ms) result=${tw.result}`);
   console.log(`  bytecode-vm  : ${vm.avg.toFixed(2)}ms (min: ${vm.min.toFixed(2)}ms) result=${vm.result}`);
-  console.log(`  speedup      : ${speedup.toFixed(2)}x ${speedup > 1 ? "(VM faster)" : "(tree-walking faster)"}`);
+  console.log(`  vm speedup   : ${twVsVm.toFixed(2)}x`);
+
+  if (jitEligible) {
+    const jit = bench(() => vmEvaluate(source, { jit: true, jitThreshold: 50 }));
+    const twVsJit = tw.avg / jit.avg;
+    const vmVsJit = vm.avg / jit.avg;
+    console.log(`  wasm-jit     : ${jit.avg.toFixed(2)}ms (min: ${jit.min.toFixed(2)}ms) result=${jit.result}`);
+    console.log(`  jit vs tw    : ${twVsJit.toFixed(2)}x`);
+    console.log(`  jit vs vm    : ${vmVsJit.toFixed(2)}x`);
+  }
   console.log();
 }
