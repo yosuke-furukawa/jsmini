@@ -11,73 +11,98 @@ export class JitManager {
   private feedback: FeedbackCollector;
   private wasmCache: Map<BytecodeFunction, ((...args: number[]) => number) | null> = new Map();
   private threshold: number;
-  // 脱最適化された関数 (再 JIT しない)
   private deoptimized: Set<BytecodeFunction> = new Set();
-  // 脱最適化ログ
+
   deoptLog: string[] = [];
+  tierLog: string[] = [];
+  traceTier = false;
 
   constructor(feedback: FeedbackCollector, options: JitOptions) {
     this.feedback = feedback;
     this.threshold = options.threshold;
   }
 
-  // 関数呼び出し前に Wasm で実行できるか試みる
-  // 成功: { result } を返す
-  // 失敗/非対象: null を返す (VM で実行)
+  private logTier(func: BytecodeFunction, tier: string, callCount?: number): void {
+    if (!this.traceTier) return;
+    const count = callCount ?? this.feedback.get(func)?.callCount ?? 0;
+    this.tierLog.push(`[TIER] ${func.name}: ${tier} (call #${count})`);
+  }
+
   tryCall(func: BytecodeFunction, args: unknown[]): { result: number } | null {
-    // 脱最適化済みの関数は VM で実行
-    if (this.deoptimized.has(func)) return null;
+    const fb = this.feedback.get(func);
+    const callCount = fb?.callCount ?? 0;
+
+    // 脱最適化済み → VM
+    if (this.deoptimized.has(func)) {
+      this.logTier(func, "Bytecode VM (deoptimized)", callCount);
+      return null;
+    }
 
     // キャッシュ確認
     if (this.wasmCache.has(func)) {
       const cached = this.wasmCache.get(func)!;
-      if (!cached) return null; // コンパイル失敗済み
-
-      // 型ガード: 全引数が number か確認
-      if (!args.every(a => typeof a === "number")) {
-        // 脱最適化！
-        this.deoptimize(func, args);
+      if (!cached) {
+        this.logTier(func, "Bytecode VM", callCount);
         return null;
       }
 
+      // 型ガード
+      if (!args.every(a => typeof a === "number")) {
+        this.deoptimize(func, args);
+        this.logTier(func, "Bytecode VM (after deopt)", callCount);
+        return null;
+      }
+
+      this.logTier(func, "Wasm", callCount);
       return { result: cached(...(args as number[])) };
     }
 
     // しきい値チェック
-    const fb = this.feedback.get(func);
-    if (!fb || fb.callCount < this.threshold) return null;
+    if (!fb || callCount < this.threshold) {
+      this.logTier(func, "Bytecode VM", callCount);
+      return null;
+    }
 
-    // monomorphic かつ数値型
+    // monomorphic チェック
     if (!fb.isMonomorphic) {
       this.wasmCache.set(func, null);
+      this.logTier(func, "Bytecode VM (polymorphic)", callCount);
       return null;
     }
 
     const wasmArgTypes = this.feedback.getWasmArgTypes(func);
     if (!wasmArgTypes) {
       this.wasmCache.set(func, null);
+      this.logTier(func, "Bytecode VM (non-numeric)", callCount);
       return null;
     }
 
-    // 型特殊化
+    // 型特殊化 + コンパイル
     const allSame = wasmArgTypes.every(t => t === wasmArgTypes[0]);
     const spec: WasmNumericType = allSame && wasmArgTypes[0] === "i32" ? "i32" : "f64";
 
     const wasmFn = compileToWasmSync(func, spec);
     this.wasmCache.set(func, wasmFn);
 
-    if (wasmFn && args.every(a => typeof a === "number")) {
-      return { result: wasmFn(...(args as number[])) };
+    if (wasmFn) {
+      this.logTier(func, `→ Wasm compiled (${spec}, monomorphic: [${wasmArgTypes.join(", ")}])`, callCount);
+      if (args.every(a => typeof a === "number")) {
+        this.logTier(func, "Wasm", callCount);
+        return { result: wasmFn(...(args as number[])) };
+      }
     }
 
+    this.logTier(func, "Bytecode VM", callCount);
     return null;
   }
 
-  // 脱最適化: Wasm キャッシュを無効化し、以降は VM で実行
   private deoptimize(func: BytecodeFunction, args: unknown[]): void {
     const argTypes = args.map(a => typeof a).join(", ");
     const msg = `[DEOPT] ${func.name}: expected number args but got (${argTypes})`;
     this.deoptLog.push(msg);
+    if (this.traceTier) {
+      this.tierLog.push(msg);
+    }
     this.wasmCache.delete(func);
     this.deoptimized.add(func);
   }

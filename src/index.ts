@@ -11,9 +11,22 @@ if (flags.has("--print-bytecode")) {
   const func = compile(source);
   console.log(disassemble(func));
 } else if (flags.has("--print-feedback")) {
-  const result = vmEvaluate(source, { collectFeedback: true }) as VMResult;
+  const result = vmEvaluate(source, { collectFeedback: true, jit: true, jitThreshold: 100 }) as VMResult;
   console.log(result.value);
   console.log("\n" + result.feedback!.dump());
+} else if (flags.has("--trace-tier")) {
+  const result = vmEvaluate(source, {
+    jit: true,
+    jitThreshold: 100,
+    collectFeedback: true,
+    traceTier: true,
+  }) as VMResult;
+  console.log(result.value);
+  if (result.tierLog) {
+    console.log("\n" + result.tierLog.join("\n"));
+  }
+} else if (flags.has("--jit")) {
+  console.log(vmEvaluate(source, { jit: true, jitThreshold: 100 }));
 } else if (flags.has("--vm")) {
   console.log(vmEvaluate(source));
 } else {

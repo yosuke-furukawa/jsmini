@@ -12,6 +12,7 @@ type VMOptions = {
   console?: ConsoleOptions;
   collectFeedback?: boolean;
   collectDeopt?: boolean;
+  traceTier?: boolean;
   jit?: boolean;
   jitThreshold?: number;
 };
@@ -20,6 +21,7 @@ export type VMResult = {
   value: unknown;
   feedback?: FeedbackCollector;
   deoptLog?: string[];
+  tierLog?: string[];
 };
 
 export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): unknown {
@@ -46,14 +48,16 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     vm.jit = new JitManager(vm.feedback, {
       threshold: options.jitThreshold ?? 100,
     });
+    if (options.traceTier) vm.jit.traceTier = true;
   }
 
   const value = vm.execute(func);
 
-  if (options.collectFeedback || options.collectDeopt) {
+  if (options.collectFeedback || options.collectDeopt || options.traceTier) {
     const result: VMResult = { value };
     if (vm.feedback) result.feedback = vm.feedback;
     if (vm.jit && options.collectDeopt) result.deoptLog = vm.jit.deoptLog;
+    if (vm.jit && options.traceTier) result.tierLog = vm.jit.tierLog;
     return result;
   }
   return value;
