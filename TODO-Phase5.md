@@ -141,14 +141,16 @@ function add(a, b) { return a + b; }
 
 ### 実装
 
-- [ ] `src/jit/jit.ts` — JIT マネージャ
-  - しきい値の設定 (デフォルト: 100回)
-  - 関数ごとに Wasm モジュールをキャッシュ
-  - VM の `Call` で呼び出し前にキャッシュをチェック
-- [ ] VM に JIT 統合
-  - `Call` 命令: フィードバック更新 → しきい値チェック → Wasm あればそちらを実行
-- [ ] `--jit` フラグで JIT を有効化
-- [ ] テスト
+- [x] `src/jit/jit.ts` — JitManager
+  - しきい値の設定 (デフォルト: 100回、`jitThreshold` で変更可)
+  - 関数ごとに Wasm モジュールをキャッシュ (`wasmCache`)
+  - `tryCall()`: しきい値超え && monomorphic && 全引数 number → Wasm 実行
+  - 同期コンパイル (`compileToWasmSync`) で即座にキャッシュ
+- [x] VM に JIT 統合
+  - `Call` 命令: フィードバック記録 → `jit.tryCall()` → Wasm あればスタックに結果を push して CallFrame をスキップ
+  - `vm.jit` フィールド
+- [x] `vmEvaluate({ jit: true, jitThreshold: N })` で JIT を有効化
+- [x] テスト (3件): ホット関数の自動切り替え、JIT なしとの一致、文字列関数の非 JIT
 
 ```bash
 $ npm start -- --jit '
