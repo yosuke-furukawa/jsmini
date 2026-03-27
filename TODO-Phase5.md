@@ -107,18 +107,14 @@ return             — 戻る
 
 ### 実装
 
-- [ ] `src/jit/wasm-builder.ts` — Wasm バイナリビルダー
-  - マジックナンバー + バージョンの書き出し
-  - LEB128 エンコーディング（可変長整数）
-  - セクション生成: Type, Function, Export, Code
-  - 関数本体のバイト列生成
-- [ ] `src/jit/wasm-compiler.ts` — BytecodeFunction → Wasm 変換
-  - 最初は number (f64) 専用の算術関数のみ対象
-  - `LdaLocal` → `local.get`
-  - `Add` → `f64.add`
-  - `Return` → `return`
-- [ ] `WebAssembly.instantiate()` で生成した Wasm を実行
-- [ ] テスト
+- [x] `src/jit/wasm-builder.ts` — Wasm バイナリビルダー
+  - マジックナンバー + バージョン、Type/Function/Export/Code セクション
+  - LEB128 エンコーディング、f64ToBytes、WASM_OP 定数
+- [x] `src/jit/wasm-compiler.ts` — BytecodeFunction → Wasm 変換
+  - LdaLocal → local.get, Add → f64.add, Return → return 等
+  - number 以外の定数を含む関数は null (JIT 不可) を返す
+- [x] `WebAssembly.instantiate()` で生成した Wasm を実行
+- [x] テスト (7件): add/sub/mul の直接 Wasm、BytecodeFunction → Wasm 変換、非対応関数の拒否
 
 ```javascript
 // ゴール: この関数が Wasm に変換されて実行される
