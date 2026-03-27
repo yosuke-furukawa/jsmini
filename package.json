@@ -7,7 +7,8 @@
     "test": "node --test --import tsx src/**/*.test.ts",
     "test262": "tsx src/test262/runner.ts",
     "start": "tsx src/index.ts",
-    "bench": "tsx src/bench.ts",
+    "bench": "node --noopt --no-sparkplug --no-maglev --import tsx src/bench.ts",
+    "bench:with-v8-jit": "tsx src/bench.ts",
     "playground": "node playground/build.mjs",
     "playground:serve": "npx serve playground"
   },
