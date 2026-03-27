@@ -17,5 +17,8 @@ export function vmEvaluate(source: string, consoleOpts?: ConsoleOptions): unknow
   };
   vm.setGlobal("console", consoleObj);
 
+  // 組み込みコンストラクタ
+  vm.setGlobal("Error", { __nativeConstructor: true, name: "Error" });
+
   return vm.execute(func);
 }

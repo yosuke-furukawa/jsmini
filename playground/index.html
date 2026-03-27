@@ -245,6 +245,10 @@ main {
   <h1>jsmini playground</h1>
   <button id="run-btn">Run</button>
   <span class="shortcut-hint">Cmd+Enter</span>
+  <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-muted);cursor:pointer;">
+    <input type="checkbox" id="vm-toggle">
+    <span>VM mode</span>
+  </label>
   <div class="step-controls">
     <button id="step-back-btn" disabled>&lt;</button>
     <button id="step-fwd-btn" disabled>Step &gt;</button>
@@ -759,11 +763,18 @@ function runCode() {
   let error = null;
   steps = [];
   stepIndex = -1;
+  const useVM = document.getElementById("vm-toggle").checked;
   try {
-    returnValue = jsmini.evaluate(source, {
-      console: { log: (...args) => logs.push(args) },
-      onStep: (info) => steps.push(info),
-    });
+    if (useVM) {
+      returnValue = jsmini.vmEvaluate(source, {
+        log: (...args) => logs.push(args),
+      });
+    } else {
+      returnValue = jsmini.evaluate(source, {
+        console: { log: (...args) => logs.push(args) },
+        onStep: (info) => steps.push(info),
+      });
+    }
   } catch (e) {
     error = `${e.constructor?.name || "Error"}: ${e.message}`;
   }
