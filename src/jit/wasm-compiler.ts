@@ -3,6 +3,7 @@ import { WasmBuilder, WASM_OP, WASM_TYPE, f64ToBytes } from "./wasm-builder.js";
 
 // BytecodeFunction → Wasm バイナリに変換
 // number (f64) 専用の算術関数のみ対応
+// 非同期版
 export async function compileToWasm(
   func: BytecodeFunction,
 ): Promise<((...args: number[]) => number) | null> {
@@ -19,6 +20,29 @@ export async function compileToWasm(
   try {
     const bytes = builder.build();
     const { instance } = await WebAssembly.instantiate(bytes);
+    return instance.exports[func.name] as (...args: number[]) => number;
+  } catch {
+    return null;
+  }
+}
+
+// 同期版 (Node.js の同期 WebAssembly API を使用)
+export function compileToWasmSync(
+  func: BytecodeFunction,
+): ((...args: number[]) => number) | null {
+  const params = new Array(func.paramCount).fill(WASM_TYPE.f64);
+  const results = [WASM_TYPE.f64];
+
+  const body = translateBytecode(func);
+  if (!body) return null;
+
+  const builder = new WasmBuilder();
+  builder.addFunction(func.name, params, results, body);
+
+  try {
+    const bytes = builder.build();
+    const mod = new WebAssembly.Module(bytes);
+    const instance = new WebAssembly.Instance(mod);
     return instance.exports[func.name] as (...args: number[]) => number;
   } catch {
     return null;

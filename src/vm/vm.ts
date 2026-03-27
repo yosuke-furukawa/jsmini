@@ -1,5 +1,6 @@
 import type { BytecodeFunction, Instruction } from "./bytecode.js";
 import type { FeedbackCollector } from "../jit/feedback.js";
+import type { JitManager } from "../jit/jit.js";
 
 type CallFrame = {
   func: BytecodeFunction;
@@ -15,6 +16,7 @@ export class VM {
   private globals: Map<string, unknown> = new Map();
   private frames: CallFrame[] = [];
   feedback: FeedbackCollector | null = null;
+  jit: JitManager | null = null;
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -343,6 +345,14 @@ export class VM {
             const fn = callee as BytecodeFunction;
             // 型フィードバック記録
             if (this.feedback) this.feedback.recordCall(fn, args);
+            // JIT: Wasm キャッシュがあればそちらで実行
+            if (this.jit) {
+              const jitResult = this.jit.tryCall(fn, args);
+              if (jitResult !== null) {
+                this.push(jitResult.result);
+                break;
+              }
+            }
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;

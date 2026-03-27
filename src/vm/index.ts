@@ -1,6 +1,7 @@
 import { compile } from "./compiler.js";
 import { VM } from "./vm.js";
 import { FeedbackCollector } from "../jit/feedback.js";
+import { JitManager } from "../jit/jit.js";
 export { disassemble } from "./bytecode.js";
 
 type ConsoleOptions = {
@@ -10,6 +11,8 @@ type ConsoleOptions = {
 type VMOptions = {
   console?: ConsoleOptions;
   collectFeedback?: boolean;
+  jit?: boolean;
+  jitThreshold?: number;
 };
 
 export type VMResult = {
@@ -31,8 +34,16 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   vm.setGlobal("console", consoleObj);
   vm.setGlobal("Error", { __nativeConstructor: true, name: "Error" });
 
-  if (options.collectFeedback) {
+  // フィードバック収集 (JIT 有効時は自動で有効)
+  if (options.collectFeedback || options.jit) {
     vm.feedback = new FeedbackCollector();
+  }
+
+  // JIT マネージャ
+  if (options.jit && vm.feedback) {
+    vm.jit = new JitManager(vm.feedback, {
+      threshold: options.jitThreshold ?? 100,
+    });
   }
 
   const value = vm.execute(func);
