@@ -26,10 +26,12 @@ export class FeedbackCollector {
       fb.argTypes.push(types);
     }
 
-    // monomorphic 判定: 全サンプルが同じ型パターンか
-    if (fb.argTypes.length > 1) {
+    // monomorphic 判定: 新しい型パターンが既存と異なれば polymorphic
+    if (fb.isMonomorphic && fb.argTypes.length > 0) {
       const first = fb.argTypes[0].join(",");
-      fb.isMonomorphic = fb.argTypes.every(t => t.join(",") === first);
+      if (types.join(",") !== first) {
+        fb.isMonomorphic = false;
+      }
     }
   }
 

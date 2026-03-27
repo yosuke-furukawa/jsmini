@@ -148,9 +148,10 @@ function writeLEB128(buf: number[], value: number): void {
   } while (value !== 0);
 }
 
-// f64 を little-endian バイト列に変換
+// f64 を little-endian バイト列に変換 (Wasm は little-endian 固定)
 export function f64ToBytes(value: number): number[] {
   const buf = new ArrayBuffer(8);
-  new Float64Array(buf)[0] = value;
+  const view = new DataView(buf);
+  view.setFloat64(0, value, true); // true = little-endian
   return [...new Uint8Array(buf)];
 }
