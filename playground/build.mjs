@@ -11,6 +11,7 @@ const entryContent = `
 export { tokenize } from "../src/lexer/lexer.ts";
 export { parse } from "../src/parser/parser.ts";
 export { evaluate } from "../src/interpreter/evaluator.ts";
+export { vmEvaluate } from "../src/vm/index.ts";
 
 // jsmini engine - bytecode VM
 export { vmEvaluate } from "../src/vm/index.ts";
