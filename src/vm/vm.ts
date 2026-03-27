@@ -400,7 +400,15 @@ export class VM {
           if (ctor.prototype) {
             newObj.__proto__ = ctor.prototype;
           }
-          if (ctor.bytecode) {
+          if (ctor.__nativeConstructor) {
+            // 組み込みコンストラクタ (Error 等)
+            if (ctor.name === "Error") {
+              const errObj: Record<string, unknown> = { message: args[0] ?? "" };
+              this.push(errObj);
+            } else {
+              throw new Error(`Unknown native constructor: ${ctor.name}`);
+            }
+          } else if (ctor.bytecode) {
             // BytecodeFunction
             const locals = new Array(ctor.localCount).fill(undefined);
             for (let i = 0; i < ctor.paramCount; i++) {
