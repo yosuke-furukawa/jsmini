@@ -7,10 +7,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // jsmini エンジン + CodeMirror をバンドルするエントリポイント
 const entryContent = `
-// jsmini engine
+// jsmini engine - tree-walking
 export { tokenize } from "../src/lexer/lexer.ts";
 export { parse } from "../src/parser/parser.ts";
 export { evaluate } from "../src/interpreter/evaluator.ts";
+
+// jsmini engine - bytecode VM
+export { vmEvaluate } from "../src/vm/index.ts";
+export { compile } from "../src/vm/compiler.ts";
+export { disassemble } from "../src/vm/bytecode.ts";
 
 // CodeMirror
 export { basicSetup } from "codemirror";
