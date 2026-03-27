@@ -57,3 +57,49 @@ describe("JIT - Step 5-2: Wasm バイナリ生成", () => {
     assert.equal(valid, true);
   });
 });
+
+describe("JIT - Step 5-2: Wasm コンパイラ (BytecodeFunction → Wasm)", () => {
+  it("add 関数を Wasm に変換して実行できる", async () => {
+    const { compile } = await import("../vm/compiler.js");
+    const { compileToWasm } = await import("./wasm-compiler.js");
+
+    // function add(a, b) { return a + b; } をコンパイル
+    const script = compile("function add(a, b) { return a + b; }");
+    // 定数テーブルから add の BytecodeFunction を取得
+    const addFunc = script.constants.find(
+      (c: any) => c && typeof c === "object" && "name" in c && c.name === "add"
+    ) as any;
+    assert.ok(addFunc, "add function found in constants");
+
+    const wasmAdd = await compileToWasm(addFunc);
+    assert.ok(wasmAdd, "Wasm compilation succeeded");
+    assert.equal(wasmAdd!(3, 4), 7);
+  });
+
+  it("mul 関数を Wasm に変換して実行できる", async () => {
+    const { compile } = await import("../vm/compiler.js");
+    const { compileToWasm } = await import("./wasm-compiler.js");
+
+    const script = compile("function mul(a, b) { return a * b; }");
+    const mulFunc = script.constants.find(
+      (c: any) => c && typeof c === "object" && "name" in c && c.name === "mul"
+    ) as any;
+
+    const wasmMul = await compileToWasm(mulFunc);
+    assert.ok(wasmMul);
+    assert.equal(wasmMul!(3, 4), 12);
+  });
+
+  it("文字列を含む関数は Wasm 変換できない (null を返す)", async () => {
+    const { compile } = await import("../vm/compiler.js");
+    const { compileToWasm } = await import("./wasm-compiler.js");
+
+    const script = compile('function greet(name) { return "hello " + name; }');
+    const greetFunc = script.constants.find(
+      (c: any) => c && typeof c === "object" && "name" in c && c.name === "greet"
+    ) as any;
+
+    const wasmGreet = await compileToWasm(greetFunc);
+    assert.equal(wasmGreet, null);
+  });
+});
