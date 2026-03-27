@@ -1,6 +1,7 @@
 import type { BytecodeFunction } from "../vm/bytecode.js";
 import { FeedbackCollector } from "./feedback.js";
 import { compileToWasmSync } from "./wasm-compiler.js";
+import type { WasmNumericType } from "./feedback.js";
 
 export type JitOptions = {
   threshold: number;
@@ -44,8 +45,12 @@ export class JitManager {
       return null;
     }
 
+    // 型特殊化: 全引数が同じ型なら特殊化、混在なら f64
+    const allSame = wasmArgTypes.every(t => t === wasmArgTypes[0]);
+    const spec: WasmNumericType = allSame && wasmArgTypes![0] === "i32" ? "i32" : "f64";
+
     // 同期コンパイル
-    const wasmFn = compileToWasmSync(func);
+    const wasmFn = compileToWasmSync(func, spec);
     this.wasmCache.set(func, wasmFn);
 
     if (wasmFn && args.every(a => typeof a === "number")) {

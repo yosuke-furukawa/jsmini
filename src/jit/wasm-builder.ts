@@ -9,6 +9,9 @@ const SECTION_CODE = 10;
 
 // Wasm 型
 export const WASM_TYPE = {
+  i32: 0x7f,
+  i64: 0x7e,
+  f32: 0x7d,
   f64: 0x7c,
   func: 0x60,
 } as const;
@@ -17,6 +20,18 @@ export const WASM_TYPE = {
 export const WASM_OP = {
   local_get: 0x20,
   local_set: 0x21,
+  // i32
+  i32_const: 0x41,
+  i32_add: 0x6a,
+  i32_sub: 0x6b,
+  i32_mul: 0x6c,
+  i32_div_s: 0x6d,
+  i32_rem_s: 0x6f,
+  i32_lt_s: 0x48,
+  i32_gt_s: 0x4a,
+  i32_le_s: 0x4c,
+  i32_ge_s: 0x4e,
+  // f64
   f64_const: 0x44,
   f64_add: 0xa0,
   f64_sub: 0xa1,
@@ -146,6 +161,24 @@ function writeLEB128(buf: number[], value: number): void {
     if (value !== 0) byte |= 0x80;
     buf.push(byte);
   } while (value !== 0);
+}
+
+// i32 を LEB128 符号付きで変換 (Wasm の i32.const 用)
+export function i32ToLEB128(value: number): number[] {
+  const buf: number[] = [];
+  let v = value | 0;
+  let more = true;
+  while (more) {
+    let byte = v & 0x7f;
+    v >>= 7;
+    if ((v === 0 && (byte & 0x40) === 0) || (v === -1 && (byte & 0x40) !== 0)) {
+      more = false;
+    } else {
+      byte |= 0x80;
+    }
+    buf.push(byte);
+  }
+  return buf;
 }
 
 // f64 を little-endian バイト列に変換 (Wasm は little-endian 固定)
