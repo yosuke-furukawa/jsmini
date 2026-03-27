@@ -11,6 +11,7 @@ type ConsoleOptions = {
 type VMOptions = {
   console?: ConsoleOptions;
   collectFeedback?: boolean;
+  collectDeopt?: boolean;
   jit?: boolean;
   jitThreshold?: number;
 };
@@ -18,6 +19,7 @@ type VMOptions = {
 export type VMResult = {
   value: unknown;
   feedback?: FeedbackCollector;
+  deoptLog?: string[];
 };
 
 export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): unknown {
@@ -48,8 +50,11 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
 
   const value = vm.execute(func);
 
-  if (options.collectFeedback && vm.feedback) {
-    return { value, feedback: vm.feedback } as VMResult;
+  if (options.collectFeedback || options.collectDeopt) {
+    const result: VMResult = { value };
+    if (vm.feedback) result.feedback = vm.feedback;
+    if (vm.jit && options.collectDeopt) result.deoptLog = vm.jit.deoptLog;
+    return result;
   }
   return value;
 }
