@@ -27,6 +27,7 @@ export const WASM_OP = {
   i32_mul: 0x6c,
   i32_div_s: 0x6d,
   i32_rem_s: 0x6f,
+  i32_eqz: 0x45,
   i32_lt_s: 0x48,
   i32_gt_s: 0x4a,
   i32_le_s: 0x4c,
@@ -59,13 +60,14 @@ type FuncDef = {
   params: number[];   // 型バイト列 (例: [0x7c, 0x7c] = f64, f64)
   results: number[];   // 型バイト列 (例: [0x7c] = f64)
   body: number[];      // Wasm 命令列 (end 含む)
+  extraLocals: number; // params 以外のローカル変数の数
 };
 
 export class WasmBuilder {
   private functions: FuncDef[] = [];
 
-  addFunction(name: string, params: number[], results: number[], body: number[]): void {
-    this.functions.push({ name, params, results, body });
+  addFunction(name: string, params: number[], results: number[], body: number[], extraLocals = 0): void {
+    this.functions.push({ name, params, results, body, extraLocals });
   }
 
   build(): Uint8Array {
@@ -137,7 +139,15 @@ export class WasmBuilder {
     for (const fn of this.functions) {
       // 関数本体
       const bodyBuf: number[] = [];
-      bodyBuf.push(0x00); // local declarations count = 0
+      if (fn.extraLocals > 0) {
+        // ローカル変数宣言: 1 グループ (count, type)
+        bodyBuf.push(0x01); // 1 group
+        writeLEB128(bodyBuf, fn.extraLocals);
+        // params と同じ型 (全部同一型)
+        bodyBuf.push(fn.params.length > 0 ? fn.params[0] : WASM_TYPE.i32);
+      } else {
+        bodyBuf.push(0x00); // local declarations count = 0
+      }
       bodyBuf.push(...fn.body);
       // body size
       writeLEB128(buf, bodyBuf.length);
