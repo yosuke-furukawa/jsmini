@@ -7,7 +7,7 @@
 
 ## 6-0. JSArray 型の導入
 
-- [ ] `src/vm/js-array.ts` — Element Kind 付き配列型
+- [x] `src/vm/js-array.ts` — Element Kind 付き配列型
   ```typescript
   type ElementKind = "SMI" | "DOUBLE" | "GENERIC";
   const ELEMENT_KIND: unique symbol;
@@ -16,23 +16,23 @@
   function getElementKind(arr: unknown[]): ElementKind
   function setElement(arr: unknown[], index: number, value: unknown): void
   ```
-- [ ] `classifyElements(elements)` — 初期要素から Element Kind を判定
-- [ ] `transitionElementKind(arr, newValue)` — 要素追加時の一方通行遷移
+- [x] `classifyElements(elements)` — 初期要素から Element Kind を判定
+- [x] `transitionElementKind(arr, newValue)` — 要素追加時の一方通行遷移
   - SMI: 全要素が整数 (`Number.isInteger`)
   - DOUBLE: 全要素が数値
   - GENERIC: 非数値が混在
-- [ ] テスト: Element Kind の分類と遷移
+- [x] テスト: Element Kind の分類と遷移 (21 テスト)
 
 ---
 
 ## 6-1. VM の配列操作を JSArray 対応に
 
-- [ ] `CreateArray` — `createJSArray(elements)` を使う
-- [ ] `ArrayPush` — `setElement` で Element Kind を追跡
-- [ ] `SetPropertyComputed` — 配列への代入時に Element Kind を更新
-- [ ] `GetPropertyComputed` — (変更不要、読み取りは Element Kind に影響しない)
-- [ ] `GetProperty "length"` — JSArray の length (変更不要、`arr.length` はそのまま動く)
-- [ ] テスト: 既存の全テスト (420) がパスすること
+- [x] `CreateArray` — `createJSArray(elements)` を使う
+- [x] `ArrayPush` — `pushElement` で Element Kind を追跡
+- [x] `SetPropertyComputed` — 配列への代入時に `setElement` で Element Kind を更新
+- [x] `GetPropertyComputed` — (変更不要、読み取りは Element Kind に影響しない)
+- [x] `GetProperty "length"` — JSArray の length (変更不要、`arr.length` はそのまま動く)
+- [x] テスト: 既存の全テスト (441) がパスすること
 
 ---
 
