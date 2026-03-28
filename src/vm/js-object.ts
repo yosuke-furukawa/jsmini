@@ -29,6 +29,11 @@ export function getHiddenClass(obj: JSObjectInternal): HiddenClass {
   return obj[HIDDEN_CLASS];
 }
 
+// slots 配列を取得 (IC 用)
+export function getSlots(obj: JSObjectInternal): unknown[] {
+  return obj[SLOTS];
+}
+
 // プロパティを読む (HC のオフセットで slots からアクセス + prototype チェーン)
 export function getProperty(obj: JSObjectInternal, name: string): unknown {
   const offset = lookupOffset(obj[HIDDEN_CLASS], name);

@@ -22,6 +22,7 @@ class BytecodeCompiler {
   private isFunction: boolean;
   // ループスタック: break/continue のジャンプ先パッチ用
   private loopStack: { breakPatches: number[]; continueTarget: number }[] = [];
+  private icSlotCount = 0;
 
   constructor(parent: BytecodeCompiler | null) {
     this.parent = parent;
@@ -31,6 +32,14 @@ class BytecodeCompiler {
   emit(op: Opcode, operand?: number): number {
     const index = this.bytecode.length;
     this.bytecode.push({ op, operand });
+    return index;
+  }
+
+  // IC スロット付きの命令を emit
+  emitWithIC(op: Opcode, operand: number): number {
+    const index = this.bytecode.length;
+    const icSlot = this.icSlotCount++;
+    this.bytecode.push({ op, operand, icSlot });
     return index;
   }
 
@@ -99,6 +108,7 @@ class BytecodeCompiler {
       bytecode: this.bytecode,
       constants: this.constants,
       handlers: this.handlers,
+      icSlotCount: this.icSlotCount,
     };
   }
 
@@ -118,7 +128,7 @@ class BytecodeCompiler {
       for (const prop of id.properties) {
         this.emit("Dup"); // obj を残す
         const nameIdx = this.addConstant(prop.key.name);
-        this.emit("GetProperty", nameIdx);
+        this.emitWithIC("GetProperty", nameIdx);
         this.compileBindingTarget(prop.value);
       }
       this.emit("Pop"); // obj を捨てる
@@ -374,7 +384,7 @@ class BytecodeCompiler {
           if (method.kind === "method") {
             this.emit("Dup"); // ctorFunc を残す
             const protoNameIdx = this.addConstant("prototype");
-            this.emit("GetProperty", protoNameIdx);
+            this.emitWithIC("GetProperty", protoNameIdx);
             // prototype はオブジェクトなのでスタックに載る
             const fnCompiler = new BytecodeCompiler(this);
             fnCompiler.compileFunctionBody(method.value.params, method.value.body.body);
@@ -382,7 +392,7 @@ class BytecodeCompiler {
             const methodIdx = this.addConstant(methodFunc);
             this.emit("LdaConst", methodIdx);
             const methodNameIdx = this.addConstant(method.key.name);
-            this.emit("SetProperty", methodNameIdx);
+            this.emitWithIC("SetProperty", methodNameIdx);
             this.emit("Pop"); // prototype を捨てる
           }
         }
@@ -441,7 +451,7 @@ class BytecodeCompiler {
         // i < arr.length
         this.emit("LdaGlobal", counterIdx);
         this.emit("LdaGlobal", iterIdx);
-        this.emit("GetProperty", this.addConstant("length"));
+        this.emitWithIC("GetProperty", this.addConstant("length"));
         this.emit("LessThan");
         const exitJump = this.emit("JumpIfFalse", 0);
         // var/let x = arr[i]
@@ -533,7 +543,7 @@ class BytecodeCompiler {
             this.compileExpression(expr.right);
             this.compileExpression(expr.left.object);
             const nameIdx = this.addConstant((expr.left.property as any).name);
-            this.emit("SetPropertyAssign", nameIdx);
+            this.emitWithIC("SetPropertyAssign", nameIdx);
           }
           break;
         }
@@ -561,7 +571,7 @@ class BytecodeCompiler {
         this.compileExpression(expr.object);
         if (!expr.computed && expr.property.type === "Identifier") {
           const nameIdx = this.addConstant(expr.property.name);
-          this.emit("GetProperty", nameIdx);
+          this.emitWithIC("GetProperty", nameIdx);
         } else {
           this.compileExpression(expr.property);
           this.emit("GetPropertyComputed");
@@ -580,7 +590,7 @@ class BytecodeCompiler {
           this.compileExpression(prop.value);
           const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
           const nameIdx = this.addConstant(key);
-          this.emit("SetProperty", nameIdx);
+          this.emitWithIC("SetProperty", nameIdx);
         }
         break;
       }
@@ -621,7 +631,7 @@ class BytecodeCompiler {
           this.emit("Dup"); // obj を複製 (this 用に残す)
           if (!expr.callee.computed && expr.callee.property.type === "Identifier") {
             const nameIdx = this.addConstant(expr.callee.property.name);
-            this.emit("GetProperty", nameIdx);
+            this.emitWithIC("GetProperty", nameIdx);
           }
           this.emit("CallMethod", expr.arguments.length);
         } else {

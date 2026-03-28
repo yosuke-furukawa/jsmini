@@ -85,6 +85,7 @@ export type Opcode =
 export type Instruction = {
   op: Opcode;
   operand?: number;   // LdaConst のインデックス等
+  icSlot?: number;    // Inline Cache スロットのインデックス (GetProperty/SetProperty 用)
 };
 
 // コンパイル結果: 1つの関数のバイトコード
@@ -104,6 +105,7 @@ export type BytecodeFunction = {
   bytecode: Instruction[];
   constants: unknown[];
   handlers: ExceptionHandler[];
+  icSlotCount: number;  // IC スロットの数
 };
 
 // バイトコードを人間が読める形式にダンプ（ネスト関数も再帰的に表示）

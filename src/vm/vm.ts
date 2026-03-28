@@ -2,13 +2,15 @@ import type { BytecodeFunction, Instruction } from "./bytecode.js";
 import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
-import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet } from "./js-object.js";
+import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots } from "./js-object.js";
+import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 
 type CallFrame = {
   func: BytecodeFunction;
   pc: number;
   locals: unknown[];
   thisValue: unknown;
+  icSlots: ICSlot[];
 };
 
 // スタックベースの Bytecode VM
@@ -36,6 +38,10 @@ export class VM {
     this.globals.set(name, value);
   }
 
+  private createICSlots(func: BytecodeFunction): ICSlot[] {
+    return Array.from({ length: func.icSlotCount || 0 }, createICSlot);
+  }
+
   execute(func: BytecodeFunction): unknown {
     // トップレベルをフレームとして実行
     this.frames.push({
@@ -43,6 +49,7 @@ export class VM {
       pc: 0,
       locals: new Array(func.localCount).fill(undefined),
       thisValue: undefined,
+      icSlots: this.createICSlots(func),
     });
 
     return this.run();
@@ -239,6 +246,9 @@ export class VM {
           const name = constants[instr.operand!] as string;
           if (isJSObject(obj)) {
             jsObjSet(obj, name, value);
+            // IC 更新
+            const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
+            if (ic) icUpdate(ic, getHiddenClass(obj), name);
           } else {
             (obj as Record<string, unknown>)[name] = value;
           }
@@ -250,6 +260,8 @@ export class VM {
           const name = constants[instr.operand!] as string;
           if (isJSObject(obj)) {
             jsObjSet(obj, name, value);
+            const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
+            if (ic) icUpdate(ic, getHiddenClass(obj), name);
           } else {
             (obj as Record<string, unknown>)[name] = value;
           }
@@ -258,11 +270,21 @@ export class VM {
         }
         case "GetProperty": {
           const obj = this.pop();
-          const name = constants[instr.operand!] as string;
-          if (isJSObject(obj)) {
+          if (instr.icSlot !== undefined && isJSObject(obj)) {
+            const ic = frame.icSlots[instr.icSlot];
+            const hc = getHiddenClass(obj);
+            if (ic.cachedHC === hc && ic.cachedOffset >= 0) {
+              // IC ヒット: slots[offset] を直接アクセス (関数呼び出しなし)
+              this.push(getSlots(obj)[ic.cachedOffset]);
+              break;
+            }
+            // IC ミス or prototype 参照 → フルパス + IC 更新
+            const name = constants[instr.operand!] as string;
+            if (ic.state !== "polymorphic") icUpdate(ic, hc, name);
             this.push(jsObjGet(obj, name));
           } else {
-            this.push((obj as Record<string, unknown>)[name]);
+            const name = constants[instr.operand!] as string;
+            this.push(isJSObject(obj) ? jsObjGet(obj, name) : (obj as Record<string, unknown>)[name]);
           }
           break;
         }
@@ -387,7 +409,7 @@ export class VM {
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined });
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn) });
           } else {
             throw new Error("Not a function");
           }
@@ -414,7 +436,7 @@ export class VM {
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj });
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn) });
           } else {
             throw new Error("Not a function");
           }
@@ -455,7 +477,7 @@ export class VM {
             for (let i = 0; i < ctor.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj });
+            this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor) });
             (frame as any).__pendingNewObj = newObj;
           } else {
             throw new Error("Not a constructor");
