@@ -2,6 +2,7 @@ import type { BytecodeFunction, Instruction } from "./bytecode.js";
 import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
+import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet } from "./js-object.js";
 
 type CallFrame = {
   func: BytecodeFunction;
@@ -221,7 +222,7 @@ export class VM {
 
         // オブジェクト / 配列
         case "CreateObject":
-          this.push({});
+          this.push(createJSObject());
           break;
         case "CreateArray": {
           const count = instr.operand!;
@@ -234,24 +235,35 @@ export class VM {
         }
         case "SetProperty": {
           const value = this.pop();
-          const obj = this.peek() as Record<string, unknown>;
+          const obj = this.peek();
           const name = constants[instr.operand!] as string;
-          obj[name] = value;
-          // obj はスタックに残る（連続プロパティ設定用）
+          if (isJSObject(obj)) {
+            jsObjSet(obj, name, value);
+          } else {
+            (obj as Record<string, unknown>)[name] = value;
+          }
           break;
         }
         case "SetPropertyAssign": {
-          const obj = this.pop() as Record<string, unknown>;
+          const obj = this.pop();
           const value = this.pop();
           const name = constants[instr.operand!] as string;
-          obj[name] = value;
-          this.push(value); // 代入式の値を残す
+          if (isJSObject(obj)) {
+            jsObjSet(obj, name, value);
+          } else {
+            (obj as Record<string, unknown>)[name] = value;
+          }
+          this.push(value);
           break;
         }
         case "GetProperty": {
-          const obj = this.pop() as Record<string, unknown>;
+          const obj = this.pop();
           const name = constants[instr.operand!] as string;
-          this.push(obj[name]);
+          if (isJSObject(obj)) {
+            this.push(jsObjGet(obj, name));
+          } else {
+            this.push((obj as Record<string, unknown>)[name]);
+          }
           break;
         }
         case "GetPropertyComputed": {
@@ -424,11 +436,11 @@ export class VM {
           }
           // prototype が未設定なら作成
           if (ctor.bytecode && !ctor.prototype) {
-            ctor.prototype = {};
+            ctor.prototype = createJSObject();
           }
-          const newObj: Record<string, unknown> = {};
+          const newObj = createJSObject();
           if (ctor.prototype) {
-            newObj.__proto__ = ctor.prototype;
+            jsObjSet(newObj, "__proto__", ctor.prototype);
           }
           if (ctor.__nativeConstructor) {
             // ネイティブコンストラクタ (Error 等)
