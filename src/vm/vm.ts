@@ -254,6 +254,14 @@ export class VM {
           this.push(obj[String(key)]);
           break;
         }
+        case "SetPropertyComputed": {
+          const value = this.pop();
+          const key = this.pop();
+          const obj = this.pop() as Record<string, unknown>;
+          obj[String(key)] = value;
+          this.push(value);
+          break;
+        }
 
         // 配列操作
         case "ArrayPush": {

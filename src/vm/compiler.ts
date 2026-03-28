@@ -519,11 +519,17 @@ class BytecodeCompiler {
 
       case "AssignmentExpression": {
         if (expr.left.type === "MemberExpression") {
-          // stack: value, obj → SetPropertyAssign → pop obj, pop value, assign, push value
-          this.compileExpression(expr.right);       // stack: value
-          this.compileExpression(expr.left.object); // stack: value, obj
-          if (!expr.left.computed && expr.left.property.type === "Identifier") {
-            const nameIdx = this.addConstant(expr.left.property.name);
+          if (expr.left.computed) {
+            // computed: obj[key] = value → SetPropertyComputed (pop value, pop key, pop obj)
+            this.compileExpression(expr.left.object);
+            this.compileExpression(expr.left.property);
+            this.compileExpression(expr.right);
+            this.emit("SetPropertyComputed");
+          } else {
+            // non-computed: obj.prop = value → SetPropertyAssign
+            this.compileExpression(expr.right);
+            this.compileExpression(expr.left.object);
+            const nameIdx = this.addConstant((expr.left.property as any).name);
             this.emit("SetPropertyAssign", nameIdx);
           }
           break;

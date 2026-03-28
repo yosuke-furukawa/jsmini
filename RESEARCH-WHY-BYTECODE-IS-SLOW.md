@@ -184,16 +184,110 @@ V8-JIT なしでも、データ構造を適切に選べばバイトコード VM 
 
 ---
 
+## Flat VM 実装後の検証 (2026-03)
+
+Flat VM を実際に jsmini に実装した結果、**当初の実験とは異なる結果** が得られた。
+
+### 実際の実装の結果 (V8-JIT なし)
+
+```
+for loop sum (10000):
+  Tree-Walking:  20.5ms
+  Object VM:     31.0ms
+  Flat VM:       40.7ms  ← Object VM より遅い！
+```
+
+Flat VM が **Object VM よりさらに遅い** という、当初の実験と逆の結果。
+
+### なぜ実験と実装で結果が違うのか
+
+当初の実験と実際の実装の**条件の違い**:
+
+| 条件 | 当初の実験 | 実際の実装 |
+|------|-----------|-----------|
+| スタック | `Float64Array` | `unknown[]` |
+| 変数スロット | `Float64Array` (配列インデックス) | `Map<string, unknown>` (グローバル) |
+| 扱う型 | 数値のみ | 全 JS 値 (文字列, オブジェクト, boolean...) |
+| バイトコード | 手書き (コンパイル不要) | コンパイラ出力 |
+
+最大の違いは**変数アクセス方法**。実験は `slots[idx]` (配列インデックス) だったが、実装ではトップレベル変数が `globals.get("name")` (Map ルックアップ) のまま。Flat VM と Object VM で変数アクセスのコストが同じなので、差が出ない。
+
+### マイクロベンチマークによる要素別検証 (100万回, V8-JIT なし)
+
+```
+配列アクセス:
+  Uint8Array read:        15.8ms
+  Array (number) read:    15.4ms  → ほぼ同速。TypedArray のメリットなし。
+
+switch コスト:
+  numeric switch:         31.5ms
+  string switch:          42.0ms  → 数値 switch は 25% 速い ✅
+
+変数アクセス:
+  Map.get:                24.8ms
+  Array[index]:           14.2ms  → 配列インデックスは 1.75x 速い ✅
+
+実行のみ (パース・コンパイル除外):
+  Object VM execute:      31.7ms
+  Flat VM execute:        40.7ms  → Flat VM のほうが遅い ❌
+```
+
+### 当初の主張の正誤
+
+| 主張 | 正誤 | 根拠 |
+|------|------|------|
+| 文字列 switch → 数値 switch で速くなる | △ 25% 改善だが支配的ではない | 31.5 vs 42.0ms (100万回) |
+| オブジェクトプロパティ → バイト読み取りで速くなる | ❌ Uint8Array は Array とほぼ同速 | 15.8 vs 15.4ms (100万回) |
+| Map → 配列インデックスで速くなる | ✅ 1.75x 改善。**これが最大のボトルネック** | 24.8 vs 14.2ms (100万回) |
+| Float64Array スタックで速くなる | ❌ unknown[] と Float64Array はほぼ同速 | 手書きベンチで 7.6 vs 7.4ms |
+| Flat VM は TW の 2.2x 速い | ❌ **実験条件限定の結果だった** | 実装では TW の 0.5x (遅い) |
+
+### Flat VM が Object VM より遅い原因
+
+数値 switch の 25% 改善はあるが、以下の**追加コスト**が上回る:
+
+1. **オペランド読み取りコスト**: Object VM は `instr.operand` の 1 回のプロパティアクセスでオペランドを取得。Flat VM は `code[pc++]` を複数回呼ぶ（u16 なら 2 回 + ビットシフト）
+2. **Uint8Array アクセスのオーバーヘッド**: V8-JITless では Uint8Array の bounds check 等が Array よりわずかに重い
+3. **変数アクセスが同じ**: 両方とも `Map.get/set` を使うため、最大のボトルネックが共通
+
+---
+
+## 真の改善策
+
+### ボトルネックの優先順位
+
+```
+1位: Map.get/set による変数アクセス     → 配列スロット化で 1.75x 改善
+2位: 文字列 switch                     → 数値 switch で 25% 改善
+3位: オブジェクトプロパティアクセス      → 微小な差 (V8-JITless)
+4位: unknown[] vs TypedArray スタック   → 差なし
+```
+
+### Map 排除 (変数の配列スロット化)
+
+**最も効果的な最適化は Map の排除**。トップレベル変数も含めて全変数を配列インデックスアクセスに変換する:
+
+```typescript
+// Before: Map ルックアップ
+globals.get("sum")  // ~25ms/100万回
+
+// After: 配列インデックス
+locals[0]           // ~14ms/100万回
+```
+
+これは Flat VM 固有の最適化ではなく、Object VM でも適用できる。
+コンパイラが全変数にスロット番号を割り当て、VM がフラットな配列で変数を管理すればよい。
+
+ただし、関数からの外部変数参照（クロージャ）では、
+グローバル変数テーブルを介さずに親スコープの変数を解決する仕組みが必要になる。
+
+---
+
 ## 結論
 
-| 原因 | Object VM | Flat VM |
-|------|-----------|---------|
-| 命令フェッチ | `bytecode[pc]` → オブジェクト参照 | `code[pc]` → 1バイト読み取り |
-| Opcode 分岐 | 文字列 switch | 数値 switch |
-| オペランド取得 | `instr.operand` プロパティアクセス | `code[pc+1]` 1バイト読み取り |
-| 変数アクセス | `globals.get("name")` Map ルックアップ | `slots[idx]` TypedArray アクセス |
-| スタック | `unknown[]` (型不定) | `Float64Array` (型固定、連続メモリ) |
+jsmini の Bytecode VM が遅いのは「バイトコード VM だから」ではなく「変数アクセスに Map を使っているから」。
 
-jsmini の Bytecode VM が遅いのは「バイトコード VM だから」ではなく「TypeScript のオブジェクトとして命令を表現しているから」。フラットなバイト列 + TypedArray にすれば、V8-JIT なしでも Tree-Walking を上回る。
+当初の Flat VM 実験は Float64Array + 配列スロットという **Map を使わない条件** だったため速かった。
+バイト列フォーマット (Uint8Array vs Instruction[]) の差は V8-JITless ではほぼ意味がない。
 
-本物の JS エンジンが C/C++ でバイトコードを `uint8_t[]` として扱う理由がここにある。
+**改善の本丸は Map 排除 (全変数の配列スロット化)** であり、命令フォーマットの変更ではない。

@@ -673,7 +673,7 @@ function renderASTSvg(root, container) {
 }
 
 // ========== Result rendering ==========
-function renderResult(logs, returnValue, error, container) {
+function renderResult(logs, returnValue, error, container, execTime, mode) {
   let html = "";
   if (error) {
     html += `<div class="error-box">${escapeHtml(error)}</div>`;
@@ -686,6 +686,10 @@ function renderResult(logs, returnValue, error, container) {
   }
   if (!error) {
     html += `<div class="return-value">Return: <span>${escapeHtml(formatValue(returnValue))}</span></div>`;
+  }
+  if (execTime !== undefined) {
+    const modeLabel = mode === "vm" ? "Bytecode VM" : "Tree-Walking";
+    html += `<div class="return-value" style="color:var(--orange);">${modeLabel}: <span>${execTime.toFixed(2)}ms</span></div>`;
   }
   if (!error && logs.length === 0) {
     html += `<p class="empty-msg">No console output</p>`;
@@ -818,6 +822,7 @@ function runCode() {
   let error = null;
   steps = [];
   stepIndex = -1;
+  const execStart = performance.now();
   try {
     if (isVM) {
       returnValue = vmEvaluate(source, { log: (...args) => logs.push(args) });
@@ -830,7 +835,8 @@ function runCode() {
   } catch (e) {
     error = `${e.constructor?.name || "Error"}: ${e.message}`;
   }
-  renderResult(logs, returnValue, error, panels.result);
+  const execTime = performance.now() - execStart;
+  renderResult(logs, returnValue, error, panels.result, execTime, mode);
 
   // Step 用のソース範囲を事前計算 (tree-walking only)
   if (!isVM && tokens && ast) {

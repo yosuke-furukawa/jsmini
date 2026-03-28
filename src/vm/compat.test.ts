@@ -84,6 +84,93 @@ const cases: [string, string][] = [
 
   // throw new Error
   ["throw new Error + catch", 'var msg = ""; try { throw new Error("oops"); } catch (e) { msg = e.message; } msg;'],
+
+  // 現実的パターン: 配列の computed 代入
+  ["arr[i] 代入", "var arr = []; arr[0] = 42; arr[0];"],
+  ["arr[i] ループ代入", "var arr = []; for (var i = 0; i < 5; i = i + 1) { arr[i] = i * 10; } arr[3];"],
+  ["arr.length after push", "var arr = []; arr[0] = 1; arr[1] = 2; arr.length;"],
+
+  // 現実的パターン: 関数をコールバックとして渡す
+  ["関数を引数に渡す", "function apply(fn, x) { return fn(x); } function dbl(n) { return n * 2; } apply(dbl, 5);"],
+  ["forEach 的パターン", `
+    function forEach(arr, fn) { for (var i = 0; i < arr.length; i = i + 1) { fn(arr[i], i); } }
+    var sum = 0;
+    forEach([10, 20, 30], function add(n) { sum = sum + n; });
+    sum;
+  `],
+
+  // 現実的パターン: map + reduce
+  ["map 的パターン", `
+    function map(arr, fn) {
+      var result = [];
+      for (var i = 0; i < arr.length; i = i + 1) { result[i] = fn(arr[i]); }
+      return result;
+    }
+    function double(x) { return x * 2; }
+    var a = map([1, 2, 3], double);
+    a[0] + a[1] + a[2];
+  `],
+  ["reduce 的パターン", `
+    function reduce(arr, fn, init) {
+      var acc = init;
+      for (var i = 0; i < arr.length; i = i + 1) { acc = fn(acc, arr[i]); }
+      return acc;
+    }
+    reduce([1, 2, 3, 4], function add(a, b) { return a + b; }, 0);
+  `],
+
+  // 現実的パターン: オブジェクト生成 + プロパティアクセス多数
+  ["オブジェクト生成関数", `
+    function makePoint(x, y) { return { x: x, y: y }; }
+    function dist(a, b) { var dx = a.x - b.x; var dy = a.y - b.y; return dx * dx + dy * dy; }
+    var p1 = makePoint(3, 4);
+    var p2 = makePoint(0, 0);
+    dist(p1, p2);
+  `],
+
+  // 現実的パターン: 再帰 + 配列操作 (quicksort)
+  ["quicksort", `
+    function swap(arr, i, j) { var tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp; }
+    function partition(arr, lo, hi) {
+      var pivot = arr[hi];
+      var i = lo;
+      for (var j = lo; j < hi; j = j + 1) {
+        if (arr[j] <= pivot) { swap(arr, i, j); i = i + 1; }
+      }
+      swap(arr, i, hi);
+      return i;
+    }
+    function qsort(arr, lo, hi) {
+      if (lo < hi) { var p = partition(arr, lo, hi); qsort(arr, lo, p - 1); qsort(arr, p + 1, hi); }
+    }
+    var a = [5, 3, 1, 4, 2];
+    qsort(a, 0, a.length - 1);
+    a[0] + a[2] + a[4];
+  `],
+
+  // 現実的パターン: クラス + メソッド呼び出し多数
+  ["Vec クラス演算", `
+    class Vec {
+      constructor(x, y) { this.x = x; this.y = y; }
+      add(other) { return new Vec(this.x + other.x, this.y + other.y); }
+      dot(other) { return this.x * other.x + this.y * other.y; }
+    }
+    var v1 = new Vec(1, 2);
+    var v2 = new Vec(3, 4);
+    var v3 = v1.add(v2);
+    v3.dot(new Vec(1, 1));
+  `],
+
+  // 現実的パターン: コールバック (トップレベル — クロージャ不要)
+  ["コールバック多段 (トップレベル)", `
+    function forEach(arr, fn) { for (var i = 0; i < arr.length; i = i + 1) { fn(arr[i], i); } }
+    var result = [];
+    var len = 0;
+    forEach([1, 2, 3, 4, 5, 6], function check(item) {
+      if (item % 2 === 0) { result[len] = item; len = len + 1; }
+    });
+    result[0] + result[1] + result[2];
+  `],
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {

@@ -61,6 +61,7 @@ function translateBytecode(func: BytecodeFunction, spec: SpecializationType): nu
   const out: number[] = [];
   const { bytecode, constants } = func;
   const isI32 = spec === "i32";
+  const wasmType = isI32 ? WASM_TYPE.i32 : WASM_TYPE.f64;
 
   for (let pc = 0; pc < bytecode.length; pc++) {
     const instr = bytecode[pc];
@@ -87,22 +88,79 @@ function translateBytecode(func: BytecodeFunction, spec: SpecializationType): nu
       case "Div": out.push(isI32 ? WASM_OP.i32_div_s : WASM_OP.f64_div); break;
       case "Mod":
         if (isI32) { out.push(WASM_OP.i32_rem_s); }
-        else return null; // f64 の % は Wasm にはない
+        else return null;
         break;
       case "Negate":
-        if (isI32) {
-          // i32 の neg: 0 - x
-          out.push(WASM_OP.i32_const, 0x00); // i32.const 0
-          // swap して sub... Wasm はスタックマシンなので先に 0 を push してから引く
-          // → 一旦 local に退避が必要。簡易: 非対応
-          return null;
-        }
+        if (isI32) return null;
         out.push(WASM_OP.f64_neg);
         break;
       case "LessThan": out.push(isI32 ? WASM_OP.i32_lt_s : WASM_OP.f64_lt); break;
       case "GreaterThan": out.push(isI32 ? WASM_OP.i32_gt_s : WASM_OP.f64_gt); break;
       case "LessEqual": out.push(isI32 ? WASM_OP.i32_le_s : WASM_OP.f64_le); break;
       case "GreaterEqual": out.push(isI32 ? WASM_OP.i32_ge_s : WASM_OP.f64_ge); break;
+      case "Equal":
+      case "StrictEqual":
+        if (isI32) { out.push(0x46); } // i32.eq
+        else return null;
+        break;
+      case "NotEqual":
+      case "StrictNotEqual":
+        if (isI32) { out.push(0x47); } // i32.ne
+        else return null;
+        break;
+
+      // 条件分岐: JumpIfFalse → Wasm if/end
+      case "JumpIfFalse": {
+        const target = instr.operand!;
+        // JumpIfFalse は条件が false なら target にジャンプ
+        // → Wasm: if (条件が true) { ... } end で、true パスのコードを if 内に入れる
+        // target の直前が Return なら if (result type) ... return ... end パターン
+        const trueBlock = bytecode.slice(pc + 1, target);
+        const hasReturn = trueBlock.some(i => i.op === "Return");
+        if (!hasReturn) return null; // return なしの分岐は未対応
+
+        // if (result wasmType) — 関数全体の戻り値型を result に
+        // ただし true ブロックが return で終わるなら result なしでもOK
+        out.push(WASM_OP.if, 0x40); // 0x40 = void block type
+
+        // true ブロックの中身を再帰的に変換
+        for (let j = pc + 1; j < target; j++) {
+          const inner = bytecode[j];
+          const innerResult = translateSingleInstruction(inner, func, spec, isI32, wasmType, out);
+          if (!innerResult) return null;
+        }
+
+        out.push(WASM_OP.end); // if の end
+        pc = target - 1; // for ループの pc++ で target に進む
+        break;
+      }
+
+      // 自己再帰呼び出し: LdaGlobal(func名) + Call → call 0
+      case "LdaGlobal": {
+        const name = constants[instr.operand!];
+        // 次の命令が Call で、ロードしたのが自分自身の関数名なら
+        // LdaGlobal をスキップ (Call で call 0 にする)
+        if (typeof name === "string" && name === func.name && pc + 1 < bytecode.length && bytecode[pc + 1].op === "Call") {
+          // skip — Call 側で処理
+          break;
+        }
+        return null; // 一般的なグローバル参照は未対応
+      }
+
+      case "Call": {
+        const argc = instr.operand!;
+        // 直前が LdaGlobal(自分自身) なら自己再帰
+        if (pc > 0 && bytecode[pc - 1].op === "LdaGlobal") {
+          const prevName = constants[bytecode[pc - 1].operand!];
+          if (prevName === func.name) {
+            // call 0 — 関数インデックス 0 (自分自身)
+            out.push(WASM_OP.call, 0x00);
+            break;
+          }
+        }
+        return null; // 一般的な関数呼び出しは未対応
+      }
+
       case "Return":
         out.push(WASM_OP.return);
         break;
@@ -123,4 +181,46 @@ function translateBytecode(func: BytecodeFunction, spec: SpecializationType): nu
 
   out.push(WASM_OP.end);
   return out;
+}
+
+// 単一命令を変換 (JumpIfFalse の true ブロック内で使用)
+function translateSingleInstruction(
+  instr: { op: string; operand?: number },
+  func: BytecodeFunction,
+  spec: SpecializationType,
+  isI32: boolean,
+  wasmType: number,
+  out: number[],
+): boolean {
+  const { constants } = func;
+  switch (instr.op) {
+    case "LdaLocal": out.push(WASM_OP.local_get, instr.operand!); return true;
+    case "StaLocal": out.push(WASM_OP.local_set, instr.operand!); return true;
+    case "LdaConst": {
+      const val = constants[instr.operand!];
+      if (typeof val !== "number") return false;
+      if (isI32) { out.push(WASM_OP.i32_const, ...i32ToLEB128(val | 0)); }
+      else { out.push(WASM_OP.f64_const, ...f64ToBytes(val)); }
+      return true;
+    }
+    case "Add": out.push(isI32 ? WASM_OP.i32_add : WASM_OP.f64_add); return true;
+    case "Sub": out.push(isI32 ? WASM_OP.i32_sub : WASM_OP.f64_sub); return true;
+    case "Mul": out.push(isI32 ? WASM_OP.i32_mul : WASM_OP.f64_mul); return true;
+    case "Div": out.push(isI32 ? WASM_OP.i32_div_s : WASM_OP.f64_div); return true;
+    case "Return": out.push(WASM_OP.return); return true;
+    case "LdaUndefined":
+      if (isI32) { out.push(WASM_OP.i32_const, 0x00); }
+      else { out.push(WASM_OP.f64_const, ...f64ToBytes(0)); }
+      return true;
+    case "Pop": out.push(WASM_OP.drop); return true;
+    case "LessThan": out.push(isI32 ? WASM_OP.i32_lt_s : WASM_OP.f64_lt); return true;
+    case "GreaterThan": out.push(isI32 ? WASM_OP.i32_gt_s : WASM_OP.f64_gt); return true;
+    case "LessEqual": out.push(isI32 ? WASM_OP.i32_le_s : WASM_OP.f64_le); return true;
+    case "GreaterEqual": out.push(isI32 ? WASM_OP.i32_ge_s : WASM_OP.f64_ge); return true;
+    case "Equal":
+    case "StrictEqual":
+      if (isI32) { out.push(0x46); return true; }
+      return false;
+    default: return false;
+  }
 }
