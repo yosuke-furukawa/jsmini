@@ -79,13 +79,14 @@ V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run 
 |-----------|-------------|-------------|----------|
 | fibonacci(25) | 738ms | 701ms (1.05x) | **0.56ms (1309x)** |
 | for loop sum (10K) | 20ms | 34ms (0.59x) | — |
-| quicksort (200) | 22ms | 29ms (0.76x) | — |
+| quicksort (200 x10) | 136ms | 190ms (0.72x) | **22ms (6.1x)** |
 | ackermann(3,4) | 40ms | 36ms (1.10x) | — |
 | hot add (10K calls) | 42ms | 55ms (0.76x) | 49ms (0.86x) |
 | Vec class (1K iter) | 11ms | 19ms (0.56x) | — |
 
 - **VM が TW に勝つ** のは再帰が深いパターン (fibonacci, ackermann)。関数呼び出しコストの構造的な差
-- **Wasm JIT が 1309x** になるのは fibonacci の再帰が Wasm 内で完結し、dispatch を完全に排除するため
+- **Wasm JIT が 1309x** (fibonacci) は再帰が Wasm 内で完結し dispatch を完全排除するため
+- **quicksort 6.1x** は整数配列を Wasm linear memory にコピーし `i32.load`/`i32.store` で直接操作するため (Element Kind = SMI)
 - 詳細は [BENCHMARK.md](./BENCHMARK.md)、学んだことは [LEARN-VM.md](./LEARN-VM.md)、[LEARN-JIT.md](./LEARN-JIT.md) を参照
 
 ## Test262 準拠率

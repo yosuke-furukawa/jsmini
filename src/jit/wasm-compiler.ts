@@ -1,6 +1,6 @@
 import type { BytecodeFunction } from "../vm/bytecode.js";
 import { WasmBuilder, WASM_OP, WASM_TYPE, f64ToBytes, i32ToLEB128 } from "./wasm-builder.js";
-// WasmNumericType は JitManager から使われる
+import { detectArrayLocals } from "./array-analysis.js";
 
 type SpecializationType = "i32" | "f64";
 
@@ -37,14 +37,30 @@ export function compileMultiSync(
     funcIndex.set(funcs[i].name, i);
   }
 
+  // 配列ローカルの検出
+  let anyArrayLocals = false;
+  const arrayLocalsByFunc = new Map<string, Set<number>>();
+  for (const func of funcs) {
+    const als = detectArrayLocals(func);
+    arrayLocalsByFunc.set(func.name, als);
+    if (als.size > 0) anyArrayLocals = true;
+  }
+
   const builder = new WasmBuilder();
-  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex };
+  if (anyArrayLocals) builder.enableMemory(1);
 
   for (const func of funcs) {
+    const arrayLocals = arrayLocalsByFunc.get(func.name) ?? new Set();
+    const ctx: TranslateContext = {
+      spec: t, isI32: t === "i32", wasmType, funcIndex,
+      arrayLocals, hasMemory: anyArrayLocals,
+    };
     const params = new Array(func.paramCount).fill(wasmType);
     const results = [wasmType];
-    // ローカル変数 (params 以外) の宣言
-    const extraLocals = func.localCount - func.paramCount;
+    let extraLocals = func.localCount - func.paramCount;
+    // SetPropertyComputed があれば一時退避用の extra local を 1 つ追加
+    const needsTempLocal = func.bytecode.some(i => i.op === "SetPropertyComputed");
+    if (needsTempLocal) extraLocals++;
     const body = translateBytecode(func, ctx);
     if (!body) return null;
     builder.addFunction(func.name, params, results, body, extraLocals > 0 ? extraLocals : 0);
@@ -57,6 +73,10 @@ export function compileMultiSync(
     const result = new Map<string, (...args: number[]) => number>();
     for (const func of funcs) {
       result.set(func.name, instance.exports[func.name] as (...args: number[]) => number);
+    }
+    // memory を export に含める
+    if (anyArrayLocals && instance.exports.memory) {
+      (result as any).__memory = instance.exports.memory;
     }
     return result;
   } catch {
@@ -71,7 +91,8 @@ export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationTy
   const typeName = t === "i32" ? "i32" : "f64";
   const funcIndex = new Map<string, number>();
   funcIndex.set(func.name, 0);
-  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex };
+  const arrayLocals = detectArrayLocals(func);
+  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory: arrayLocals.size > 0 };
 
   const body = translateBytecode(func, ctx);
   if (!body) return null;
@@ -122,6 +143,12 @@ export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationTy
       case WASM_OP.i32_mul: lines.push(`${pad()}i32.mul`); break;
       case WASM_OP.i32_div_s: lines.push(`${pad()}i32.div_s`); break;
       case WASM_OP.i32_rem_s: lines.push(`${pad()}i32.rem_s`); break;
+      case WASM_OP.i32_load:
+        lines.push(`${pad()}i32.load align=${1 << body[++i]} offset=${body[++i]}`);
+        break;
+      case WASM_OP.i32_store:
+        lines.push(`${pad()}i32.store align=${1 << body[++i]} offset=${body[++i]}`);
+        break;
       case WASM_OP.i32_lt_s: lines.push(`${pad()}i32.lt_s`); break;
       case WASM_OP.i32_gt_s: lines.push(`${pad()}i32.gt_s`); break;
       case WASM_OP.i32_le_s: lines.push(`${pad()}i32.le_s`); break;
@@ -205,6 +232,8 @@ type TranslateContext = {
   isI32: boolean;
   wasmType: number;
   funcIndex: Map<string, number>;
+  arrayLocals: Set<number>;  // 配列として使われているローカル変数のスロット番号
+  hasMemory: boolean;        // linear memory を使うか
 };
 
 // jsmini バイトコード → Wasm 命令列に変換
@@ -296,6 +325,81 @@ function translateRange(
         else return false;
         break;
 
+      // 配列アクセス (linear memory 経由)
+      case "GetPropertyComputed": {
+        if (!ctx.hasMemory) return false;
+        // メモリレイアウト: [length: i32][elem0: i32][elem1: i32]...
+        // スタック: [base_addr, index] → i32.load(base + 4 + index * 4)
+        if (isI32) {
+          out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
+          out.push(WASM_OP.i32_mul);   // idx * 4
+          out.push(WASM_OP.i32_add);   // base + idx * 4
+          out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
+          out.push(WASM_OP.i32_add);   // + 4 (length ヘッダ分)
+          out.push(WASM_OP.i32_load, 0x02, 0x00); // align=4, offset=0
+        } else return false;
+        break;
+      }
+
+      case "SetPropertyComputed": {
+        if (!ctx.hasMemory) return false;
+        // スタック: [base_addr, index, value]
+        // → i32.store(base + index * 4, value)
+        // Wasm の i32.store は [addr, value] を取る
+        // スタック上: base, idx, val → addr を計算してから store
+        // 一旦 value を temp local に退避する必要がある
+        // → 呼び出し側で temp local を確保済みと仮定
+        // 簡易実装: StaLocal で value を退避してから store
+        // ただし temp local が必要...
+        // 別アプローチ: コンパイラが SetPropertyComputed を見たとき
+        // 直前のスタック構造を追跡して変換する
+        //
+        // swap のバイトコード:
+        //   LdaLocal 0 (arr)    → base
+        //   LdaLocal 2 (j)      → idx
+        //   LdaLocal 3 (tmp)    → value
+        //   SetPropertyComputed
+        //
+        // 必要な Wasm: base + idx * 4 のアドレスを計算、value を store
+        // スタック: [base, idx, value]
+        // → [base, idx*4] → [base+idx*4] → [base+idx*4, value] → store
+        // しかし value は idx の上にある → 入れ替えが必要
+        //
+        // 回避策: value を取り出して、addr を計算して、store
+        // Wasm にはスタック操作がないので local.tee を使う
+        //
+        // extraLocal を 1 つ確保して一時退避に使う:
+        if (isI32) {
+          // メモリレイアウト: [length: i32][elem0: i32][elem1: i32]...
+          // スタック: [base, idx, value]
+          // value を一時退避 (extraLocal の最後のスロット)
+          const tempLocal = func.localCount; // 追加の temp local
+          out.push(0x22, tempLocal);   // local.tee tempLocal (value を保存 + スタックに残す)
+          out.push(WASM_OP.drop);      // value を消す → [base, idx]
+          out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
+          out.push(WASM_OP.i32_mul);   // idx * 4 → [base, idx*4]
+          out.push(WASM_OP.i32_add);   // base + idx*4 → [addr]
+          out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
+          out.push(WASM_OP.i32_add);   // + 4 (length ヘッダ分) → [addr+4]
+          out.push(WASM_OP.local_get, tempLocal); // value を復元 → [addr, value]
+          out.push(WASM_OP.i32_store, 0x02, 0x00); // store → []
+          // SetPropertyComputed は value をスタックに残すので push
+          out.push(WASM_OP.local_get, tempLocal); // → [value]
+        } else return false;
+        break;
+      }
+
+      case "GetProperty": {
+        const name = constants[instr.operand!];
+        if (name === "length" && ctx.hasMemory) {
+          // スタック: [base_addr] → i32.load(base) で length を取得
+          // メモリレイアウト: [length: i32][elem0][elem1]...
+          out.push(WASM_OP.i32_load, 0x02, 0x00); // align=4, offset=0
+          break;
+        }
+        return false;
+      }
+
       // 条件分岐
       case "JumpIfFalse": {
         const target = instr.operand!;
@@ -352,7 +456,15 @@ function translateRange(
           break;
         }
 
-        return false;
+        // パターン 4: if (void) — else なし、return なし、ループでもない
+        // 単純な条件付き実行ブロック
+        {
+          out.push(WASM_OP.if, 0x40);
+          if (!translateRange(func, pc + 1, target, ctx, out)) return false;
+          out.push(WASM_OP.end);
+          pc = target - 1;
+          break;
+        }
       }
 
       // Jump: ループの br は JumpIfFalse のループパターンで処理済み

@@ -4,6 +4,7 @@
 // Wasm セクション ID
 const SECTION_TYPE = 1;
 const SECTION_FUNCTION = 3;
+const SECTION_MEMORY = 5;
 const SECTION_EXPORT = 7;
 const SECTION_CODE = 10;
 
@@ -27,6 +28,10 @@ export const WASM_OP = {
   i32_mul: 0x6c,
   i32_div_s: 0x6d,
   i32_rem_s: 0x6f,
+  i32_load: 0x28,
+  i32_store: 0x36,
+  f64_load: 0x2b,
+  f64_store: 0x39,
   i32_eqz: 0x45,
   i32_lt_s: 0x48,
   i32_gt_s: 0x4a,
@@ -65,9 +70,15 @@ type FuncDef = {
 
 export class WasmBuilder {
   private functions: FuncDef[] = [];
+  private memoryPages = 0; // 0 = メモリなし
 
   addFunction(name: string, params: number[], results: number[], body: number[], extraLocals = 0): void {
     this.functions.push({ name, params, results, body, extraLocals });
+  }
+
+  // linear memory を有効にする (1 page = 64KB)
+  enableMemory(pages = 1): void {
+    this.memoryPages = pages;
   }
 
   build(): Uint8Array {
@@ -85,6 +96,12 @@ export class WasmBuilder {
     const funcSection = this.buildFunctionSection();
     this.writeSection(buf, SECTION_FUNCTION, funcSection);
 
+    // Memory section (Function と Export の間)
+    if (this.memoryPages > 0) {
+      const memSection = this.buildMemorySection();
+      this.writeSection(buf, SECTION_MEMORY, memSection);
+    }
+
     // Export section
     const exportSection = this.buildExportSection();
     this.writeSection(buf, SECTION_EXPORT, exportSection);
@@ -94,6 +111,14 @@ export class WasmBuilder {
     this.writeSection(buf, SECTION_CODE, codeSection);
 
     return new Uint8Array(buf);
+  }
+
+  private buildMemorySection(): number[] {
+    const buf: number[] = [];
+    writeLEB128(buf, 1); // 1 つのメモリ
+    buf.push(0x00);      // limits: min のみ (max なし)
+    writeLEB128(buf, this.memoryPages);
+    return buf;
   }
 
   private buildTypeSection(): number[] {
@@ -121,7 +146,8 @@ export class WasmBuilder {
 
   private buildExportSection(): number[] {
     const buf: number[] = [];
-    writeLEB128(buf, this.functions.length);
+    const exportCount = this.functions.length + (this.memoryPages > 0 ? 1 : 0);
+    writeLEB128(buf, exportCount);
     for (let i = 0; i < this.functions.length; i++) {
       const name = this.functions[i].name;
       const nameBytes = new TextEncoder().encode(name);
@@ -129,6 +155,14 @@ export class WasmBuilder {
       buf.push(...nameBytes);
       buf.push(0x00); // export kind = func
       writeLEB128(buf, i); // func index
+    }
+    // Memory export
+    if (this.memoryPages > 0) {
+      const memName = new TextEncoder().encode("memory");
+      writeLEB128(buf, memName.length);
+      buf.push(...memName);
+      buf.push(0x02); // export kind = memory
+      writeLEB128(buf, 0); // memory index = 0
     }
     return buf;
   }

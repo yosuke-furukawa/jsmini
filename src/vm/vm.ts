@@ -195,7 +195,12 @@ export class VM {
         }
         case "StaGlobal": {
           const name = constants[instr.operand!] as string;
-          this.globals.set(name, this.peek());
+          const val = this.peek();
+          this.globals.set(name, val);
+          // JIT: バイトコード関数をグローバルに登録されたら追跡
+          if (this.jit && typeof val === "object" && val !== null && "bytecode" in val) {
+            this.jit.registerFunc(name, val as BytecodeFunction);
+          }
           break;
         }
 

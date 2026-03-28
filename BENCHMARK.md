@@ -12,7 +12,7 @@
 | hot mul (10K calls) | 42ms | 56ms | 0.75x TW wins | 50ms | 0.85x |
 | nested loop (100x100) | 21ms | 33ms | 0.66x TW wins | — | — |
 | map/reduce (500 elements) | 6ms | 8ms | 0.70x TW wins | — | — |
-| **quicksort (200 elements)** | 22ms | 29ms | 0.76x TW wins | — | — |
+| **quicksort (200 x10)** | 136ms | 190ms | 0.72x TW wins | **22ms** | **6.1x** |
 | **ackermann(3,4)** | 40ms | 36ms | **1.10x VM wins** | — | — |
 | mutual recursion (10K) | 13ms | 14ms | 0.96x ほぼ同速 | — | — |
 | callback chain (1500 calls) | 3ms | 5ms | 0.60x TW wins | — | — |

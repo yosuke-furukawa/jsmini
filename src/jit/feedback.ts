@@ -1,11 +1,16 @@
 import type { BytecodeFunction } from "../vm/bytecode.js";
+import { getElementKind, isTrackedArray } from "../vm/js-array.js";
 
 // 詳細な型分類
 // number をさらに int32 / uint32 / f64 に細分化
+// 配列を Element Kind で分類
 export type DetailedType =
-  | "int32"      // 整数、-2^31 <= x < 2^31
-  | "uint32"     // 非負整数、0 <= x < 2^32
-  | "f64"        // 小数 or 範囲外の整数
+  | "int32"        // 整数、-2^31 <= x < 2^31
+  | "uint32"       // 非負整数、0 <= x < 2^32
+  | "f64"          // 小数 or 範囲外の整数
+  | "smi_array"    // 整数のみの配列 (Element Kind = SMI)
+  | "double_array" // 数値のみの配列 (Element Kind = DOUBLE)
+  | "array"        // 汎用配列 (Element Kind = GENERIC or 未追跡)
   | "string"
   | "boolean"
   | "undefined"
@@ -120,18 +125,33 @@ export function classifyType(val: unknown): DetailedType {
     }
     return "f64";
   }
+  if (Array.isArray(val)) {
+    if (isTrackedArray(val)) {
+      const kind = getElementKind(val);
+      if (kind === "SMI") return "smi_array";
+      if (kind === "DOUBLE") return "double_array";
+    }
+    return "array";
+  }
   return "object";
 }
 
 // DetailedType → Wasm 型に変換
-function toWasmType(t: DetailedType): WasmNumericType | null {
+export function toWasmType(t: DetailedType): WasmNumericType | null {
   switch (t) {
     case "int32":
     case "uint32":
+    case "smi_array":  // 配列は i32 (Wasm memory base address)
       return "i32";
     case "f64":
+    case "double_array":
       return "f64";
     default:
       return null; // 数値以外は Wasm 化不可
   }
+}
+
+// 配列型かどうか
+export function isArrayType(t: DetailedType): boolean {
+  return t === "smi_array" || t === "double_array" || t === "array";
 }
