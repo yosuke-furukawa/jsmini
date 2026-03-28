@@ -83,7 +83,7 @@ const benchmarks = [
     jitEligible: false,
   },
   {
-    name: "quicksort (200 elements)",
+    name: "quicksort (200 elements x10)",
     source: `
       function swap(arr, i, j) { var tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp; }
       function partition(arr, lo, hi) {
@@ -98,12 +98,17 @@ const benchmarks = [
       function qsort(arr, lo, hi) {
         if (lo < hi) { var p = partition(arr, lo, hi); qsort(arr, lo, p - 1); qsort(arr, p + 1, hi); }
       }
-      var arr = [];
-      for (var i = 0; i < 200; i = i + 1) { arr[i] = (i * 7 + 13) % 200; }
-      qsort(arr, 0, arr.length - 1);
-      arr[0] + arr[99] + arr[199];
+      function runSort() {
+        var arr = [];
+        for (var i = 0; i < 200; i = i + 1) { arr[i] = (i * 7 + 13) % 200; }
+        qsort(arr, 0, arr.length - 1);
+        return arr[0] + arr[99] + arr[199];
+      }
+      var result = 0;
+      for (var r = 0; r < 10; r = r + 1) { result = runSort(); }
+      result;
     `,
-    jitEligible: false,
+    jitEligible: true,
   },
   {
     name: "ackermann(3,4) — 深い再帰 10547 calls",
@@ -222,7 +227,7 @@ for (const { name, source, jitEligible } of benchmarks) {
   console.log(`  ratio        : ${ratio.toFixed(2)}x — ${winner}`);
 
   if (jitEligible) {
-    const jit = bench(() => vmEvaluate(source, { jit: true, jitThreshold: 50 }));
+    const jit = bench(() => vmEvaluate(source, { jit: true, jitThreshold: 5 }));
     console.log(`  wasm-jit     : ${jit.avg.toFixed(2)}ms (min: ${jit.min.toFixed(2)}ms) result=${jit.result}`);
     console.log(`  jit vs tw    : ${(tw.avg / jit.avg).toFixed(2)}x`);
   }

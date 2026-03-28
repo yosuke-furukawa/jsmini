@@ -113,7 +113,7 @@
 - [x] qsort 内の `partition(arr, lo, hi)` → Wasm 内の `call $partition`
 - [x] qsort の自己再帰 → Wasm 内の `call $qsort`
 - [x] テスト: quicksort(200) が正しくソートされる (result=298)
-- [ ] ベンチマーク: TW / VM / Wasm JIT の 3 層比較
+- [x] ベンチマーク: quicksort(200 x10) — TW 210ms / VM 291ms / Wasm JIT 39ms (TW の 5.4x)
 
 ---
 
