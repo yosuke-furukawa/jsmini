@@ -143,6 +143,12 @@ export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationTy
       case WASM_OP.i32_mul: lines.push(`${pad()}i32.mul`); break;
       case WASM_OP.i32_div_s: lines.push(`${pad()}i32.div_s`); break;
       case WASM_OP.i32_rem_s: lines.push(`${pad()}i32.rem_s`); break;
+      case WASM_OP.i32_load:
+        lines.push(`${pad()}i32.load align=${1 << body[++i]} offset=${body[++i]}`);
+        break;
+      case WASM_OP.i32_store:
+        lines.push(`${pad()}i32.store align=${1 << body[++i]} offset=${body[++i]}`);
+        break;
       case WASM_OP.i32_lt_s: lines.push(`${pad()}i32.lt_s`); break;
       case WASM_OP.i32_gt_s: lines.push(`${pad()}i32.gt_s`); break;
       case WASM_OP.i32_le_s: lines.push(`${pad()}i32.le_s`); break;
@@ -322,14 +328,14 @@ function translateRange(
       // 配列アクセス (linear memory 経由)
       case "GetPropertyComputed": {
         if (!ctx.hasMemory) return false;
-        // スタック: [base_addr, index] → i32.load(base + index * 4)
-        // 直前が LdaLocal arr, LdaLocal idx の場合:
-        // arr は base_addr (i32)、idx は index (i32)
-        // → base + idx * 4 を計算して i32.load
+        // メモリレイアウト: [length: i32][elem0: i32][elem1: i32]...
+        // スタック: [base_addr, index] → i32.load(base + 4 + index * 4)
         if (isI32) {
           out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
           out.push(WASM_OP.i32_mul);   // idx * 4
           out.push(WASM_OP.i32_add);   // base + idx * 4
+          out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
+          out.push(WASM_OP.i32_add);   // + 4 (length ヘッダ分)
           out.push(WASM_OP.i32_load, 0x02, 0x00); // align=4, offset=0
         } else return false;
         break;
@@ -364,6 +370,7 @@ function translateRange(
         //
         // extraLocal を 1 つ確保して一時退避に使う:
         if (isI32) {
+          // メモリレイアウト: [length: i32][elem0: i32][elem1: i32]...
           // スタック: [base, idx, value]
           // value を一時退避 (extraLocal の最後のスロット)
           const tempLocal = func.localCount; // 追加の temp local
@@ -372,6 +379,8 @@ function translateRange(
           out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
           out.push(WASM_OP.i32_mul);   // idx * 4 → [base, idx*4]
           out.push(WASM_OP.i32_add);   // base + idx*4 → [addr]
+          out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
+          out.push(WASM_OP.i32_add);   // + 4 (length ヘッダ分) → [addr+4]
           out.push(WASM_OP.local_get, tempLocal); // value を復元 → [addr, value]
           out.push(WASM_OP.i32_store, 0x02, 0x00); // store → []
           // SetPropertyComputed は value をスタックに残すので push
@@ -382,10 +391,11 @@ function translateRange(
 
       case "GetProperty": {
         const name = constants[instr.operand!];
-        if (name === "length") {
-          // arr.length — 配列の長さは関数引数として渡す仕組みが必要
-          // 今は未対応 → コンパイル不可
-          return false;
+        if (name === "length" && ctx.hasMemory) {
+          // スタック: [base_addr] → i32.load(base) で length を取得
+          // メモリレイアウト: [length: i32][elem0][elem1]...
+          out.push(WASM_OP.i32_load, 0x02, 0x00); // align=4, offset=0
+          break;
         }
         return false;
       }

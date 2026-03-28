@@ -87,7 +87,7 @@
   ```
 - [x] `if (void)` パターン対応 (else なし、return なし)
 - [x] `compileMultiSync` が配列ローカルを検出して自動で memory 有効化
-- [ ] `GetProperty "length"` の変換: 未対応 (quicksort は hi 引数で代替)
+- [x] `GetProperty "length"` の変換: メモリレイアウト [length][elem0][elem1]... で `i32.load(base)` に変換
 - [x] テスト: swap, partition, qsort が Wasm で動作。quicksort(200) = TW の 195 倍速い
 
 ---
