@@ -981,18 +981,18 @@ function runCode() {
 
       // Wasm JIT モード: WAT も表示
       if (mode === "wasm-jit") {
+        // 全バイトコード関数を収集 (関連関数の解決用)
+        const allBcFuncs = func.constants.filter(c => c && typeof c === "object" && "bytecode" in c && "name" in c);
         let watHtml = "";
-        for (const c of func.constants) {
-          if (c && typeof c === "object" && "bytecode" in c && "name" in c) {
-            const wat = disassembleToWat(c, "i32");
-            if (wat) {
-              watHtml += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">`;
-              watHtml += `<div style="font-size:11px;color:var(--green);text-transform:uppercase;font-weight:600;margin-bottom:4px;">WAT — ${escapeHtml(c.name)}</div>`;
-              watHtml += `<pre style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text);line-height:1.6;white-space:pre;">${escapeHtml(wat)}</pre>`;
-              watHtml += `</div>`;
-            } else {
-              watHtml += `<div style="margin-top:8px;color:var(--text-muted);font-size:12px;">WAT — ${escapeHtml(c.name)}: JIT 非対応 (未サポートの opcode あり)</div>`;
-            }
+        for (const c of allBcFuncs) {
+          const wat = disassembleToWat(c, "i32", allBcFuncs);
+          if (wat) {
+            watHtml += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">`;
+            watHtml += `<div style="font-size:11px;color:var(--green);text-transform:uppercase;font-weight:600;margin-bottom:4px;">WAT — ${escapeHtml(c.name)}</div>`;
+            watHtml += `<pre style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text);line-height:1.6;white-space:pre;">${escapeHtml(wat)}</pre>`;
+            watHtml += `</div>`;
+          } else {
+            watHtml += `<div style="margin-top:8px;color:var(--text-muted);font-size:12px;">WAT — ${escapeHtml(c.name)}: JIT 非対応 (未サポートの opcode あり)</div>`;
           }
         }
         if (watHtml) {

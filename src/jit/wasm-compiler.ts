@@ -85,14 +85,25 @@ export function compileMultiSync(
 }
 
 // BytecodeFunction を WAT (WebAssembly Text Format) に変換
-export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationType): string | null {
+// 単一関数の WAT 変換 (関連関数も含めて変換)
+export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationType, allFuncs?: BytecodeFunction[]): string | null {
   const t = spec ?? "i32";
   const wasmType = t === "i32" ? WASM_TYPE.i32 : WASM_TYPE.f64;
   const typeName = t === "i32" ? "i32" : "f64";
+
+  // 全関数の funcIndex を構築
+  const funcs = allFuncs ?? [func];
   const funcIndex = new Map<string, number>();
-  funcIndex.set(func.name, 0);
+  for (let i = 0; i < funcs.length; i++) {
+    funcIndex.set(funcs[i].name, i);
+  }
+
   const arrayLocals = detectArrayLocals(func);
-  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory: arrayLocals.size > 0 };
+  let hasMemory = arrayLocals.size > 0;
+  if (!hasMemory && allFuncs) {
+    hasMemory = allFuncs.some(f => detectArrayLocals(f).size > 0);
+  }
+  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory };
 
   const body = translateBytecode(func, ctx);
   if (!body) return null;
