@@ -141,8 +141,10 @@ class BytecodeCompiler {
       const stmt = program.body[i];
       const isLast = i === program.body.length - 1;
       this.compileStatement(stmt);
-      if (stmt.type === "ExpressionStatement" && !isLast) {
-        this.emit("Pop");
+      // 最後の式文の値をスタックに残す (プログラムの戻り値)
+      if (stmt.type === "ExpressionStatement" && isLast) {
+        // compileStatement が Pop を emit したので、最後だけ取り消す
+        this.bytecode.pop(); // Pop を除去
       }
     }
   }
@@ -168,6 +170,7 @@ class BytecodeCompiler {
     switch (stmt.type) {
       case "ExpressionStatement":
         this.compileExpression(stmt.expression);
+        this.emit("Pop");
         break;
 
       case "VariableDeclaration": {
