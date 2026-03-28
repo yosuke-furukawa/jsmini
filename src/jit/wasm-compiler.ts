@@ -64,6 +64,142 @@ export function compileMultiSync(
   }
 }
 
+// BytecodeFunction を WAT (WebAssembly Text Format) に変換
+export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationType): string | null {
+  const t = spec ?? "i32";
+  const wasmType = t === "i32" ? WASM_TYPE.i32 : WASM_TYPE.f64;
+  const typeName = t === "i32" ? "i32" : "f64";
+  const funcIndex = new Map<string, number>();
+  funcIndex.set(func.name, 0);
+  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex };
+
+  const body = translateBytecode(func, ctx);
+  if (!body) return null;
+
+  // body (end 含む) を WAT テキストに変換
+  const lines: string[] = [];
+  const params = new Array(func.paramCount).fill(typeName).map((t, i) => `(param $p${i} ${t})`).join(" ");
+  const locals = func.localCount - func.paramCount;
+  const localDecls = locals > 0
+    ? "\n" + Array.from({ length: locals }, (_, i) => `  (local $l${func.paramCount + i} ${typeName})`).join("\n")
+    : "";
+
+  lines.push(`(module`);
+  lines.push(`  (func $${func.name} (export "${func.name}") ${params} (result ${typeName})${localDecls}`);
+
+  let indent = 4;
+  const pad = () => " ".repeat(indent);
+
+  for (let i = 0; i < body.length; i++) {
+    const op = body[i];
+    switch (op) {
+      case WASM_OP.local_get:
+        lines.push(`${pad()}local.get ${body[++i]}`);
+        break;
+      case WASM_OP.local_set:
+        lines.push(`${pad()}local.set ${body[++i]}`);
+        break;
+      case 0x22: // local.tee
+        lines.push(`${pad()}local.tee ${body[++i]}`);
+        break;
+      case WASM_OP.i32_const: {
+        const { value, bytesRead } = decodeLEB128Signed(body, i + 1);
+        lines.push(`${pad()}i32.const ${value}`);
+        i += bytesRead;
+        break;
+      }
+      case WASM_OP.f64_const: {
+        const buf = new ArrayBuffer(8);
+        const view = new DataView(buf);
+        for (let j = 0; j < 8; j++) view.setUint8(j, body[i + 1 + j]);
+        const val = view.getFloat64(0, true);
+        lines.push(`${pad()}f64.const ${val}`);
+        i += 8;
+        break;
+      }
+      case WASM_OP.i32_add: lines.push(`${pad()}i32.add`); break;
+      case WASM_OP.i32_sub: lines.push(`${pad()}i32.sub`); break;
+      case WASM_OP.i32_mul: lines.push(`${pad()}i32.mul`); break;
+      case WASM_OP.i32_div_s: lines.push(`${pad()}i32.div_s`); break;
+      case WASM_OP.i32_rem_s: lines.push(`${pad()}i32.rem_s`); break;
+      case WASM_OP.i32_lt_s: lines.push(`${pad()}i32.lt_s`); break;
+      case WASM_OP.i32_gt_s: lines.push(`${pad()}i32.gt_s`); break;
+      case WASM_OP.i32_le_s: lines.push(`${pad()}i32.le_s`); break;
+      case WASM_OP.i32_ge_s: lines.push(`${pad()}i32.ge_s`); break;
+      case WASM_OP.i32_eqz: lines.push(`${pad()}i32.eqz`); break;
+      case 0x46: lines.push(`${pad()}i32.eq`); break;
+      case 0x47: lines.push(`${pad()}i32.ne`); break;
+      case WASM_OP.f64_add: lines.push(`${pad()}f64.add`); break;
+      case WASM_OP.f64_sub: lines.push(`${pad()}f64.sub`); break;
+      case WASM_OP.f64_mul: lines.push(`${pad()}f64.mul`); break;
+      case WASM_OP.f64_div: lines.push(`${pad()}f64.div`); break;
+      case WASM_OP.f64_lt: lines.push(`${pad()}f64.lt`); break;
+      case WASM_OP.f64_gt: lines.push(`${pad()}f64.gt`); break;
+      case WASM_OP.f64_le: lines.push(`${pad()}f64.le`); break;
+      case WASM_OP.f64_ge: lines.push(`${pad()}f64.ge`); break;
+      case WASM_OP.f64_neg: lines.push(`${pad()}f64.neg`); break;
+      case WASM_OP.call:
+        lines.push(`${pad()}call ${body[++i]}`);
+        break;
+      case WASM_OP.return: lines.push(`${pad()}return`); break;
+      case WASM_OP.drop: lines.push(`${pad()}drop`); break;
+      case WASM_OP.if:
+        lines.push(`${pad()}if`);
+        i++; // block type byte
+        indent += 2;
+        break;
+      case WASM_OP.else:
+        indent -= 2;
+        lines.push(`${pad()}else`);
+        indent += 2;
+        break;
+      case WASM_OP.block:
+        lines.push(`${pad()}block`);
+        i++; // block type byte
+        indent += 2;
+        break;
+      case WASM_OP.loop:
+        lines.push(`${pad()}loop`);
+        i++; // block type byte
+        indent += 2;
+        break;
+      case WASM_OP.br:
+        lines.push(`${pad()}br ${body[++i]}`);
+        break;
+      case WASM_OP.br_if:
+        lines.push(`${pad()}br_if ${body[++i]}`);
+        break;
+      case WASM_OP.end:
+        indent -= 2;
+        if (indent < 4) indent = 4;
+        lines.push(`${pad()}end`);
+        break;
+      default:
+        lines.push(`${pad()};; unknown opcode 0x${op.toString(16)}`);
+    }
+  }
+  lines.push(`  )`);
+  lines.push(`)`);
+  return lines.join("\n");
+}
+
+// LEB128 符号付きデコード
+function decodeLEB128Signed(buf: number[], offset: number): { value: number; bytesRead: number } {
+  let result = 0;
+  let shift = 0;
+  let byte: number;
+  let pos = offset;
+  do {
+    byte = buf[pos++];
+    result |= (byte & 0x7f) << shift;
+    shift += 7;
+  } while (byte & 0x80);
+  if (shift < 32 && (byte & 0x40)) {
+    result |= -(1 << shift);
+  }
+  return { value: result, bytesRead: pos - offset };
+}
+
 type TranslateContext = {
   spec: SpecializationType;
   isI32: boolean;

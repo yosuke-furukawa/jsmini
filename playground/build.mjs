@@ -17,6 +17,9 @@ export { vmEvaluate } from "../src/vm/index.ts";
 export { compile } from "../src/vm/compiler.ts";
 export { disassemble } from "../src/vm/bytecode.ts";
 
+// jsmini engine - Wasm JIT
+export { disassembleToWat } from "../src/jit/wasm-compiler.ts";
+
 // CodeMirror
 export { basicSetup } from "codemirror";
 export { javascript } from "@codemirror/lang-javascript";
