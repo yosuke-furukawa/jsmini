@@ -68,6 +68,39 @@ fib(20)  calls= 21,891  VM wins (1.05x)
 
 **15 回の関数呼び出しで VM が逆転する。** ただし比率は 1.02x〜1.14x で安定し、回数に比例して広がるわけではない。
 
+## V8-JIT 有効時の結果
+
+計測条件: `npx tsx src/bench.ts` (V8 のデフォルト、全 JIT tier 有効)
+
+| Benchmark | Tree-Walking | Bytecode VM | 比率 | Wasm JIT | JIT vs TW |
+|-----------|-------------|-------------|------|----------|-----------|
+| **fibonacci(25)** | 144ms | 41ms | **3.55x VM wins** | **0.34ms** | **420x** |
+| for loop sum (10K) | 2.1ms | 1.5ms | **1.44x VM wins** | — | — |
+| hot add (10K calls) | 6.4ms | 3.0ms | **2.09x VM wins** | 3.8ms | 1.70x |
+| hot mul (10K calls) | 6.3ms | 3.1ms | **2.04x VM wins** | 3.9ms | 1.64x |
+| nested loop (100x100) | 2.3ms | 1.3ms | **1.80x VM wins** | — | — |
+| map/reduce (500 elements) | 1.0ms | 0.6ms | **1.70x VM wins** | — | — |
+| **quicksort (200 elements)** | 2.9ms | 1.6ms | **1.79x VM wins** | — | — |
+| **ackermann(3,4)** | 7.6ms | 2.2ms | **3.39x VM wins** | — | — |
+| mutual recursion (10K) | 2.6ms | 1.1ms | **2.39x VM wins** | — | — |
+| callback chain (1500 calls) | 0.5ms | 0.3ms | **1.57x VM wins** | — | — |
+| Vec class (1K iter) | 1.7ms | 2.6ms | 0.66x TW wins | — | — |
+
+V8-JIT が有効だと **Vec class 以外の全ベンチで VM が勝つ**。
+
+### V8-JITless vs V8-JIT あり の比較
+
+| Benchmark | JITless: 勝者 | JIT あり: 勝者 | 変化 |
+|-----------|-------------|--------------|------|
+| fibonacci | VM (1.05x) | VM (3.55x) | VM の優位が拡大 |
+| for loop | TW (0.59x) | VM (1.44x) | **逆転** |
+| quicksort | TW (0.76x) | VM (1.79x) | **逆転** |
+| ackermann | VM (1.10x) | VM (3.39x) | VM の優位が拡大 |
+| hot add | TW (0.76x) | VM (2.09x) | **逆転** |
+| Vec class | TW (0.56x) | TW (0.66x) | TW のまま (差は縮小) |
+
+V8 の TurboFan が VM の `while + switch` ディスパッチループを最適化するため、JITless で TW が勝っていたベンチの多くで VM が逆転する。Vec class だけは `new` + prototype チェーンの処理が重く、TW が勝ち続ける。
+
 ## 再現方法
 
 ```bash
