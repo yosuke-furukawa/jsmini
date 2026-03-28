@@ -1,6 +1,7 @@
 import type { BytecodeFunction, Instruction } from "./bytecode.js";
 import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
+import { createJSArray, setElement, pushElement } from "./js-array.js";
 
 type CallFrame = {
   func: BytecodeFunction;
@@ -219,11 +220,11 @@ export class VM {
           break;
         case "CreateArray": {
           const count = instr.operand!;
-          const arr: unknown[] = [];
+          const elems: unknown[] = [];
           for (let i = 0; i < count; i++) {
-            arr.unshift(this.pop());
+            elems.unshift(this.pop());
           }
-          this.push(arr);
+          this.push(createJSArray(elems));
           break;
         }
         case "SetProperty": {
@@ -258,7 +259,11 @@ export class VM {
           const value = this.pop();
           const key = this.pop();
           const obj = this.pop() as Record<string, unknown>;
-          obj[String(key)] = value;
+          if (Array.isArray(obj) && typeof key === "number") {
+            setElement(obj, key, value);
+          } else {
+            obj[String(key)] = value;
+          }
           this.push(value);
           break;
         }
@@ -267,7 +272,7 @@ export class VM {
         case "ArrayPush": {
           const value = this.pop();
           const arr = this.peek() as unknown[];
-          arr.push(value);
+          pushElement(arr, value);
           break;
         }
         case "ArraySpread": {
