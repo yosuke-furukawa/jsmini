@@ -75,14 +75,18 @@ Source Code
 
 V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run bench`):
 
-| Benchmark | Tree-Walking | Bytecode VM | jsmini-JIT (Wasm) |
-|-----------|-------------|-------------|-------------------|
-| fibonacci(25) | 757ms | 709ms (1.07x) | — |
-| for loop sum (10K) | 21ms | 32ms (0.64x) | — |
-| hot add (10K calls) | 43ms | 55ms (0.79x) | 47ms (0.91x) |
-| nested loop (100x100) | 22ms | 30ms (0.71x) | — |
+| Benchmark | Tree-Walking | Bytecode VM | Wasm JIT |
+|-----------|-------------|-------------|----------|
+| fibonacci(25) | 738ms | 701ms (1.05x) | **0.56ms (1309x)** |
+| for loop sum (10K) | 20ms | 34ms (0.59x) | — |
+| quicksort (200) | 22ms | 29ms (0.76x) | — |
+| ackermann(3,4) | 40ms | 36ms (1.10x) | — |
+| hot add (10K calls) | 42ms | 55ms (0.76x) | 49ms (0.86x) |
+| Vec class (1K iter) | 11ms | 19ms (0.56x) | — |
 
-*V8-JIT を有効にすると Bytecode VM が 2〜3x 速くなるが、それは V8 の TurboFan が jsmini の VM ループを最適化しているため。詳細は [LEARN-JIT.md](./LEARN-JIT.md) を参照。*
+- **VM が TW に勝つ** のは再帰が深いパターン (fibonacci, ackermann)。関数呼び出しコストの構造的な差
+- **Wasm JIT が 1309x** になるのは fibonacci の再帰が Wasm 内で完結し、dispatch を完全に排除するため
+- 詳細は [BENCHMARK.md](./BENCHMARK.md)、学んだことは [LEARN-VM.md](./LEARN-VM.md)、[LEARN-JIT.md](./LEARN-JIT.md) を参照
 
 ## Test262 準拠率
 
@@ -150,7 +154,7 @@ npm start -- --trace-tier 'function add(a,b){return a+b;} for(var i=0;i<110;i=i+
 ### テストを実行
 
 ```bash
-# ユニットテスト (379 tests)
+# ユニットテスト (420 tests)
 npm test
 
 # ベンチマーク
@@ -203,9 +207,16 @@ src/
 - [x] **Phase 2** — オブジェクト、配列、let/const、typeof、try/catch、new、this
 - [x] **Phase 3** — アロー関数、テンプレートリテラル、クラス、分割代入、スプレッド/レスト、for...of
 - [x] **Phase 4** — Bytecode VM (スタックベース、`--print-bytecode`)
-- [x] **Phase 5** — Wasm JIT (型フィードバック → 型特殊化 → 脱最適化、[学んだこと](./LEARN-JIT.md))
+- [x] **Phase 5** — Wasm JIT (型フィードバック → 型特殊化 → 脱最適化)
 
 詳細は [PLAN.md](./PLAN.md) を参照。
+
+## 学んだこと
+
+- [LEARN-VM.md](./LEARN-VM.md) — TW vs Bytecode VM: 関数呼び出しのコスト差、dispatch オーバーヘッド
+- [LEARN-JIT.md](./LEARN-JIT.md) — JIT: 再帰の Wasm 内完結で 1309x、per-call JIT の限界
+- [BENCHMARK.md](./BENCHMARK.md) — 全ベンチマーク結果
+- [RESEARCH-WHY-BYTECODE-IS-SLOW.md](./RESEARCH-WHY-BYTECODE-IS-SLOW.md) — なぜ Object VM は TW より遅いのか
 
 ## 参考
 
