@@ -38,60 +38,57 @@
 
 ## 6-2. 型フィードバックの拡張
 
-- [ ] `FeedbackCollector.classifyType` に配列型を追加
+- [x] `FeedbackCollector.classifyType` に配列型を追加
   - `Array.isArray(value) && getElementKind(value) === "SMI"` → `"smi_array"`
   - `Array.isArray(value) && getElementKind(value) === "DOUBLE"` → `"double_array"`
   - その他の配列 → `"array"`
-- [ ] `getWasmArgTypes` で `"smi_array"` → 配列引数として認識
-- [ ] テスト: feedback が配列を正しく分類すること
+- [x] `toWasmType` で `"smi_array"` → `"i32"` (memory base address) として認識
+- [x] `isArrayType` ヘルパー追加
 
 ---
 
 ## 6-3. WasmBuilder に Memory セクション追加
 
-- [ ] `WasmBuilder.enableMemory(pages)` — Memory セクション (id=5) を出力
+- [x] `WasmBuilder.enableMemory(pages)` — Memory セクション (id=5) を出力
   - `(memory 1)` = 1 ページ = 64KB = 整数 16384 個分
-- [ ] Memory を export: `(export "memory" (memory 0))`
-- [ ] `WASM_OP` に追加:
+- [x] Memory を export: `(export "memory" (memory 0))`
+- [x] `WASM_OP` に追加:
   - `i32.load` (0x28)
   - `i32.store` (0x36)
   - `f64.load` (0x2b)
   - `f64.store` (0x39)
-- [ ] テスト: Memory 付き Wasm モジュールのビルドと動作確認
+- [x] テスト: Memory 付き Wasm モジュールのビルドと動作確認
 
 ---
 
 ## 6-4. バイトコード静的解析 — 配列ローカルの特定
 
-- [ ] `detectArrayLocals(func)` — バイトコードをスキャンして配列として使われているローカル変数を特定
+- [x] `detectArrayLocals(func)` — バイトコードをスキャンして配列として使われているローカル変数を特定
   ```
   パターン: LdaLocal N ... GetPropertyComputed → local N は配列
   パターン: LdaLocal N ... SetPropertyComputed → local N は配列
+  パターン: LdaLocal N ... GetProperty "length" → local N は配列
   ```
-- [ ] 配列ローカルの情報を Wasm コンパイラに渡す
-- [ ] テスト: swap, partition, qsort のバイトコードで正しく検出
+- [x] 配列ローカルの情報を Wasm コンパイラに渡す (TranslateContext.arrayLocals)
+- [x] テスト: swap=[0], partition=[0], qsort=[], fib=[], sumArr=[0]
 
 ---
 
 ## 6-5. Wasm コンパイラ — 配列アクセスの変換
 
-- [ ] 配列ローカルの引数を i32 (memory base address) として扱う
-- [ ] `GetPropertyComputed` の変換:
+- [x] 配列ローカルの引数を i32 (memory base address) として扱う
+- [x] `GetPropertyComputed` の変換:
   ```
-  LdaLocal arr    →  (skip)
-  LdaLocal idx    →  local.get idx
-  GetPropertyComputed →  i32.const 4 / i32.mul / local.get arr / i32.add / i32.load
+  stack: [base, idx] → i32.const 4 / i32.mul / i32.add / i32.load
   ```
-- [ ] `SetPropertyComputed` の変換:
+- [x] `SetPropertyComputed` の変換:
   ```
-  LdaLocal arr    →  (skip)
-  LdaLocal idx    →  local.get idx
-  LdaLocal val    →  local.get val
-  SetPropertyComputed →  local.get arr / local.get idx / i32.const 4 / i32.mul / i32.add / local.get val / i32.store
+  stack: [base, idx, value] → temp local に退避 → addr 計算 → i32.store
   ```
-- [ ] `GetProperty "length"` の変換:
-  - 配列の length を関数の追加引数として渡す、またはメモリの先頭に格納
-- [ ] テスト: swap 関数が Wasm にコンパイルできること
+- [x] `if (void)` パターン対応 (else なし、return なし)
+- [x] `compileMultiSync` が配列ローカルを検出して自動で memory 有効化
+- [ ] `GetProperty "length"` の変換: 未対応 (quicksort は hi 引数で代替)
+- [x] テスト: swap, partition, qsort が Wasm で動作。quicksort(200) = TW の 195 倍速い
 
 ---
 
