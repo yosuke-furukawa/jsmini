@@ -255,9 +255,19 @@ main {
 <body>
 <header>
   <h1>jsmini playground</h1>
+  <select id="preset-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
+    <option value="">Preset...</option>
+    <option value="fibonacci">Fibonacci</option>
+    <option value="sum">Sum Loop</option>
+    <option value="quicksort">Quicksort</option>
+    <option value="map-reduce">Map / Reduce</option>
+    <option value="class">Class</option>
+    <option value="demo">Full Demo</option>
+  </select>
   <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
     <option value="tree-walking">Tree-Walking</option>
     <option value="vm">Bytecode VM</option>
+    <option value="wasm-jit">Wasm JIT</option>
   </select>
   <button id="run-btn">Run</button>
   <span class="shortcut-hint">Cmd+Enter</span>
@@ -333,6 +343,103 @@ const stepHighlightField = StateField.define({
   },
   provide: f => EditorView.decorations.from(f),
 });
+
+// ========== Presets ==========
+const PRESETS = {
+  fibonacci: `// Fibonacci - recursive (JIT eligible)
+function fib(n) {
+  if (n <= 1) { return n; }
+  return fib(n - 1) + fib(n - 2);
+}
+console.log(fib(25));`,
+
+  sum: `// Sum loop
+var sum = 0;
+for (var i = 0; i < 10000; i = i + 1) {
+  sum = sum + i;
+}
+console.log(sum);`,
+
+  quicksort: `// Quicksort
+function swap(arr, i, j) {
+  var tmp = arr[i];
+  arr[i] = arr[j];
+  arr[j] = tmp;
+}
+
+function partition(arr, lo, hi) {
+  var pivot = arr[hi];
+  var i = lo;
+  for (var j = lo; j < hi; j = j + 1) {
+    if (arr[j] <= pivot) {
+      swap(arr, i, j);
+      i = i + 1;
+    }
+  }
+  swap(arr, i, hi);
+  return i;
+}
+
+function qsort(arr, lo, hi) {
+  if (lo < hi) {
+    var p = partition(arr, lo, hi);
+    qsort(arr, lo, p - 1);
+    qsort(arr, p + 1, hi);
+  }
+}
+
+var arr = [];
+for (var i = 0; i < 20; i = i + 1) {
+  arr[i] = (i * 7 + 13) % 20;
+}
+console.log("before: " + arr[0] + "," + arr[1] + "," + arr[2] + ",...");
+qsort(arr, 0, arr.length - 1);
+console.log("after:  " + arr[0] + "," + arr[1] + "," + arr[2] + ",...");`,
+
+  "map-reduce": `// Map / Reduce
+function map(arr, fn) {
+  var result = [];
+  for (var i = 0; i < arr.length; i = i + 1) {
+    result[i] = fn(arr[i]);
+  }
+  return result;
+}
+
+function reduce(arr, fn, init) {
+  var acc = init;
+  for (var i = 0; i < arr.length; i = i + 1) {
+    acc = fn(acc, arr[i]);
+  }
+  return acc;
+}
+
+var nums = [1, 2, 3, 4, 5];
+var doubled = map(nums, function dbl(x) { return x * 2; });
+var sum = reduce(doubled, function add(a, b) { return a + b; }, 0);
+console.log("doubled: " + doubled[0] + "," + doubled[1] + "," + doubled[2] + "," + doubled[3] + "," + doubled[4]);
+console.log("sum: " + sum);`,
+
+  "class": `// Class - Vec2D
+class Vec {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+  }
+  add(other) {
+    return new Vec(this.x + other.x, this.y + other.y);
+  }
+  dot(other) {
+    return this.x * other.x + this.y * other.y;
+  }
+}
+
+var sum = new Vec(0, 0);
+for (var i = 0; i < 10; i = i + 1) {
+  sum = sum.add(new Vec(i, i * 2));
+}
+console.log(\`sum = (\${sum.x}, \${sum.y})\`);
+console.log(\`dot(1,1) = \${sum.dot(new Vec(1, 1))}\`);`,
+};
 
 // ========== CodeMirror setup ==========
 const defaultCode = `// jsmini playground - Phase 3 demo
@@ -421,6 +528,16 @@ function switchTab(name) {
 }
 
 tabBtns.forEach(btn => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
+
+// ========== Preset switching ==========
+document.getElementById("preset-select").addEventListener("change", (e) => {
+  const key = e.target.value;
+  if (key && PRESETS[key]) {
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: PRESETS[key] } });
+    e.target.value = ""; // reset selector
+    runCode();
+  }
+});
 
 // ========== Token rendering ==========
 const KEYWORD_TYPES = new Set(["Var","If","Else","True","False","Null","While","For","Function","Return"]);
@@ -673,7 +790,7 @@ function renderASTSvg(root, container) {
 }
 
 // ========== Result rendering ==========
-function renderResult(logs, returnValue, error, container, execTime, mode) {
+function renderResult(logs, returnValue, error, container, execTime, mode, jitInfo) {
   let html = "";
   if (error) {
     html += `<div class="error-box">${escapeHtml(error)}</div>`;
@@ -688,10 +805,48 @@ function renderResult(logs, returnValue, error, container, execTime, mode) {
     html += `<div class="return-value">Return: <span>${escapeHtml(formatValue(returnValue))}</span></div>`;
   }
   if (execTime !== undefined) {
-    const modeLabel = mode === "vm" ? "Bytecode VM" : "Tree-Walking";
-    html += `<div class="return-value" style="color:var(--orange);">${modeLabel}: <span>${execTime.toFixed(2)}ms</span></div>`;
+    html += `<div class="return-value" style="color:var(--orange);">${escapeHtml(mode)}: <span>${execTime.toFixed(2)}ms</span></div>`;
   }
-  if (!error && logs.length === 0) {
+  if (jitInfo) {
+    const { tierLog, feedback } = jitInfo;
+    // Tier transitions を集約表示
+    const wasmCompiled = tierLog.filter(l => l.includes("Wasm compiled"));
+    const deopt = tierLog.filter(l => l.includes("DEOPT"));
+    const wasmCalls = tierLog.filter(l => l.includes("[TIER]") && l.includes(": Wasm (")).length;
+    const vmCalls = tierLog.filter(l => l.includes(": Bytecode VM")).length;
+
+    html += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">`;
+    html += `<div style="font-size:11px;color:var(--accent);text-transform:uppercase;font-weight:600;margin-bottom:6px;">JIT Info</div>`;
+    html += `<div style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;line-height:1.6;">`;
+
+    // コンパイル情報
+    if (wasmCompiled.length > 0) {
+      for (const line of wasmCompiled) {
+        html += `<div style="color:var(--green);">${escapeHtml(line)}</div>`;
+      }
+    } else {
+      html += `<div style="color:var(--text-muted);">No functions compiled to Wasm</div>`;
+    }
+
+    // 呼び出し統計
+    html += `<div style="color:var(--text-muted);margin-top:4px;">Wasm calls: ${wasmCalls} / VM calls: ${vmCalls}</div>`;
+
+    // 脱最適化
+    if (deopt.length > 0) {
+      for (const line of deopt) {
+        html += `<div style="color:var(--red);">${escapeHtml(line)}</div>`;
+      }
+    }
+
+    // フィードバック
+    if (feedback && feedback.dump) {
+      html += `<div style="margin-top:6px;color:var(--text-muted);">Type Feedback:</div>`;
+      html += `<pre style="color:var(--purple);font-size:11px;margin-top:2px;">${escapeHtml(feedback.dump())}</pre>`;
+    }
+
+    html += `</div></div>`;
+  }
+  if (!error && logs.length === 0 && !jitInfo) {
     html += `<p class="empty-msg">No console output</p>`;
   }
   container.innerHTML = html;
@@ -801,9 +956,9 @@ function runCode() {
   }
 
   const mode = document.getElementById("mode-select").value;
-  const isVM = mode === "vm";
+  const isVM = mode === "vm" || mode === "wasm-jit";
 
-  // Bytecode (VM mode only)
+  // Bytecode (VM / Wasm JIT mode)
   if (isVM) {
     try {
       const func = compile(source);
@@ -813,19 +968,30 @@ function runCode() {
       panels.bytecode.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
     }
   } else {
-    panels.bytecode.innerHTML = `<p class="empty-msg">Switch to VM mode to see bytecode</p>`;
+    panels.bytecode.innerHTML = `<p class="empty-msg">Switch to VM or Wasm JIT mode to see bytecode</p>`;
   }
 
   // Result + Step 記録
   const logs = [];
   let returnValue;
   let error = null;
+  let jitInfo = null;
   steps = [];
   stepIndex = -1;
   const execStart = performance.now();
   try {
-    if (isVM) {
-      returnValue = vmEvaluate(source, { log: (...args) => logs.push(args) });
+    if (mode === "wasm-jit") {
+      const jitResult = vmEvaluate(source, {
+        console: { log: (...args) => logs.push(args) },
+        jit: true,
+        jitThreshold: 5,
+        collectFeedback: true,
+        traceTier: true,
+      });
+      returnValue = jitResult.value;
+      jitInfo = { tierLog: jitResult.tierLog || [], feedback: jitResult.feedback || null };
+    } else if (mode === "vm") {
+      returnValue = vmEvaluate(source, { console: { log: (...args) => logs.push(args) } });
     } else {
       returnValue = jsmini.evaluate(source, {
         console: { log: (...args) => logs.push(args) },
@@ -836,10 +1002,11 @@ function runCode() {
     error = `${e.constructor?.name || "Error"}: ${e.message}`;
   }
   const execTime = performance.now() - execStart;
-  renderResult(logs, returnValue, error, panels.result, execTime, mode);
+  const modeLabels = { "tree-walking": "Tree-Walking", "vm": "Bytecode VM", "wasm-jit": "Wasm JIT" };
+  renderResult(logs, returnValue, error, panels.result, execTime, modeLabels[mode] || mode, jitInfo);
 
   // Step 用のソース範囲を事前計算 (tree-walking only)
-  if (!isVM && tokens && ast) {
+  if (mode === "tree-walking" && tokens && ast) {
     stmtSourceRanges = collectStatementRanges(ast, tokens);
   }
 
@@ -851,7 +1018,7 @@ function runCode() {
     updateStepUI();
   }
 
-  switchTab(isVM ? "bytecode" : "result");
+  // タブは切り替えない (ユーザーが選んだタブを維持)
 }
 
 // ========== Step execution ==========
