@@ -119,22 +119,20 @@
 
 ## 6-8. 型ガード + deopt
 
-- [ ] Wasm 実行前の Element Kind チェック
-  - `getElementKind(arr) !== "SMI"` → deopt → VM にフォールバック
-- [ ] 実行中に Element Kind が変わるケースの処理
-  - quicksort 内では整数しか扱わないので変わらないはずだが、安全のため
-- [ ] deopt ログに配列の Element Kind 変化を記録
-- [ ] テスト: 整数配列 → 正常動作、混合配列 → VM フォールバック
+- [x] Wasm 実行前の Element Kind チェック (JitManager.executeWithArrayArgs)
+  - `isTrackedArray(arr) && getElementKind(arr) !== "SMI"` → deopt → VM にフォールバック
+- [x] 非配列が渡された場合の deopt
+- [x] deopt ログに記録
 
 ---
 
 ## 6-9. playground + ドキュメント更新
 
-- [ ] playground: quicksort プリセットが Wasm JIT モードで動く
-- [ ] playground: WAT に `i32.load` / `i32.store` が表示される
-- [ ] `BENCHMARK.md` 更新: quicksort の Wasm JIT 結果追加
-- [ ] `LEARN-HiddenClass.md` 作成: Element Kind から学んだこと
-- [ ] `bench.ts` 更新: quicksort を JIT eligible に
+- [x] playground: quicksort プリセットが Wasm JIT モードで動く
+- [x] playground: WAT に `i32.load` / `i32.store` が表示される
+- [x] `BENCHMARK.md` 更新: quicksort の Wasm JIT 結果追加 (6.1x)
+- [x] `README.md` 更新: quicksort JIT 結果追加
+- [x] `bench.ts` 更新: quicksort を JIT eligible に (x10 繰り返し)
 
 ---
 
