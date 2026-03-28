@@ -94,23 +94,25 @@
 
 ## 6-6. 配列引数の in/out コピー
 
-- [ ] JitManager の呼び出しラッパー:
+- [x] JitManager の呼び出しラッパー:
   1. Element Kind が SMI であることを確認 (型ガード)
-  2. JS 配列 → Wasm memory にコピー (`Int32Array` view で書き込み)
+  2. JS 配列 → Wasm memory にコピー (length ヘッダ + Int32Array)
   3. Wasm 関数を呼ぶ (base address + 数値引数)
   4. Wasm memory → JS 配列に書き戻す
-- [ ] 複数関数が同じ memory を共有 (swap, partition, qsort)
-- [ ] テスト: `swap([5, 3, 1], 0, 2)` が Wasm 経由で正しく動作
+- [x] 関連関数の自動収集 (`collectRelatedFuncs`) — LdaGlobal+Call パターンから依存関数を探索
+- [x] 複数関数が同じ memory を共有 (swap, partition, qsort を 1 モジュールに)
+- [x] `registerFunc` で VM のグローバル関数を JitManager に追跡
+- [x] テスト: quicksort([5,3,1,4,2]) が VM の Call 経由で自動的に Wasm JIT 実行
 
 ---
 
 ## 6-7. quicksort の Wasm JIT 実行
 
-- [ ] swap, partition, qsort を `compileMultiSync` で 1 つの Wasm モジュールに
-- [ ] partition 内の `swap(arr, i, j)` → Wasm 内の `call $swap`
-- [ ] qsort 内の `partition(arr, lo, hi)` → Wasm 内の `call $partition`
-- [ ] qsort の自己再帰 → Wasm 内の `call $qsort`
-- [ ] テスト: quicksort(200) が正しくソートされること
+- [x] swap, partition, qsort を `compileMultiSync` で 1 つの Wasm モジュールに (自動)
+- [x] partition 内の `swap(arr, i, j)` → Wasm 内の `call $swap`
+- [x] qsort 内の `partition(arr, lo, hi)` → Wasm 内の `call $partition`
+- [x] qsort の自己再帰 → Wasm 内の `call $qsort`
+- [x] テスト: quicksort(200) が正しくソートされる (result=298)
 - [ ] ベンチマーク: TW / VM / Wasm JIT の 3 層比較
 
 ---
