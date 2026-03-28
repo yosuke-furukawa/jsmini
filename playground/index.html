@@ -391,13 +391,24 @@ function qsort(arr, lo, hi) {
   }
 }
 
-var arr = [];
-for (var i = 0; i < 20; i = i + 1) {
-  arr[i] = (i * 7 + 13) % 20;
+function runSort(n, seed) {
+  var arr = [];
+  var s = seed;
+  for (var i = 0; i < n; i = i + 1) {
+    s = (s * 1103515245 + 12345) % 2147483648;
+    if (s < 0) { s = s + 2147483648; }
+    arr[i] = s % 1000;
+  }
+  qsort(arr, 0, arr.length - 1);
+  return arr;
 }
-console.log("before: " + arr[0] + "," + arr[1] + "," + arr[2] + ",...");
-qsort(arr, 0, arr.length - 1);
-console.log("after:  " + arr[0] + "," + arr[1] + "," + arr[2] + ",...");`,
+
+// 5 回実行 (JIT warmup + 本実行)
+var result = [];
+for (var r = 0; r < 5; r = r + 1) {
+  result = runSort(100, r * 777 + 42);
+}
+console.log("sorted: " + result[0] + "," + result[1] + ",...," + result[99]);`,
 
   "map-reduce": `// Map / Reduce
 function map(arr, fn) {
