@@ -353,12 +353,15 @@ function fib(n) {
 }
 console.log(fib(25));`,
 
-  sum: `// Sum loop
-var sum = 0;
-for (var i = 0; i < 10000; i = i + 1) {
-  sum = sum + i;
+  sum: `// Sum loop (JIT eligible)
+function sumLoop(n) {
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + i;
+  }
+  return sum;
 }
-console.log(sum);`,
+console.log(sumLoop(10000));`,
 
   quicksort: `// Quicksort
 function swap(arr, i, j) {
