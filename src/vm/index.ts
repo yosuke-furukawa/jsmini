@@ -14,6 +14,7 @@ type VMOptions = {
   collectFeedback?: boolean;
   collectDeopt?: boolean;
   traceTier?: boolean;
+  traceGC?: boolean;
   jit?: boolean;
   jitThreshold?: number;
 };
@@ -23,6 +24,7 @@ export type VMResult = {
   feedback?: FeedbackCollector;
   deoptLog?: string[];
   tierLog?: string[];
+  gcLog?: string[];
 };
 
 export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): unknown {
@@ -54,15 +56,19 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     if (options.traceTier) vm.jit.traceTier = true;
   }
 
+  // GC トレース
+  if (options.traceGC) vm.heap.traceGC = true;
+
   const rawValue = vm.execute(func);
   // JSString → JS string に変換して返す
   const value = isJSString(rawValue) ? jsStringToString(rawValue) : rawValue;
 
-  if (options.collectFeedback || options.collectDeopt || options.traceTier) {
+  if (options.collectFeedback || options.collectDeopt || options.traceTier || options.traceGC) {
     const result: VMResult = { value };
     if (vm.feedback) result.feedback = vm.feedback;
     if (vm.jit && options.collectDeopt) result.deoptLog = vm.jit.deoptLog;
     if (vm.jit && options.traceTier) result.tierLog = vm.jit.tierLog;
+    if (options.traceGC) result.gcLog = vm.heap.getGCLog();
     return result;
   }
   return value;

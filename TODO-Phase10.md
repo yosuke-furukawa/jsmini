@@ -76,23 +76,23 @@ Phase 7-9 と同じく、自前 GC は V8 の GC より遅い。教育目的。
 
 ## 10-4. GC の可視化
 
-- [ ] GC ログ: いつ GC が走ったか、何オブジェクト mark / sweep されたか
+- [x] GC ログ: いつ GC が走ったか、何オブジェクト mark / sweep されたか
   ```
   [GC] heap: 1024 objects → mark: 512, sweep: 512 → heap: 512 objects
   ```
-- [ ] `--trace-gc` フラグ (または vmEvaluate のオプション) で有効化
-- [ ] playground で GC ログを表示
+- [x] `--trace-gc` フラグ (または vmEvaluate のオプション) で有効化
+- [x] playground で GC ログを表示
 
 ---
 
 ## 10-5. ベンチマーク + ドキュメント
 
-- [ ] GC あり/なしのベンチマーク比較
-- [ ] GC のオーバーヘッドを計測
-- [ ] Vec class (1000 iter) で GC の挙動を確認
+- [x] GC あり/なしのベンチマーク比較
+- [x] GC のオーバーヘッドを計測
+- [x] Vec class (1000 iter) で GC の挙動を確認
   - 1000 回 `new Vec()` で生成、ループ後に古い Vec が GC 対象に
 - [ ] `LEARN-GC.md` 作成
-- [ ] `BENCHMARK.md` 更新
+- [x] `BENCHMARK.md` 更新
 
 ---
 
