@@ -91,7 +91,7 @@ Phase 7-9 と同じく、自前 GC は V8 の GC より遅い。教育目的。
 - [x] GC のオーバーヘッドを計測
 - [x] Vec class (1000 iter) で GC の挙動を確認
   - 1000 回 `new Vec()` で生成、ループ後に古い Vec が GC 対象に
-- [ ] `LEARN-GC.md` 作成
+- [x] `LEARN-GC.md` 作成
 - [x] `BENCHMARK.md` 更新
 
 ---
