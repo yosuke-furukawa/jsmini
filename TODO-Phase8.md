@@ -57,3 +57,25 @@ V8 で IC が効く理由:
 
 **結論**: Hidden Class + IC は **JIT でネイティブコードを生成して初めて効果を発揮する**。
 TypeScript のインタプリタレベルでは、シンプルな `obj[name]` が最速。
+
+---
+
+## JIT でオブジェクトアクセスを Wasm 化した場合の検証
+
+HC + IC の真価は JIT にある。手書き Wasm で Vec の add + dot ループを実装して検証:
+
+```
+Vec class (1000 iter), V8-JITless:
+  TW:        10.4ms
+  VM+HC+IC:  23.1ms  (0.45x — TW より遅い)
+  Wasm:      0.004ms (3014x — TW の 3014 倍速い)
+```
+
+HC が `x = offset 0, y = offset 1` を知っているので、
+JIT は `obj.x` → `i32.load(base + 0)` に変換できる。
+オブジェクト全体を Wasm linear memory の連続バイトとして配置すれば、
+プロパティアクセスが CPU のメモリアクセス 1 命令になる。
+
+**HC + IC は VM の高速化ではなく JIT の基盤。**
+- VM レベル: `obj[name]` (V8 の C++ IC) のほうが jsmini の JS IC より速い
+- JIT レベル: HC のオフセット情報で `i32.load` に変換 → 3000 倍速い
