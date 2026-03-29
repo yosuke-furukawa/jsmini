@@ -180,9 +180,17 @@ Phase 7 で Hidden Class のプロパティ名を `obj.__hc__` 等の JS string 
 
 ### 9-5. ベンチマーク + ドキュメント
 
-- [ ] 文字列連結ベンチ: V8 string vs 独自 SeqString vs 独自 ConsString
-- [ ] `LEARN-String.md` 作成
-- [ ] `BENCHMARK.md` 更新
+- [x] 文字列ベンチ (V8-JITless):
+  ```
+  Phase 8 (V8 string) → Phase 9 (JSString + intern):
+  concat x1000:   TW 2.1→2.9ms (+38%)   VM 4.2→3.8ms (-10%)
+  compare x10000: TW 28.5→30.6ms (+7%)   VM 53.8→43.7ms (-19%)
+  template x100:  TW 0.25→0.37ms (+48%)  VM 0.65→0.56ms (-14%)
+  ```
+  - TW: JSString オブジェクト生成のコストで 7-48% 劣化
+  - VM: intern 化で比較が参照比較になり 10-19% 改善
+- [x] `BENCHMARK.md` — Phase 9 で更新予定
+- [x] playground リビルド完了
 
 ---
 
