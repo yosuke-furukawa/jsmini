@@ -8,17 +8,20 @@
 
 | Benchmark | Tree-Walking | Bytecode VM | 比率 | Wasm JIT | JIT vs TW |
 |-----------|-------------|-------------|------|----------|-----------|
-| **fibonacci(25)** | 749ms | 731ms | **1.02x VM wins** | **0.39ms** | **1928x** |
-| for loop sum (10K) | 21ms | 35ms | 0.61x TW wins | — | — |
-| hot add (10K calls) | 44ms | 58ms | 0.76x TW wins | 52ms | 0.85x |
-| hot mul (10K calls) | 43ms | 57ms | 0.74x TW wins | 50ms | 0.85x |
-| nested loop (100x100) | 21ms | 34ms | 0.63x TW wins | — | — |
-| map/reduce (500 elements) | 6ms | 8ms | 0.70x TW wins | — | — |
-| **quicksort (200 x10)** | 211ms | 293ms | 0.72x TW wins | **40ms** | **5.3x** |
-| **ackermann(3,4)** | 40ms | 37ms | **1.09x VM wins** | — | — |
-| mutual recursion (10K) | 14ms | 14ms | **1.01x VM wins** | — | — |
-| callback chain (1500 calls) | 3ms | 5ms | 0.62x TW wins | — | — |
-| Vec class (1K iter) | 11ms | 19ms | 0.58x TW wins | — | — |
+| **fibonacci(25)** | 763ms | 745ms | **1.02x VM wins** | **0.36ms** | **2098x** |
+| for loop sum (10K) | 22ms | 35ms | 0.62x TW wins | — | — |
+| hot add (10K calls) | 45ms | 59ms | 0.75x TW wins | 51ms | 0.87x |
+| hot mul (10K calls) | 44ms | 59ms | 0.75x TW wins | 51ms | 0.86x |
+| nested loop (100x100) | 23ms | 34ms | 0.67x TW wins | — | — |
+| map/reduce (500 elements) | 6ms | 9ms | 0.66x TW wins | — | — |
+| **quicksort (200 x10)** | 220ms | 305ms | 0.72x TW wins | **41ms** | **5.4x** |
+| **ackermann(3,4)** | 43ms | 40ms | **1.06x VM wins** | — | — |
+| mutual recursion (10K) | 14ms | 15ms | 0.91x TW wins | — | — |
+| callback chain (1500 calls) | 4ms | 6ms | 0.57x TW wins | — | — |
+| Vec class (1K iter) | 11ms | 25ms | 0.46x TW wins | — | — |
+| **string concat (1K)** | 2.5ms | 4.0ms | 0.61x TW wins | — | — |
+| **string compare (10K)** | 32ms | 47ms | 0.68x TW wins | — | — |
+| **template literal (1K)** | 2.9ms | 5.3ms | 0.55x TW wins | — | — |
 
 ### 何がわかるか
 
@@ -32,10 +35,21 @@
 
 #### VM が TW に負けるパターン
 
-- **for loop** (0.61x) — 単純ループ、関数呼び出しなし
-- **Vec class** (0.58x) — オブジェクト生成 + メソッド呼び出し
+- **for loop** (0.62x) — 単純ループ、関数呼び出しなし
+- **Vec class** (0.46x) — オブジェクト生成 + メソッド呼び出し + HC/IC オーバーヘッド
+- **template literal** (0.55x) — 文字列生成 + 連結
 
 **共通点: ループの dispatch コストが支配的。** VM は 1 命令ごとに `bytecode[pc++]` → `instr.op` → string switch という間接参照が入る。
+
+#### 文字列操作 (Phase 9: 独自 JSString)
+
+- **string concat** (0.61x) — ConsString 生成 + Uint8Array コピー
+- **string compare** (0.68x) — intern 済みでも `isJSString` チェック + `jsStringEquals` のオーバーヘッド
+- **template literal** (0.55x) — 毎イテレーション JSString 生成
+
+V8 の `string` を独自 JSString に置き換えたことで文字列操作が遅くなる。
+直接比較: V8 `===` は 1.4ms/100K 回、intern 済み `jsStringEquals` は 2.3ms/100K 回。
+V8 の string 操作は C++ で最適化されており、JS で再実装しても勝てない。
 
 #### Wasm JIT が劇的に効くパターン
 
@@ -45,6 +59,34 @@
 #### Wasm JIT が効かないパターン
 
 - **hot add/mul** (0.85x, TW より遅い) — 小さい関数を外から 1 万回呼ぶ。JS→Wasm ブリッジのコストが毎回発生
+
+---
+
+### メモリ効率: AST vs Bytecode
+
+| Program | AST ノード数 | AST ヒープ | BC 命令数 | BC ヒープ | 削減率 |
+|---------|------------|----------|---------|---------|--------|
+| 1 + 2 | 5 | 0.4KB | 3 | ~6B (flat) | 99% |
+| fibonacci | 28 | 2.2KB | 26 | ~52B (flat) | 98% |
+| quicksort | 171 | 13.4KB | 152 | ~304B (flat) | 98% |
+| Vec class | 108 | 8.4KB | 91 | ~182B (flat) | 98% |
+
+ソースコード量による実測 (jsmini の `Instruction[]` ベース):
+
+| 関数数 | ソースサイズ | AST ヒープ | BC ヒープ | 削減率 |
+|--------|-----------|----------|---------|--------|
+| 1 | 0.1KB | 4.0KB | 3.4KB | 15% |
+| 10 | 1.1KB | 24.7KB | 19.4KB | 22% |
+| 50 | 5.5KB | 121KB | 95KB | 22% |
+| 100 | 10.9KB | 242KB | 188KB | 22% |
+| 200 | 22.0KB | 482KB | 378KB | 22% |
+
+jsmini の bytecode は `Instruction[]` (JS オブジェクトの配列) なので **22% 削減** に留まる。
+`Uint8Array` (flat bytecode) なら 1 命令 1-3 bytes で **98% 削減** が可能だが、V8-JITless での dispatch が遅くなるトレードオフがある。
+
+**本物のエンジン (V8 Ignition)** では bytecode はコンパクトなバイト列で、AST の 50-75% 小さい。コンパイル後に AST を捨てられるのでメモリ効率が大幅に改善する。
+
+TW は AST を実行中ずっと保持する必要がある（同じ関数を何度も呼ぶため）。大規模プログラムでは AST だけで MB 単位のメモリを消費する。これが V8 が TW を採用せず bytecode VM (Ignition) を使う理由の 1 つ。
 
 ---
 

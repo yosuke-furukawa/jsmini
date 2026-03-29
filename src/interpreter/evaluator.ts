@@ -8,11 +8,13 @@ import {
   isJSFunction, createJSFunction, getProperty,
   collectBoundNames, bindPattern, assignPattern,
 } from "./values.js";
+import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "../vm/js-string.js";
 
 // MemberExpression のキーを解決する共通ヘルパー
 function resolveMemberKey(expr: MemberExpression, env: Environment): string {
   if (expr.computed) {
-    return String(evalExpression(expr.property, env));
+    const key = evalExpression(expr.property, env);
+    return isJSString(key) ? jsStringToString(key) : String(key);
   }
   return (expr.property as Identifier).name;
 }
@@ -42,9 +44,10 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   const env = new Environment(null, true); // グローバルは関数スコープ扱い
   env.defineReadOnly("undefined", undefined);
 
-  // console オブジェクトを組み込み
+  // console オブジェクトを組み込み (JSString → JS string 変換付き)
+  const userLog = options.console?.log ?? console.log;
   const consoleObj: Record<string, (...args: unknown[]) => void> = {
-    log: options.console?.log ?? console.log,
+    log: (...args: unknown[]) => userLog(...args.map(a => isJSString(a) ? jsStringToString(a) : a)),
   };
   env.defineReadOnly("console", consoleObj);
   const onStep = options.onStep ?? null;
@@ -54,7 +57,8 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
 
   _currentOnStep = onStep;
   try {
-    return evalProgram(ast, env);
+    const result = evalProgram(ast, env);
+    return isJSString(result) ? jsStringToString(result) : result;
   } finally {
     _currentOnStep = null;
   }
@@ -396,7 +400,7 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
 function evalExpression(expr: Expression, env: Environment): unknown {
   switch (expr.type) {
     case "Literal":
-      return expr.value;
+      return typeof expr.value === "string" ? internString(expr.value) : expr.value;
     case "Identifier":
       return env.get(expr.name);
     case "ThisExpression":
@@ -431,11 +435,13 @@ function evalExpression(expr: Expression, env: Environment): unknown {
       return fn;
     }
     case "TemplateLiteral": {
-      let result = "";
+      let result: JSString = internString("");
       for (let i = 0; i < expr.quasis.length; i++) {
-        result += expr.quasis[i].value.cooked;
+        result = jsStringConcat(result, internString(expr.quasis[i].value.cooked));
         if (i < expr.expressions.length) {
-          result += String(evalExpression(expr.expressions[i], env));
+          const val = evalExpression(expr.expressions[i], env);
+          const s = isJSString(val) ? val : createSeqString(String(val));
+          result = jsStringConcat(result, s);
         }
       }
       return result;
@@ -527,9 +533,13 @@ function evalExpression(expr: Expression, env: Environment): unknown {
         }
         switch (expr.operator) {
           case "+=":
-            newValue = typeof currentValue === "string" || typeof rightValue === "string"
-              ? String(currentValue) + String(rightValue)
-              : (currentValue as number) + (rightValue as number);
+            if (isJSString(currentValue) || isJSString(rightValue)) {
+              const l = isJSString(currentValue) ? currentValue : createSeqString(String(currentValue));
+              const r = isJSString(rightValue) ? rightValue : createSeqString(String(rightValue));
+              newValue = jsStringConcat(l, r);
+            } else {
+              newValue = (currentValue as number) + (rightValue as number);
+            }
             break;
           case "-=": newValue = (currentValue as number) - (rightValue as number); break;
           case "*=": newValue = (currentValue as number) * (rightValue as number); break;
@@ -733,9 +743,10 @@ function evalUnaryExpression(
     } else {
       value = evalExpression(expr.argument, env);
     }
-    if (value === null) return "object";
-    if (isJSFunction(value)) return "function";
-    return typeof value;
+    if (isJSString(value)) return internString("string");
+    if (value === null) return internString("object");
+    if (isJSFunction(value)) return internString("function");
+    return internString(typeof value);
   }
 
   const argument = evalExpression(expr.argument, env);
@@ -768,8 +779,10 @@ function evalBinaryExpression(
   const right = evalExpression(expr.right, env);
   switch (expr.operator) {
     case "+":
-      if (typeof left === "string" || typeof right === "string") {
-        return String(left) + String(right);
+      if (isJSString(left) || isJSString(right)) {
+        const l = isJSString(left) ? left : createSeqString(String(left));
+        const r = isJSString(right) ? right : createSeqString(String(right));
+        return jsStringConcat(l, r);
       }
       return (left as number) + (right as number);
     case "-": return (left as number) - (right as number);
@@ -780,11 +793,20 @@ function evalBinaryExpression(
     case ">": return (left as number) > (right as number);
     case "<=": return (left as number) <= (right as number);
     case ">=": return (left as number) >= (right as number);
-    case "==": return left == right;
-    case "===": return left === right;
-    case "!=": return left != right;
-    case "!==": return left !== right;
-    case "in": return String(left) in (right as Record<string, unknown>);
+    case "==":
+    case "===":
+      if (isJSString(left) && isJSString(right)) return jsStringEquals(left, right);
+      if (isJSString(left) || isJSString(right)) return false;
+      return expr.operator === "==" ? left == right : left === right;
+    case "!=":
+    case "!==":
+      if (isJSString(left) && isJSString(right)) return !jsStringEquals(left, right);
+      if (isJSString(left) || isJSString(right)) return true;
+      return expr.operator === "!=" ? left != right : left !== right;
+    case "in": {
+      const key = isJSString(left) ? jsStringToString(left) : String(left);
+      return key in (right as Record<string, unknown>);
+    }
     case "instanceof": {
       if (!isJSFunction(right)) throw new TypeError("Right-hand side of instanceof is not callable");
       // プロトタイプチェーンを辿って right.prototype を探す

@@ -184,6 +184,39 @@ const benchmarks = [
     `,
     jitEligible: false,
   },
+  {
+    name: "string concat (1000 iterations)",
+    source: `
+      var s = "";
+      for (var i = 0; i < 1000; i = i + 1) {
+        s = s + "x";
+      }
+      s;
+    `,
+    jitEligible: false,
+  },
+  {
+    name: "string compare (10000 iterations)",
+    source: `
+      var count = 0;
+      for (var i = 0; i < 10000; i = i + 1) {
+        if ("hello" === "hello") { count = count + 1; }
+      }
+      count;
+    `,
+    jitEligible: false,
+  },
+  {
+    name: "template literal (1000 iterations)",
+    source: `
+      var result = "";
+      for (var i = 0; i < 1000; i = i + 1) {
+        result = \`item \${i}\`;
+      }
+      result;
+    `,
+    jitEligible: false,
+  },
 ];
 
 function bench(fn: () => unknown, warmup = 5, runs = 10): { result: unknown; avg: number; min: number; error?: string } {
