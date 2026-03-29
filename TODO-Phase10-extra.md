@@ -58,10 +58,12 @@ Phase 10+:
 
 ## 10E-1. WasmBuilder に Wasm GC サポート追加
 
-- [ ] Type section で `struct` 型を定義
-- [ ] `struct.new`, `struct.get`, `struct.set` オペコード追加
-- [ ] `ref` 型 (nullable/non-nullable) のエンコーディング
-- [ ] テスト: Vec struct を生成して x, y を読む
+- [x] `addStruct(fields)` — Type section に struct 型を追加
+- [x] Type section: struct 型が先、func 型が後 (type index オフセット)
+- [x] `WASM_GC_OP`: struct_new (0xfb 0x00), struct_get (0xfb 0x02), struct_set (0xfb 0x05)
+- [x] `refType(typeIdx)` — ref 型のバイト列生成 (0x64 + type index)
+- [x] `addFunction` に paramCount/resultCount を追加 (ref 型は複数バイトなので)
+- [x] テスト: `dot(Vec(3,4), Vec(1,1)) = 7` via WasmBuilder + Wasm GC
 
 ---
 

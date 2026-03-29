@@ -16,6 +16,9 @@ export const WASM_TYPE = {
   f32: 0x7d,
   f64: 0x7c,
   func: 0x60,
+  struct: 0x5f,
+  ref: 0x64,       // ref (non-null) + heap type
+  ref_null: 0x63,  // ref null + heap type
 } as const;
 
 // Wasm 命令
@@ -61,23 +64,69 @@ export const WASM_OP = {
   br_if: 0x0d,
   call: 0x10,
   drop: 0x1a,
+  // Wasm GC (0xfb prefix)
+  struct_new: 0xfb,       // 0xfb 0x00 + type_idx
+  struct_get: 0xfb,       // 0xfb 0x02 + type_idx + field_idx
+  struct_set: 0xfb,       // 0xfb 0x05 + type_idx + field_idx
 } as const;
+
+// Wasm GC の sub-opcodes (0xfb prefix の後)
+export const WASM_GC_OP = {
+  struct_new: 0x00,
+  struct_new_default: 0x01,
+  struct_get: 0x02,
+  struct_get_s: 0x03,
+  struct_get_u: 0x04,
+  struct_set: 0x05,
+} as const;
+
+// ref 型のバイト列を生成 (params/results で使用)
+export function refType(typeIdx: number, nullable = false): number[] {
+  return [nullable ? 0x63 : 0x64, typeIdx];
+}
+
+type StructField = {
+  type: number;    // value type (e.g. WASM_TYPE.i32)
+  mutable: boolean;
+};
+
+type StructDef = {
+  fields: StructField[];
+};
 
 type FuncDef = {
   name: string;
-  params: number[];   // 型バイト列 (例: [0x7c, 0x7c] = f64, f64)
-  results: number[];   // 型バイト列 (例: [0x7c] = f64)
-  body: number[];      // Wasm 命令列 (end 含む)
-  extraLocals: number; // params 以外のローカル変数の数
+  paramCount: number;   // パラメータ数
+  params: number[];     // パラメータ型のエンコード済みバイト列
+  resultCount: number;  // 結果数
+  results: number[];    // 結果型のエンコード済みバイト列
+  body: number[];       // Wasm 命令列 (end 含む)
+  extraLocals: number;  // params 以外のローカル変数の数
 };
 
 export class WasmBuilder {
   private functions: FuncDef[] = [];
+  private structs: StructDef[] = [];
   private memoryPages = 0;
   private globals: { type: number; mutable: boolean; initValue: number }[] = [];
 
-  addFunction(name: string, params: number[], results: number[], body: number[], extraLocals = 0): void {
-    this.functions.push({ name, params, results, body, extraLocals });
+  // struct 型を追加。返り値は type index (struct は関数型より先に定義される)
+  addStruct(fields: StructField[]): number {
+    const idx = this.structs.length;
+    this.structs.push({ fields });
+    return idx;
+  }
+
+  addFunction(name: string, params: number[], results: number[], body: number[], extraLocals = 0, paramCount?: number, resultCount?: number): void {
+    this.functions.push({
+      name,
+      paramCount: paramCount ?? params.length,
+      params,
+      resultCount: resultCount ?? results.length,
+      results,
+      body,
+      extraLocals,
+    });
   }
 
   enableMemory(pages = 1): void {
@@ -156,15 +205,30 @@ export class WasmBuilder {
     return buf;
   }
 
+  // struct の type index オフセット (struct が先、func が後)
+  get structCount(): number { return this.structs.length; }
+
   private buildTypeSection(): number[] {
     const buf: number[] = [];
-    // 関数ごとに型を定義
-    writeLEB128(buf, this.functions.length);
+    // struct 型 + func 型の合計
+    writeLEB128(buf, this.structs.length + this.functions.length);
+    // struct 型 (type index 0, 1, ...)
+    for (const s of this.structs) {
+      buf.push(WASM_TYPE.struct);
+      writeLEB128(buf, s.fields.length);
+      for (const f of s.fields) {
+        buf.push(f.type);
+        buf.push(f.mutable ? 0x01 : 0x00);
+      }
+    }
+    // func 型 (type index structs.length, structs.length+1, ...)
     for (const fn of this.functions) {
       buf.push(WASM_TYPE.func);
-      writeLEB128(buf, fn.params.length);
+      // params/results はエンコード済みバイト列
+      // paramCount/resultCount は別に持つ
+      writeLEB128(buf, fn.paramCount);
       buf.push(...fn.params);
-      writeLEB128(buf, fn.results.length);
+      writeLEB128(buf, fn.resultCount);
       buf.push(...fn.results);
     }
     return buf;
@@ -174,7 +238,7 @@ export class WasmBuilder {
     const buf: number[] = [];
     writeLEB128(buf, this.functions.length);
     for (let i = 0; i < this.functions.length; i++) {
-      writeLEB128(buf, i); // type index
+      writeLEB128(buf, this.structs.length + i); // type index (struct 分オフセット)
     }
     return buf;
   }
