@@ -120,12 +120,13 @@ export function flatten(str: JSString): SeqString {
   };
 
   // ConsString/SlicedString を SeqString に置き換え (キャッシュ)
+  // 次回の flatten でコピーを省略できる
+  // 元の子参照を切って GC 可能にする (Phase 10 の自前 GC でも有効)
   (str as any).kind = "seq";
   (str as any).data = buf;
-  delete (str as any).left;
-  delete (str as any).right;
-  delete (str as any).parent;
-  delete (str as any).offset;
+  (str as any).left = null;
+  (str as any).right = null;
+  (str as any).parent = null;
 
   return flat;
 }
