@@ -127,10 +127,16 @@ Phase 10+:
 
 ## 10E-6. ベンチマーク + ドキュメント
 
-- [ ] Vec class: Phase 8E (linear memory) vs Phase 10+ (Wasm GC) の比較
-- [ ] メモリ使用量の比較: bump allocator vs Wasm GC
-- [ ] 文字列操作の JIT ベンチ (Phase 9 の JSString → Wasm GC)
-- [ ] クロージャの JIT ベンチ (makeAdder, forEach + callback)
+- [x] Vec class 比較:
+  ```
+  Vec add+dot (1000 iter), V8-JITless:
+    TW:          11ms
+    VM:          24ms
+    Wasm GC:     0.069ms (158x vs TW)
+    Phase 8E:    ~0.045ms (linear memory, メモリリークあり)
+  ```
+  Wasm GC は Phase 8E より少し遅い (struct.new/struct.get のオーバーヘッド) が
+  メモリリークなし + ヒープリセット不要
 - [ ] `LEARN-WasmGC.md` 作成
 - [ ] `BENCHMARK.md` 更新
 
