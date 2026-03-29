@@ -96,11 +96,34 @@ Phase 10+:
 
 ---
 
-## 10E-5. ベンチマーク + ドキュメント
+## 10E-5. クロージャを Wasm GC で JIT
+
+- [ ] クロージャの環境を Wasm GC struct で表現
+  ```wasm
+  ;; function makeAdder(n) { return function(x) { return x + n; }; }
+  (type $Env (struct (field $n i32)))
+  (func $inner (param $env (ref $Env)) (param $x i32) (result i32)
+    local.get $x
+    struct.get $Env $n (local.get $env)
+    i32.add
+  )
+  ```
+- [ ] 環境のキャプチャ: 外側の関数のローカル変数を struct にまとめる
+  - `makeAdder(5)` → `struct.new $Env (i32.const 5)` → ref を返す
+  - `add5(10)` → `$inner($env, 10)` → env から n を struct.get
+- [ ] バイトコード解析: どの変数がキャプチャされるか検出
+  - 内側関数の `LdaGlobal` が外側関数のローカル変数を参照 → キャプチャ対象
+- [ ] テスト: `makeAdder(5)(10)` = 15 が Wasm GC で動く
+- [ ] テスト: `forEach(arr, function(x) { sum = sum + x; })` のコールバッククロージャ
+
+---
+
+## 10E-6. ベンチマーク + ドキュメント
 
 - [ ] Vec class: Phase 8E (linear memory) vs Phase 10+ (Wasm GC) の比較
 - [ ] メモリ使用量の比較: bump allocator vs Wasm GC
 - [ ] 文字列操作の JIT ベンチ (Phase 9 の JSString → Wasm GC)
+- [ ] クロージャの JIT ベンチ (makeAdder, forEach + callback)
 - [ ] `LEARN-WasmGC.md` 作成
 - [ ] `BENCHMARK.md` 更新
 
@@ -117,9 +140,11 @@ Phase 10+:
   ↓
 10E-3: bump allocator → Wasm GC に移行
   ↓
-10E-4: ConsString を Wasm GC で表現
+10E-4: ConsString を Wasm GC で表現 (文字列 JIT)
   ↓
-10E-5: ベンチ + docs
+10E-5: クロージャを Wasm GC で JIT (環境キャプチャ)
+  ↓
+10E-6: ベンチ + docs
 ```
 
 10E-0 が最重要。Wasm GC のバイナリフォーマットが複雑なので、
