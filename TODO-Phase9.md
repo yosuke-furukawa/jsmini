@@ -104,21 +104,22 @@ Phase 7 で Hidden Class のプロパティ名を `obj.__hc__` 等の JS string 
 
 ### 9-0. JSString データ構造
 
-- [ ] `src/vm/js-string.ts`
+- [x] `src/vm/js-string.ts`
   ```typescript
   type SeqString = { kind: "seq"; data: Uint8Array; length: number };
   type ConsString = { kind: "cons"; left: JSString; right: JSString; length: number };
   type SlicedString = { kind: "sliced"; parent: JSString; offset: number; length: number };
   type JSString = SeqString | ConsString | SlicedString;
   ```
-- [ ] `createSeqString(str)` — JS string → SeqString (UTF-8 エンコード)
-- [ ] `flatten(str)` — ConsString/SlicedString → SeqString
-- [ ] `jsStringToString(str)` — JSString → JS string (UTF-8 デコード)
-- [ ] `jsStringConcat(a, b)` — 短ければ SeqString、長ければ ConsString
-- [ ] `jsStringSlice(str, start, end)` — SlicedString
-- [ ] `jsStringEquals(a, b)` — 文字列比較
-- [ ] `jsStringCharAt(str, index)` — 1 文字取得
-- [ ] テスト: 生成、連結、slice、比較、flatten
+- [x] `createSeqString(str)` — JS string → SeqString (UTF-8 エンコード)
+- [x] `flatten(str)` — ConsString/SlicedString → SeqString (キャッシュ付き)
+- [x] `jsStringToString(str)` — JSString → JS string (UTF-8 デコード)
+- [x] `jsStringConcat(a, b)` — 13 文字未満は SeqString、以上は ConsString
+- [x] `jsStringSlice(str, start, end)` — 短ければ SeqString、長ければ SlicedString
+- [x] `jsStringEquals(a, b)` — 参照比較 → 長さ比較 → バイト比較
+- [x] `jsStringCharAt(str, index)` — 1 文字取得
+- [x] `numberToJSString`, `booleanToJSString`, `jsStringToNumber` — 型変換
+- [x] テスト: 21 テスト全パス
 
 ### 9-1. VM の文字列操作を差し替え
 
