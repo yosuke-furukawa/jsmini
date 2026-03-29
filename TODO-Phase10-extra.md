@@ -43,12 +43,16 @@ Phase 10+:
 
 ## 10E-0. Wasm GC のバイナリエンコーディング調査
 
-- [ ] Wasm GC の struct/array/ref 型のバイナリフォーマットを調査
-  - `struct` 型の定義 (type section)
-  - `struct.new`, `struct.get`, `struct.set` のオペコード
-  - `ref` 型のエンコーディング
-- [ ] Node.js v24 で手書き Wasm GC バイナリが動くことを確認
-- [ ] 簡単な例: `Vec { x: i32, y: i32 }` を struct.new で生成して struct.get で読む
+- [x] Wasm GC の struct/ref 型のバイナリフォーマットを調査
+  - struct 型: `0x5f` + field count + (valtype + mutability) × N
+  - `struct.new`: `0xfb 0x00` + type index
+  - `struct.get`: `0xfb 0x02` + type index + field index
+  - `struct.set`: `0xfb 0x05` + type index + field index
+  - `ref` 型: `0x64` + heap type (non-null), `0x63` + heap type (nullable)
+- [x] Node.js v24 で手書き Wasm GC バイナリが動くことを確認
+- [x] `Vec { x: i32, y: i32 }`: struct.new で生成、struct.get で読む
+  - `dot(Vec(3,4), Vec(1,1)) = 7` ✓
+- [x] GC 自動回収確認: 100 万個の struct.new → メモリリークなし
 
 ---
 
