@@ -3,7 +3,7 @@ import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots } from "./js-object.js";
-import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, numberToJSString, booleanToJSString, type JSString } from "./js-string.js";
+import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "./js-string.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 
 type CallFrame = {
@@ -76,8 +76,8 @@ export class VM {
         // 定数ロード
         case "LdaConst": {
           const val = constants[instr.operand!];
-          // 文字列リテラルは JSString に変換
-          this.push(typeof val === "string" ? createSeqString(val) : val);
+          // 文字列リテラルは intern 済み JSString に変換
+          this.push(typeof val === "string" ? internString(val) : val);
           break;
         }
         case "LdaUndefined":
@@ -359,9 +359,9 @@ export class VM {
         // typeof
         case "TypeOf": {
           const val = this.pop();
-          if (isJSString(val)) this.push(createSeqString("string"));
-          else if (val === null) this.push(createSeqString("object"));
-          else this.push(createSeqString(typeof val));
+          if (isJSString(val)) this.push(internString("string"));
+          else if (val === null) this.push(internString("object"));
+          else this.push(internString(typeof val));
           break;
         }
 

@@ -8,7 +8,7 @@ import {
   isJSFunction, createJSFunction, getProperty,
   collectBoundNames, bindPattern, assignPattern,
 } from "./values.js";
-import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, numberToJSString, type JSString } from "../vm/js-string.js";
+import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "../vm/js-string.js";
 
 // MemberExpression のキーを解決する共通ヘルパー
 function resolveMemberKey(expr: MemberExpression, env: Environment): string {
@@ -400,7 +400,7 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
 function evalExpression(expr: Expression, env: Environment): unknown {
   switch (expr.type) {
     case "Literal":
-      return typeof expr.value === "string" ? createSeqString(expr.value) : expr.value;
+      return typeof expr.value === "string" ? internString(expr.value) : expr.value;
     case "Identifier":
       return env.get(expr.name);
     case "ThisExpression":
@@ -435,9 +435,9 @@ function evalExpression(expr: Expression, env: Environment): unknown {
       return fn;
     }
     case "TemplateLiteral": {
-      let result: JSString = createSeqString("");
+      let result: JSString = internString("");
       for (let i = 0; i < expr.quasis.length; i++) {
-        result = jsStringConcat(result, createSeqString(expr.quasis[i].value.cooked));
+        result = jsStringConcat(result, internString(expr.quasis[i].value.cooked));
         if (i < expr.expressions.length) {
           const val = evalExpression(expr.expressions[i], env);
           const s = isJSString(val) ? val : createSeqString(String(val));
@@ -743,10 +743,10 @@ function evalUnaryExpression(
     } else {
       value = evalExpression(expr.argument, env);
     }
-    if (isJSString(value)) return createSeqString("string");
-    if (value === null) return createSeqString("object");
-    if (isJSFunction(value)) return createSeqString("function");
-    return createSeqString(typeof value);
+    if (isJSString(value)) return internString("string");
+    if (value === null) return internString("object");
+    if (isJSFunction(value)) return internString("function");
+    return internString(typeof value);
   }
 
   const argument = evalExpression(expr.argument, env);

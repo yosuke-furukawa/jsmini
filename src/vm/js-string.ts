@@ -198,3 +198,26 @@ export function jsStringToNumber(str: JSString): number {
 export function jsStringTypeOf(): JSString {
   return createSeqString("string");
 }
+
+// --- Intern 化 ---
+// 同じ内容の文字列を 1 つのオブジェクトに統一する
+// === が参照比較 (O(1)) になる
+
+const internTable = new Map<string, JSString>();
+
+export function internJSString(str: JSString): JSString {
+  const key = jsStringToString(str);
+  const existing = internTable.get(key);
+  if (existing) return existing;
+  internTable.set(key, str);
+  return str;
+}
+
+// JS string から直接 intern 済み JSString を取得
+export function internString(str: string): JSString {
+  const existing = internTable.get(str);
+  if (existing) return existing;
+  const jsStr = createSeqString(str);
+  internTable.set(str, jsStr);
+  return jsStr;
+}

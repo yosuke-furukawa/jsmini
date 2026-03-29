@@ -164,15 +164,19 @@ Phase 7 で Hidden Class のプロパティ名を `obj.__hc__` 等の JS string 
 
 ### 9-3. 型変換
 
-- [ ] `Number → JSString` (数値の文字列化)
-- [ ] `JSString → Number` (文字列の数値化)
-- [ ] `Boolean → JSString`
-- [ ] `typeof` で JSString を "string" と返す
+- [x] `Number → JSString` — `createSeqString(String(n))` (Add, TemplateLiteral で使用)
+- [x] `JSString → Number` — `jsStringToNumber` (Sub 等の暗黙変換で使用)
+- [x] `Boolean → JSString` — `createSeqString(String(val))` (Add で使用)
+- [x] `typeof` で JSString を `createSeqString("string")` と返す (VM, TW 両方)
+- [x] 実質 9-1, 9-2 で対応済み
 
-### 9-4. Intern 化 (オプション)
+### 9-4. Intern 化
 
-- [ ] 文字列リテラルとプロパティ名を intern テーブルに登録
-- [ ] `===` を intern 済みならポインタ比較に
+- [x] `internString(str)` — intern テーブルに登録、同じ内容なら同じ参照を返す
+- [x] VM: `LdaConst` の文字列リテラル、`TypeOf` の結果を `internString` で生成
+- [x] TW: `Literal`、`typeof`、TemplateLiteral の quasis を `internString` で生成
+- [x] `jsStringEquals` の `a === b` 参照比較で O(1) に (intern 済み同士)
+- [x] 効果: 比較 100K 回 — intern なし 23ms → intern あり 2.4ms (10x 改善)
 
 ### 9-5. ベンチマーク + ドキュメント
 
