@@ -55,7 +55,7 @@ Vec class (1000 iter), V8-JITless:
 
 ## 8E-2. Wasm コンパイラ — GetProperty / SetPropertyAssign の変換
 
-- [x] monomorphic IC + JSObject の GetProperty:
+- [ ] monomorphic IC + JSObject の GetProperty:
   ```
   LoadThis / LdaLocal       → local.get (base address)
   GetProperty "x" (offset=0) → i32.const 0 / i32.add / i32.load
