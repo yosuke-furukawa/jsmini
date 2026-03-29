@@ -52,6 +52,26 @@ HC + IC の情報を使って Wasm コンパイラがオブジェクトアクセ
 
 ---
 
+## 8E-5. コールバック関数のインライン化
+
+map/reduce のコールバック (`fn(arr[i])`, `fn(acc, arr[i])`) を Wasm 内にインライン展開する。
+
+- [ ] 型フィードバックから monomorphic なコールバックを特定
+  - `LdaLocal N + Call` パターンで、N 番目の引数が常に同じ BytecodeFunction
+- [ ] インライン展開の仕組み:
+  1. Call の引数 N 個をスタックから extra local に退避 (`local.set $inline_0`, `$inline_1`, ...)
+  2. コールバックの本体を translateRange で展開
+  3. 本体内の `LdaLocal K` → `local.get $inline_K` に置換
+  4. `Return` → 削除 (値をスタックに残す)
+  5. `LdaUndefined + Return` (末尾) → スキップ
+- [ ] `CreateArray 0` の Wasm 化 (map の result 配列生成)
+  - bump allocate で配列領域を確保、length ヘッダ付き
+- [ ] テスト: `map([1,2,3], double)` が Wasm で動く
+- [ ] テスト: `reduce([1,2,3,4], add, 0)` が Wasm で動く
+- [ ] ベンチマーク: map/reduce の TW / VM / Wasm 比較
+
+---
+
 ## 実装フロー
 
 ```
