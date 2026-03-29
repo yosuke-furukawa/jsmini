@@ -5,6 +5,7 @@
 const SECTION_TYPE = 1;
 const SECTION_FUNCTION = 3;
 const SECTION_MEMORY = 5;
+const SECTION_GLOBAL = 6;
 const SECTION_EXPORT = 7;
 const SECTION_CODE = 10;
 
@@ -21,6 +22,8 @@ export const WASM_TYPE = {
 export const WASM_OP = {
   local_get: 0x20,
   local_set: 0x21,
+  global_get: 0x23,
+  global_set: 0x24,
   // i32
   i32_const: 0x41,
   i32_add: 0x6a,
@@ -70,15 +73,22 @@ type FuncDef = {
 
 export class WasmBuilder {
   private functions: FuncDef[] = [];
-  private memoryPages = 0; // 0 = メモリなし
+  private memoryPages = 0;
+  private globals: { type: number; mutable: boolean; initValue: number }[] = [];
 
   addFunction(name: string, params: number[], results: number[], body: number[], extraLocals = 0): void {
     this.functions.push({ name, params, results, body, extraLocals });
   }
 
-  // linear memory を有効にする (1 page = 64KB)
   enableMemory(pages = 1): void {
     this.memoryPages = pages;
+  }
+
+  // mutable global 変数を追加。返り値は global index
+  addGlobal(type: number, mutable: boolean, initValue: number): number {
+    const idx = this.globals.length;
+    this.globals.push({ type, mutable, initValue });
+    return idx;
   }
 
   build(): Uint8Array {
@@ -96,10 +106,16 @@ export class WasmBuilder {
     const funcSection = this.buildFunctionSection();
     this.writeSection(buf, SECTION_FUNCTION, funcSection);
 
-    // Memory section (Function と Export の間)
+    // Memory section
     if (this.memoryPages > 0) {
       const memSection = this.buildMemorySection();
       this.writeSection(buf, SECTION_MEMORY, memSection);
+    }
+
+    // Global section
+    if (this.globals.length > 0) {
+      const globalSection = this.buildGlobalSection();
+      this.writeSection(buf, SECTION_GLOBAL, globalSection);
     }
 
     // Export section
@@ -111,6 +127,25 @@ export class WasmBuilder {
     this.writeSection(buf, SECTION_CODE, codeSection);
 
     return new Uint8Array(buf);
+  }
+
+  private buildGlobalSection(): number[] {
+    const buf: number[] = [];
+    writeLEB128(buf, this.globals.length);
+    for (const g of this.globals) {
+      buf.push(g.type);            // value type
+      buf.push(g.mutable ? 0x01 : 0x00); // mutability
+      // init expr
+      if (g.type === WASM_TYPE.i32) {
+        buf.push(0x41); // i32.const
+        const initBytes = i32ToLEB128(g.initValue);
+        buf.push(...initBytes);
+      } else {
+        buf.push(0x41, 0x00); // fallback i32.const 0
+      }
+      buf.push(0x0b); // end
+    }
+    return buf;
   }
 
   private buildMemorySection(): number[] {

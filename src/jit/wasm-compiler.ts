@@ -55,8 +55,16 @@ export function compileMultiSync(
     }
   }
 
+  // Construct がある場合、bump allocator 用の heap pointer global が必要
+  const anyConstruct = funcs.some(f => f.bytecode.some(i => i.op === "Construct"));
+
   const builder = new WasmBuilder();
-  if (anyArrayLocals || anyObjectProps) builder.enableMemory(1);
+  if (anyArrayLocals || anyObjectProps || anyConstruct) builder.enableMemory(1);
+  // heap pointer global (global index 0): bump allocator の次の空きアドレス
+  let heapPtrGlobal = -1;
+  if (anyConstruct) {
+    heapPtrGlobal = builder.addGlobal(WASM_TYPE.i32, true, 0);
+  }
 
   for (const func of funcs) {
     const arrayLocals = arrayLocalsByFunc.get(func.name) ?? new Set();
@@ -76,6 +84,8 @@ export function compileMultiSync(
       spec: t, isI32: t === "i32", wasmType, funcIndex,
       arrayLocals, hasMemory: anyArrayLocals || anyObjectProps,
       objectPropOffsets, hasThis,
+      heapPtrGlobal,
+      objectSize: objectPropOffsets.size * 4,
     };
     // hasThis な関数は this を追加パラメータとして渡す
     const paramCount = func.paramCount + (hasThis ? 1 : 0);
@@ -100,7 +110,7 @@ export function compileMultiSync(
       result.set(func.name, instance.exports[func.name] as (...args: number[]) => number);
     }
     // memory を export に含める
-    if ((anyArrayLocals || anyObjectProps) && instance.exports.memory) {
+    if ((anyArrayLocals || anyObjectProps || anyConstruct) && instance.exports.memory) {
       (result as any).__memory = instance.exports.memory;
     }
     return result;
@@ -138,7 +148,8 @@ export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationTy
   }
   const hasThis = func.bytecode.some(i => i.op === "LoadThis");
   if (objectPropOffsets.size > 0 || hasThis) hasMemory = true;
-  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis };
+  const hasConstruct = func.bytecode.some(i => i.op === "Construct");
+  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: hasConstruct ? 0 : -1, objectSize: objectPropOffsets.size * 4 };
 
   const body = translateBytecode(func, ctx);
   if (!body) return null;
@@ -280,8 +291,10 @@ type TranslateContext = {
   funcIndex: Map<string, number>;
   arrayLocals: Set<number>;
   hasMemory: boolean;
-  objectPropOffsets: Map<string, number>;  // プロパティ名 → byte offset
-  hasThis: boolean;  // LoadThis がある関数か
+  objectPropOffsets: Map<string, number>;
+  hasThis: boolean;
+  heapPtrGlobal: number;  // bump allocator の global index (-1 = なし)
+  objectSize: number;     // 1 オブジェクトのバイト数 (propCount * 4)
 };
 
 // jsmini バイトコード → Wasm 命令列に変換
@@ -569,10 +582,11 @@ function translateRange(
       // 関数呼び出し
       case "LdaGlobal": {
         const name = constants[instr.operand!] as string;
-        // 次の命令が Call で、呼び出し先が既知の関数なら skip (Call で処理)
-        if (typeof name === "string" && pc + 1 < bytecode.length && bytecode[pc + 1].op === "Call") {
-          if (funcIndex.has(name)) {
-            break; // skip — Call で処理
+        // 次の命令が Call/Construct で、呼び出し先が既知の関数なら skip
+        if (typeof name === "string" && pc + 1 < bytecode.length) {
+          const nextOp = bytecode[pc + 1].op;
+          if ((nextOp === "Call" || nextOp === "Construct") && funcIndex.has(name)) {
+            break; // skip — Call/Construct で処理
           }
         }
         return false;
@@ -585,6 +599,44 @@ function translateRange(
           if (idx !== undefined) {
             out.push(WASM_OP.call, idx);
             break;
+          }
+        }
+        return false;
+      }
+
+      case "Construct": {
+        // new Vec(arg0, arg1): スタック [arg0, arg1, ctorRef]
+        // ctorRef は LdaGlobal で push された — skip 済み (LdaGlobal ハンドラで)
+        // bump allocate: base = heapPtr; heapPtr += objectSize
+        if (ctx.heapPtrGlobal >= 0 && ctx.objectSize > 0 && isI32) {
+          const argc = instr.operand!;
+          // ctorRef を drop (LdaGlobal が skip されているので pop は不要)
+          // ただし LdaGlobal が skip されず push されている場合は drop が必要
+          // → LdaGlobal ハンドラで skip されているので ctorRef はスタックにない
+
+          // bump allocate
+          out.push(WASM_OP.global_get, ctx.heapPtrGlobal);  // base = heapPtr
+          // heapPtr += objectSize
+          out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
+          out.push(WASM_OP.i32_const, ...i32ToLEB128(ctx.objectSize));
+          out.push(WASM_OP.i32_add);
+          out.push(WASM_OP.global_set, ctx.heapPtrGlobal);
+
+          // スタック: [arg0, arg1, ..., base]
+          // constructor expects: (arg0, arg1, ..., this_base)
+          // → そのまま call $ctor
+          if (pc > 0 && bytecode[pc - 1].op === "LdaGlobal") {
+            const name = constants[bytecode[pc - 1].operand!] as string;
+            const idx = funcIndex.get(name);
+            if (idx !== undefined) {
+              out.push(WASM_OP.call, idx);
+              out.push(WASM_OP.drop); // constructor の return value (undefined) を捨てる
+              // base address をスタックに残す (Construct の結果)
+              out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
+              out.push(WASM_OP.i32_const, ...i32ToLEB128(ctx.objectSize));
+              out.push(WASM_OP.i32_sub); // heapPtr - objectSize = 直前の base
+              break;
+            }
           }
         }
         return false;

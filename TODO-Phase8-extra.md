@@ -24,20 +24,22 @@ HC + IC の情報を使って Wasm コンパイラがオブジェクトアクセ
 
 ## 8E-2. Construct (new) の Wasm 化
 
-- [ ] WasmBuilder に global 変数サポート追加 (bump allocator 用の heap pointer)
-- [ ] `Construct` → Wasm 内で bump allocate + constructor 呼び出し
-  - heap pointer を進めて新オブジェクトの base address を確保
-  - `call $constructor(base, arg0, arg1)` で初期化
+- [x] WasmBuilder に global 変数サポート追加 (Global section, global.get/set)
+- [x] `Construct` → Wasm 内で bump allocate + constructor 呼び出し
+  - heap pointer (global) を進めて新オブジェクトの base address を確保
+  - `call $constructor(arg0, arg1, base)` で初期化
   - base address を返す
-- [ ] テスト: `new Vec(1, 2)` が Wasm memory 上に正しく配置される
+- [x] `LdaGlobal` が Construct の前でも skip されるように修正
+- [x] テスト: `new Vec(1, 2)` が Wasm memory 上に正しく配置される
 
 ---
 
 ## 8E-3. add メソッドの Wasm 化
 
-- [ ] add 内の `Construct` → bump allocate + `call $Vec`
-- [ ] add 全体: GetProperty × 4 + Add × 2 + Construct → Wasm
-- [ ] テスト: `Vec(1,2).add(Vec(3,4))` の結果が `(4, 6)`
+- [x] add 内の `Construct` → bump allocate + `call $Vec`
+- [x] add 全体: GetProperty × 4 + Add × 2 + Construct → Wasm
+- [x] WAT 表示: Vec, add, dot 全て OK
+- [x] テスト: `Vec(1,2).add(Vec(3,4))` の結果が `(4, 6)`
 
 ---
 
