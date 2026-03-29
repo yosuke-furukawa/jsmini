@@ -95,39 +95,46 @@ case "GetProperty":
 - 通常: fast mode (Hidden Class + 固定オフセット)
 - `delete obj.x` や大量の動的プロパティ追加: dictionary mode (ハッシュテーブル) に切り替え
 
-**実測結果**: VM レベルでは効果なし (V8 の C++ IC が `obj[name]` を既に最適化しているため)。
-JIT の基盤として意味がある。
+**ゴール**: Vec class ベンチ (new + メソッド呼び出し) が VM で 2 倍速くなる。
 
 ---
 
-## Phase 8 — Inline Cache (IC) ✅
+## Phase 8 — Inline Cache (IC)
 
-**動機**: HC でオフセットが決まっても毎回 `Map.get` で引くのは遅い。IC でキャッシュする。
+**動機**: Hidden Class でオフセットが決まっても、毎回 `properties.get(name)` でオフセットを引くのは遅い。同じプロパティに何度もアクセスするならキャッシュしたい。
 
-**実測結果**: VM レベルでは逆に遅くなった。
+### 8-1. IC スロットをバイトコードに追加
+
 ```
-Vec class (1000 iter), V8-JITless:
-  TW:        10.4ms
-  VM+HC+IC:  23.1ms  (0.45x — TW より遅い)
-  Wasm:      0.004ms (3014x — 手書き Wasm で検証)
+// Before
+GetProperty <nameIndex>
+
+// After
+GetProperty <nameIndex> <icSlot>
 ```
 
-**学び**: HC + IC は **JIT でネイティブコードを生成して初めて効果を発揮する**。
-V8 の Ignition は C++ レベルで IC を持っているので、jsmini が JS で IC を重ねても遅くなるだけ。
+各アクセス箇所に IC スロットを持たせ、前回の Hidden Class + offset を記録。
 
----
+### 8-2. IC の状態管理
 
-## Phase 8+（未実装）— オブジェクト JIT
+```
+uninitialized → monomorphic → polymorphic → megamorphic
+                (1 種の HC)   (2-4 種)       (5 種以上)
+```
 
-**動機**: HC + IC の真価は JIT にある。`obj.x` を `i32.load(base + offset)` に変換すれば 3014 倍速い (手書き Wasm で検証済み)。
+monomorphic なら Hidden Class の比較 1 回 + オフセット直読み。
 
-やること:
-- IC が monomorphic な GetProperty を Wasm コンパイラで変換
-- オブジェクトを Wasm linear memory に配置 (配列 JIT と同じ)
-- Vec の add/dot ループ全体を Wasm 化
-- 型ガード: HC が変わったら deopt
+### 8-3. JIT での IC 活用
 
-**ゴール**: Vec class ベンチが自動的に Wasm JIT で 1000 倍以上速くなる。
+IC が monomorphic なプロパティアクセスを Wasm で型特殊化:
+
+```wasm
+;; obj.x が monomorphic (HC_A, offset 0) の場合
+;; 型ガード: Hidden Class が HC_A か
+;; → i32.load でスロット 0 を読む
+```
+
+**ゴール**: オブジェクト操作を含むベンチ (closest, Vec class) が Wasm JIT で動く。
 
 ---
 
