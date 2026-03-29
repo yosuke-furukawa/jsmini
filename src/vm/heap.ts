@@ -15,12 +15,19 @@ export class Heap {
   private gcThreshold = 1000;
   private gcLog: string[] = [];
   traceGC = false;
+  // 統計
+  private totalAllocated = 0;
+  private totalSwept = 0;
+  private gcCount = 0;
+  private peakSize = 0;
 
   // オブジェクトをヒープに登録
   allocate<T>(value: T): T {
     if (typeof value === "object" && value !== null) {
       (value as Markable)[GC_MARK] = false;
       this.objects.push(value as Markable);
+      this.totalAllocated++;
+      if (this.objects.length > this.peakSize) this.peakSize = this.objects.length;
     }
     this.allocCount++;
     return value;
@@ -55,6 +62,9 @@ export class Heap {
     this.gcThreshold = Math.max(1000, (before - swept) * 2);
     this.allocCount = 0;
 
+    this.totalSwept += swept;
+    this.gcCount++;
+
     if (this.traceGC) {
       const msg = `[GC] heap: ${before} → mark: ${marked}, sweep: ${swept} → heap: ${this.objects.length}`;
       this.gcLog.push(msg);
@@ -65,6 +75,16 @@ export class Heap {
 
   getGCLog(): string[] {
     return this.gcLog;
+  }
+
+  getStats(): { totalAllocated: number; totalSwept: number; gcCount: number; peakSize: number; currentSize: number } {
+    return {
+      totalAllocated: this.totalAllocated,
+      totalSwept: this.totalSwept,
+      gcCount: this.gcCount,
+      peakSize: this.peakSize,
+      currentSize: this.objects.length,
+    };
   }
 
   // --- Mark フェーズ ---

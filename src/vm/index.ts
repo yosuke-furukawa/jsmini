@@ -25,6 +25,7 @@ export type VMResult = {
   deoptLog?: string[];
   tierLog?: string[];
   gcLog?: string[];
+  gcStats?: { totalAllocated: number; totalSwept: number; gcCount: number; peakSize: number; currentSize: number };
 };
 
 export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): unknown {
@@ -68,7 +69,10 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     if (vm.feedback) result.feedback = vm.feedback;
     if (vm.jit && options.collectDeopt) result.deoptLog = vm.jit.deoptLog;
     if (vm.jit && options.traceTier) result.tierLog = vm.jit.tierLog;
-    if (options.traceGC) result.gcLog = vm.heap.getGCLog();
+    if (options.traceGC) {
+      result.gcLog = vm.heap.getGCLog();
+      result.gcStats = vm.heap.getStats();
+    }
     return result;
   }
   return value;
