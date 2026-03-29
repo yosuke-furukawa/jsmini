@@ -22,7 +22,7 @@ Phase 7-9 と同じく、自前 GC は V8 の GC より遅い。教育目的。
 
 ## 10-0. ヒープアロケータ
 
-- [ ] `src/vm/heap.ts` — 全ヒープオブジェクトを追跡するアロケータ
+- [x] `src/vm/heap.ts` — 全ヒープオブジェクトを追跡するアロケータ
   ```typescript
   type HeapObject = {
     marked: boolean;
@@ -35,42 +35,42 @@ Phase 7-9 と同じく、自前 GC は V8 の GC より遅い。教育目的。
     size(): number;
   }
   ```
-- [ ] `allocate` — オブジェクトをヒープに登録して追跡
-- [ ] `size()` — 現在のヒープ上のオブジェクト数
-- [ ] テスト: allocate + size
+- [x] `allocate` — オブジェクトをヒープに登録して追跡
+- [x] `size()` — 現在のヒープ上のオブジェクト数
+- [x] テスト: allocate + size
 
 ---
 
 ## 10-1. Mark フェーズ
 
-- [ ] `mark(roots: unknown[])` — ルートセットから到達可能なオブジェクトに mark をつける
+- [x] `mark(roots: unknown[])` — ルートセットから到達可能なオブジェクトに mark をつける
   - ルートセット: グローバル変数 (globals Map)、スタック、CallFrame の locals
   - 再帰的に辿る: JSObject の __slots__、JSArray の要素、ConsString の left/right
-- [ ] mark 済みオブジェクトは再訪しない (無限ループ防止)
-- [ ] テスト: mark で到達可能なオブジェクトだけ mark される
+- [x] mark 済みオブジェクトは再訪しない (無限ループ防止)
+- [x] テスト: mark で到達可能なオブジェクトだけ mark される
 
 ---
 
 ## 10-2. Sweep フェーズ
 
-- [ ] `sweep()` — mark されていないオブジェクトをヒープから除去
+- [x] `sweep()` — mark されていないオブジェクトをヒープから除去
   - mark されたオブジェクトは mark を false にリセット (次の GC サイクル用)
-- [ ] sweep 後のヒープサイズが減ることを確認
-- [ ] テスト: 参照されていないオブジェクトが回収される
+- [x] sweep 後のヒープサイズが減ることを確認
+- [x] テスト: 参照されていないオブジェクトが回収される
 
 ---
 
 ## 10-3. VM に GC を組み込む
 
-- [ ] VM クラスに Heap を持たせる
-- [ ] `CreateObject` / `CreateArray` / 文字列連結で allocate を呼ぶ
-- [ ] GC トリガー: allocate 回数が閾値を超えたら mark + sweep
-- [ ] ルートセットの収集:
+- [x] VM クラスに Heap を持たせる
+- [x] `CreateObject` / `CreateArray` / 文字列連結で allocate を呼ぶ
+- [x] GC トリガー: allocate 回数が閾値を超えたら mark + sweep
+- [x] ルートセットの収集:
   - `this.globals` の全値
   - `this.stack[0..sp]`
   - 全 CallFrame の `locals[]`
   - 全 CallFrame の `thisValue`
-- [ ] テスト: GC 後も正常に動作 (既存テスト全パス)
+- [x] テスト: GC 後も正常に動作 (既存テスト全パス)
 
 ---
 
