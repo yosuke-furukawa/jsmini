@@ -188,7 +188,8 @@ Phase 7 で Hidden Class のプロパティ名を `obj.__hc__` 等の JS string 
   template x100:  TW 0.25→0.37ms (+48%)  VM 0.65→0.56ms (-14%)
   ```
   - TW: JSString オブジェクト生成のコストで 7-48% 劣化
-  - VM: intern 化で比較が参照比較になり 10-19% 改善
+  - VM: intern 化で比較が参照比較になり改善に見えたが、計測ブレの可能性あり
+  - 直接比較: V8 `===` 1.4ms vs intern jsStringEquals 2.3ms (100K 回) → intern でも V8 の方が速い
 - [x] `BENCHMARK.md` — Phase 9 で更新予定
 - [x] playground リビルド完了
 
