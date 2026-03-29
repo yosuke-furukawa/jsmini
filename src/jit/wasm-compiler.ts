@@ -55,8 +55,8 @@ export function compileMultiSync(
     }
   }
 
-  // Construct がある場合、bump allocator 用の heap pointer global が必要
-  const anyConstruct = funcs.some(f => f.bytecode.some(i => i.op === "Construct"));
+  // Construct または CreateArray がある場合、bump allocator 用の heap pointer global が必要
+  const anyConstruct = funcs.some(f => f.bytecode.some(i => i.op === "Construct" || (i.op === "CreateArray" && i.operand === 0)));
 
   const builder = new WasmBuilder();
   if (anyArrayLocals || anyObjectProps || anyConstruct) builder.enableMemory(1);
@@ -515,6 +515,29 @@ function translateRange(
           out.push(WASM_OP.i32_store, 0x02, 0x00);
           // push value (代入式の値)
           out.push(WASM_OP.local_get, tempVal);
+          break;
+        }
+        return false;
+      }
+
+      case "CreateArray": {
+        const count = instr.operand!;
+        if (count === 0 && ctx.heapPtrGlobal >= 0 && isI32) {
+          // 空配列: bump allocate で領域確保
+          // メモリレイアウト: [length=0][... 後で SetPropertyComputed で埋める]
+          // length ヘッダだけ確保して base address を push
+          out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
+          // length = 0 を書く
+          out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
+          out.push(WASM_OP.i32_const, ...i32ToLEB128(0));
+          out.push(WASM_OP.i32_store, 0x02, 0x00);
+          // heap ptr を進める (length ヘッダ 4 bytes + 要素は SetPropertyComputed で書く)
+          // 最大要素数を予測するのは難しいので、十分な領域を確保
+          // → 1024 要素分 = 4100 bytes (4 + 1024*4)
+          out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
+          out.push(WASM_OP.i32_const, ...i32ToLEB128(4 + 1024 * 4));
+          out.push(WASM_OP.i32_add);
+          out.push(WASM_OP.global_set, ctx.heapPtrGlobal);
           break;
         }
         return false;

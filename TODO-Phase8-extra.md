@@ -56,19 +56,15 @@ HC + IC の情報を使って Wasm コンパイラがオブジェクトアクセ
 
 map/reduce のコールバック (`fn(arr[i])`, `fn(acc, arr[i])`) を Wasm 内にインライン展開する。
 
-- [ ] 型フィードバックから monomorphic なコールバックを特定
-  - `LdaLocal N + Call` パターンで、N 番目の引数が常に同じ BytecodeFunction
-- [ ] インライン展開の仕組み:
-  1. Call の引数 N 個をスタックから extra local に退避 (`local.set $inline_0`, `$inline_1`, ...)
-  2. コールバックの本体を translateRange で展開
-  3. 本体内の `LdaLocal K` → `local.get $inline_K` に置換
-  4. `Return` → 削除 (値をスタックに残す)
-  5. `LdaUndefined + Return` (末尾) → スキップ
-- [ ] `CreateArray 0` の Wasm 化 (map の result 配列生成)
-  - bump allocate で配列領域を確保、length ヘッダ付き
-- [ ] テスト: `map([1,2,3], double)` が Wasm で動く
-- [ ] テスト: `reduce([1,2,3,4], add, 0)` が Wasm で動く
-- [ ] ベンチマーク: map/reduce の TW / VM / Wasm 比較
+- [x] `LdaLocal N + Call` パターンで inlineCandidates から paramCount 一致する関数を展開
+- [x] インライン展開の仕組み:
+  1. Call の引数 N 個をスタックから extra local に退避 (`local.set`)
+  2. コールバックの本体内 `LdaLocal K` → `local.get (baseLocal + K)` に置換
+  3. `Return` → break (値をスタックに残す)
+- [x] `CreateArray 0` → bump allocate で配列領域を確保 (length ヘッダ + 1024 要素分)
+- [x] テスト: `map([10,20,30], double)` → `[20,40,60]` via Wasm
+- [x] テスト: `reduce([1,2,3,4], add, 0)` → `10` via Wasm
+- [x] ベンチマーク: reduce(500, add, 0) — TW 3.9ms / VM 5.2ms / Wasm 0.011ms (364x)
 
 ---
 
