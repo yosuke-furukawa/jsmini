@@ -69,23 +69,24 @@ Phase 10+:
 
 ## 10E-2. Vec class を Wasm GC で JIT
 
-- [ ] Vec の Hidden Class → Wasm GC struct 型に変換
-  - HC のプロパティ `{ x: offset 0, y: offset 1 }` → `struct { x: i32, y: i32 }`
-- [ ] `Construct` → `struct.new` (bump allocator 不要)
-- [ ] `GetProperty` → `struct.get`
-- [ ] `SetPropertyAssign` → `struct.set`
-- [ ] dot メソッド: struct.get × 4 + i32.mul × 2 + i32.add
-- [ ] add メソッド: struct.get × 4 + i32.add × 2 + struct.new
-- [ ] テスト: Vec dot/add が Wasm GC で正しく動く
+- [x] `compileWithWasmGC()` — Wasm GC ベースの JIT コンパイラ
+- [x] プロパティ → struct フィールドに変換 (propIndex)
+- [x] `__create` 関数の自動生成 (struct.new のラッパー、constructor 代替)
+- [x] `GetProperty` → `struct.get`
+- [x] `SetPropertyAssign` → `struct.set` (temp local でスワップ)
+- [x] `Construct` → `call __create` (constructor の名前を __create にリダイレクト)
+- [x] dot: struct.get × 4 + i32.mul × 2 + i32.add → 7 ✓
+- [x] add: struct.get × 4 + i32.add × 2 + call __create → (4,6) ✓
+- [x] 到達不能コード (LdaUndefined + Return) → `unreachable`
 
 ---
 
 ## 10E-3. bump allocator → Wasm GC への移行
 
-- [ ] Phase 8E の linear memory + bump allocator を Wasm GC struct に置き換え
-- [ ] メモリリーク問題の解消: struct.new で生成したオブジェクトは V8 GC が自動回収
-- [ ] ヒープリセット (heapPtr global) が不要に
-- [ ] テスト: ループ内の大量オブジェクト生成で OOM しないことを確認
+- [x] メモリリーク解消: struct.new で V8 GC が自動回収
+- [x] ヒープリセット不要 (heapPtr global 不要)
+- [x] 1000 iter の add+dot: 0.35ms、メモリリークなし
+- [x] bump allocator の 64KB 制限なし (V8 GC ヒープを使用)
 
 ---
 
