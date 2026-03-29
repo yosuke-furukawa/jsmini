@@ -46,21 +46,46 @@ export function compileMultiSync(
     if (als.size > 0) anyArrayLocals = true;
   }
 
+  // オブジェクトプロパティの検出
+  let anyObjectProps = false;
+  for (const func of funcs) {
+    if (func.bytecode.some(i => i.op === "LoadThis" || i.op === "SetPropertyAssign")) {
+      anyObjectProps = true;
+      break;
+    }
+  }
+
   const builder = new WasmBuilder();
-  if (anyArrayLocals) builder.enableMemory(1);
+  if (anyArrayLocals || anyObjectProps) builder.enableMemory(1);
 
   for (const func of funcs) {
     const arrayLocals = arrayLocalsByFunc.get(func.name) ?? new Set();
+    // オブジェクトプロパティのオフセット収集
+    const objectPropOffsets = new Map<string, number>();
+    let propCounter = 0;
+    for (const instr of func.bytecode) {
+      if ((instr.op === "GetProperty" || instr.op === "SetPropertyAssign") && instr.operand !== undefined) {
+        const name = func.constants[instr.operand] as string;
+        if (name !== "length" && !objectPropOffsets.has(name)) {
+          objectPropOffsets.set(name, propCounter++);
+        }
+      }
+    }
+    const hasThis = func.bytecode.some(i => i.op === "LoadThis");
     const ctx: TranslateContext = {
       spec: t, isI32: t === "i32", wasmType, funcIndex,
-      arrayLocals, hasMemory: anyArrayLocals,
+      arrayLocals, hasMemory: anyArrayLocals || anyObjectProps,
+      objectPropOffsets, hasThis,
     };
-    const params = new Array(func.paramCount).fill(wasmType);
+    // hasThis な関数は this を追加パラメータとして渡す
+    const paramCount = func.paramCount + (hasThis ? 1 : 0);
+    const params = new Array(paramCount).fill(wasmType);
     const results = [wasmType];
     let extraLocals = func.localCount - func.paramCount;
-    // SetPropertyComputed があれば一時退避用の extra local を 1 つ追加
     const needsTempLocal = func.bytecode.some(i => i.op === "SetPropertyComputed");
+    const needsObjTemp = func.bytecode.some(i => i.op === "SetPropertyAssign");
     if (needsTempLocal) extraLocals++;
+    if (needsObjTemp) extraLocals += 2;
     const body = translateBytecode(func, ctx);
     if (!body) return null;
     builder.addFunction(func.name, params, results, body, extraLocals > 0 ? extraLocals : 0);
@@ -75,7 +100,7 @@ export function compileMultiSync(
       result.set(func.name, instance.exports[func.name] as (...args: number[]) => number);
     }
     // memory を export に含める
-    if (anyArrayLocals && instance.exports.memory) {
+    if ((anyArrayLocals || anyObjectProps) && instance.exports.memory) {
       (result as any).__memory = instance.exports.memory;
     }
     return result;
@@ -103,7 +128,17 @@ export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationTy
   if (!hasMemory && allFuncs) {
     hasMemory = allFuncs.some(f => detectArrayLocals(f).size > 0);
   }
-  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory };
+  const objectPropOffsets = new Map<string, number>();
+  let propCounter = 0;
+  for (const instr of func.bytecode) {
+    if ((instr.op === "GetProperty" || instr.op === "SetPropertyAssign") && instr.operand !== undefined) {
+      const name = func.constants[instr.operand] as string;
+      if (name !== "length" && !objectPropOffsets.has(name)) objectPropOffsets.set(name, propCounter++);
+    }
+  }
+  const hasThis = func.bytecode.some(i => i.op === "LoadThis");
+  if (objectPropOffsets.size > 0 || hasThis) hasMemory = true;
+  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis };
 
   const body = translateBytecode(func, ctx);
   if (!body) return null;
@@ -243,8 +278,10 @@ type TranslateContext = {
   isI32: boolean;
   wasmType: number;
   funcIndex: Map<string, number>;
-  arrayLocals: Set<number>;  // 配列として使われているローカル変数のスロット番号
-  hasMemory: boolean;        // linear memory を使うか
+  arrayLocals: Set<number>;
+  hasMemory: boolean;
+  objectPropOffsets: Map<string, number>;  // プロパティ名 → byte offset
+  hasThis: boolean;  // LoadThis がある関数か
 };
 
 // jsmini バイトコード → Wasm 命令列に変換
@@ -401,11 +438,57 @@ function translateRange(
       }
 
       case "GetProperty": {
-        const name = constants[instr.operand!];
+        const name = constants[instr.operand!] as string;
         if (name === "length" && ctx.hasMemory) {
-          // スタック: [base_addr] → i32.load(base) で length を取得
-          // メモリレイアウト: [length: i32][elem0][elem1]...
-          out.push(WASM_OP.i32_load, 0x02, 0x00); // align=4, offset=0
+          // 配列の length
+          out.push(WASM_OP.i32_load, 0x02, 0x00);
+          break;
+        }
+        // オブジェクトプロパティ: base + propOffset * 4
+        const propOffset = ctx.objectPropOffsets.get(name);
+        if (propOffset !== undefined && ctx.hasMemory && isI32) {
+          const byteOffset = propOffset * 4;
+          if (byteOffset > 0) {
+            out.push(WASM_OP.i32_const, ...i32ToLEB128(byteOffset));
+            out.push(WASM_OP.i32_add);
+          }
+          out.push(WASM_OP.i32_load, 0x02, 0x00);
+          break;
+        }
+        return false;
+      }
+
+      case "SetPropertyAssign": {
+        // this.x = value: スタック [value, base]
+        const name = constants[instr.operand!] as string;
+        const propOffset = ctx.objectPropOffsets.get(name);
+        if (propOffset !== undefined && ctx.hasMemory && isI32) {
+          const tempBase = func.localCount;
+          const tempVal = func.localCount + 1;
+          out.push(0x22, tempBase);    // local.tee tempBase (base)
+          out.push(WASM_OP.drop);
+          out.push(0x22, tempVal);     // local.tee tempVal (value)
+          out.push(WASM_OP.drop);
+          // addr = base + offset
+          out.push(WASM_OP.local_get, tempBase);
+          const byteOffset = propOffset * 4;
+          if (byteOffset > 0) {
+            out.push(WASM_OP.i32_const, ...i32ToLEB128(byteOffset));
+            out.push(WASM_OP.i32_add);
+          }
+          out.push(WASM_OP.local_get, tempVal);
+          out.push(WASM_OP.i32_store, 0x02, 0x00);
+          // push value (代入式の値)
+          out.push(WASM_OP.local_get, tempVal);
+          break;
+        }
+        return false;
+      }
+
+      case "LoadThis": {
+        if (ctx.hasThis) {
+          // this は paramCount 番目の追加パラメータ
+          out.push(WASM_OP.local_get, func.paramCount);
           break;
         }
         return false;
