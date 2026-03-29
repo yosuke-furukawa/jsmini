@@ -2,6 +2,7 @@ import { compile } from "./compiler.js";
 import { VM } from "./vm.js";
 import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
+import { isJSString, jsStringToString } from "./js-string.js";
 export { disassemble } from "./bytecode.js";
 
 type ConsoleOptions = {
@@ -32,8 +33,10 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
 
   vm.setGlobal("undefined", undefined);
 
+  // console.log: JSString → JS string に変換してから出力
+  const userLog = options.console?.log ?? console.log;
   const consoleObj: Record<string, Function> = {
-    log: options.console?.log ?? console.log,
+    log: (...args: unknown[]) => userLog(...args.map(a => isJSString(a) ? jsStringToString(a) : a)),
   };
   vm.setGlobal("console", consoleObj);
   vm.setGlobal("Error", { __nativeConstructor: true, name: "Error" });
@@ -51,7 +54,9 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     if (options.traceTier) vm.jit.traceTier = true;
   }
 
-  const value = vm.execute(func);
+  const rawValue = vm.execute(func);
+  // JSString → JS string に変換して返す
+  const value = isJSString(rawValue) ? jsStringToString(rawValue) : rawValue;
 
   if (options.collectFeedback || options.collectDeopt || options.traceTier) {
     const result: VMResult = { value };

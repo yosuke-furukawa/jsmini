@@ -123,12 +123,16 @@ Phase 7 で Hidden Class のプロパティ名を `obj.__hc__` 等の JS string 
 
 ### 9-1. VM の文字列操作を差し替え
 
-- [ ] `Add` — 文字列連結を `jsStringConcat` に
-- [ ] `LdaConst` — 文字列リテラルを `createSeqString` で変換
-- [ ] `StrictEqual` / `Equal` — 文字列比較を `jsStringEquals` に
-- [ ] テンプレートリテラル — 連結を `jsStringConcat` に
-- [ ] `console.log` — JSString を JS string に変換して表示
-- [ ] テスト: 既存テスト全パス
+- [x] `LdaConst` — 文字列リテラルを `createSeqString` で JSString に変換
+- [x] `Add` — JSString 判定して `jsStringConcat` で連結
+- [x] `Equal` / `StrictEqual` / `NotEqual` / `StrictNotEqual` — `jsStringEquals`
+- [x] `TypeOf` — JSString なら `createSeqString("string")` を返す
+- [x] `GetPropertyComputed` / `SetPropertyComputed` — JSString キーを JS string に変換
+- [x] `In` — JSString キーを JS string に変換
+- [x] `console.log` — JSString → JS string に変換して表示
+- [x] 返り値 — JSString → JS string に変換
+- [x] テンプレートリテラル — LdaConst + Add 経由で自動的に JSString 対応
+- [x] テスト: 全 475 テストパス
 
 ### 9-2. TW の文字列操作を差し替え
 

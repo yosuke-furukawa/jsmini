@@ -3,6 +3,7 @@ import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots } from "./js-object.js";
+import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, numberToJSString, booleanToJSString, type JSString } from "./js-string.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 
 type CallFrame = {
@@ -73,9 +74,12 @@ export class VM {
 
       switch (instr.op) {
         // 定数ロード
-        case "LdaConst":
-          this.push(constants[instr.operand!]);
+        case "LdaConst": {
+          const val = constants[instr.operand!];
+          // 文字列リテラルは JSString に変換
+          this.push(typeof val === "string" ? createSeqString(val) : val);
           break;
+        }
         case "LdaUndefined":
           this.push(undefined);
           break;
@@ -93,8 +97,11 @@ export class VM {
         case "Add": {
           const right = this.pop();
           const left = this.pop();
-          if (typeof left === "string" || typeof right === "string") {
-            this.push(String(left) + String(right));
+          if (isJSString(left) || isJSString(right)) {
+            // 一方または両方が JSString → 文字列連結
+            const l = isJSString(left) ? left : createSeqString(String(left));
+            const r = isJSString(right) ? right : createSeqString(String(right));
+            this.push(jsStringConcat(l, r));
           } else {
             this.push((left as number) + (right as number));
           }
@@ -131,28 +138,31 @@ export class VM {
         }
 
         // 比較
-        case "Equal": {
-          const right = this.pop();
-          const left = this.pop();
-          this.push(left == right);
-          break;
-        }
+        case "Equal":
         case "StrictEqual": {
           const right = this.pop();
           const left = this.pop();
-          this.push(left === right);
+          if (isJSString(left) && isJSString(right)) {
+            this.push(jsStringEquals(left, right));
+          } else if (isJSString(left) || isJSString(right)) {
+            // 片方だけ JSString → 型が違うので false
+            this.push(false);
+          } else {
+            this.push(instr.op === "Equal" ? left == right : left === right);
+          }
           break;
         }
-        case "NotEqual": {
-          const right = this.pop();
-          const left = this.pop();
-          this.push(left != right);
-          break;
-        }
+        case "NotEqual":
         case "StrictNotEqual": {
           const right = this.pop();
           const left = this.pop();
-          this.push(left !== right);
+          if (isJSString(left) && isJSString(right)) {
+            this.push(!jsStringEquals(left, right));
+          } else if (isJSString(left) || isJSString(right)) {
+            this.push(true);
+          } else {
+            this.push(instr.op === "NotEqual" ? left != right : left !== right);
+          }
           break;
         }
         case "LessThan": {
@@ -291,7 +301,8 @@ export class VM {
         case "GetPropertyComputed": {
           const key = this.pop();
           const obj = this.pop() as Record<string, unknown>;
-          this.push(obj[String(key)]);
+          const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
+          this.push(obj[keyStr]);
           break;
         }
         case "SetPropertyComputed": {
@@ -301,7 +312,8 @@ export class VM {
           if (Array.isArray(obj) && typeof key === "number") {
             setElement(obj, key, value);
           } else {
-            obj[String(key)] = value;
+            const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
+            obj[keyStr] = value;
           }
           this.push(value);
           break;
@@ -325,7 +337,8 @@ export class VM {
         case "In": {
           const right = this.pop() as Record<string, unknown>;
           const left = this.pop();
-          this.push(String(left) in right);
+          const key = isJSString(left) ? jsStringToString(left) : String(left);
+          this.push(key in right);
           break;
         }
         case "Instanceof": {
@@ -346,8 +359,9 @@ export class VM {
         // typeof
         case "TypeOf": {
           const val = this.pop();
-          if (val === null) this.push("object");
-          else this.push(typeof val);
+          if (isJSString(val)) this.push(createSeqString("string"));
+          else if (val === null) this.push(createSeqString("object"));
+          else this.push(createSeqString(typeof val));
           break;
         }
 
