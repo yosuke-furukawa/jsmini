@@ -150,8 +150,17 @@ Phase 7 で Hidden Class のプロパティ名を `obj.__hc__` 等の JS string 
 
 ### 9-2. TW の文字列操作を差し替え
 
-- [ ] evaluator.ts の全文字列操作を JSString 対応に
-- [ ] テスト: 既存テスト全パス
+- [x] `Literal` — 文字列リテラルを `createSeqString` に
+- [x] `BinaryExpression +` — `jsStringConcat`
+- [x] `==`/`===`/`!=`/`!==` — `jsStringEquals`
+- [x] `in` — JSString → JS string 変換
+- [x] `typeof` — JSString なら `createSeqString("string")`
+- [x] `TemplateLiteral` — `jsStringConcat` で連結
+- [x] `+=` — `jsStringConcat`
+- [x] `resolveMemberKey` — computed key の JSString 変換
+- [x] `console.log` — JSString → JS string 変換
+- [x] 返り値 — JSString → JS string 変換
+- [x] テスト: 全 475 テストパス
 
 ### 9-3. 型変換
 
