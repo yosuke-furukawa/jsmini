@@ -166,10 +166,11 @@ export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationTy
   }
   const hasThis = func.bytecode.some(i => i.op === "LoadThis");
   if (objectPropOffsets.size > 0 || hasThis) hasMemory = true;
-  const hasConstruct = func.bytecode.some(i => i.op === "Construct");
+  const needsHeap = func.bytecode.some(i => i.op === "Construct" || (i.op === "CreateArray" && i.operand === 0));
+  if (needsHeap) hasMemory = true;
   const inlineCandidates = new Map<string, BytecodeFunction>();
   if (allFuncs) for (const f of allFuncs) inlineCandidates.set(f.name, f);
-  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: hasConstruct ? 0 : -1, objectSize: objectPropOffsets.size * 4, inlineCandidates, inlineLocalOffset: 0 };
+  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: needsHeap ? 0 : -1, objectSize: objectPropOffsets.size * 4, inlineCandidates, inlineLocalOffset: 0 };
 
   const body = translateBytecode(func, ctx);
   if (!body) return null;
@@ -657,8 +658,12 @@ function translateRange(
           let inlineTarget: BytecodeFunction | null = null;
           for (const [name, candidate] of ctx.inlineCandidates) {
             if (candidate.paramCount === argc && candidate !== func) {
-              inlineTarget = candidate;
-              break;
+              // コールバックらしい関数を優先: 本体が短く、配列/ループがない
+              const hasLoop = candidate.bytecode.some(i => i.op === "Jump" || i.op === "JumpIfFalse");
+              if (!hasLoop) {
+                inlineTarget = candidate;
+                break;
+              }
             }
           }
           if (inlineTarget && isI32) {
