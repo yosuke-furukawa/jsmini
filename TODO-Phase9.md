@@ -52,11 +52,51 @@ Phase 9 でも同じことが起きるはず:
   独自 ConsString:      V8 の string より遅いが O(N^2) は回避
 ```
 
-## 注意
+## 注意: 性能劣化が起きることを承知で実装する
 
-- **速くすることが目的ではない。** 理解することが目的
-- V8 の string を独自実装に置き換えると **全テストに影響する** (~840 行の変更)
-- Phase 6-8 と違い JIT との連携はスコープ外 (Wasm で文字列は扱えない)
+### 劣化の原因
+
+jsmini は V8 の上で動いている。V8 の `string` は C++ で実装された ConsString/SlicedString/Intern 化が既に効いている。これを JS で書いた独自 JSString に置き換えると:
+
+- V8 の最適化された文字列操作を **捨てる**
+- 代わりに jsmini の JSString 操作が **V8 のインタプリタ経由で実行される**
+- Phase 7-8 で `obj[name]` が遅くなったのと同じ構造
+
+### 影響範囲
+
+**TW への影響:**
+- `"hello" + " world"` — V8 の ConsString (O(1)) → 独自 jsStringConcat (JS 関数呼び出し + コピー)
+- `obj[name]` — プロパティ名が JSString だと V8 に渡す前に JS string に変換が毎回必要
+- テンプレートリテラル — 連結のたびに JSString 操作
+- 文字列比較 (`===`) — V8 のインターン化された参照比較 → 独自 jsStringEquals (バイト比較)
+
+**VM への影響:**
+- 定数テーブルの文字列が JSString になるので `LdaConst` のたびに変換コスト
+- `Add` の文字列連結パスが重くなる
+- `StrictEqual` の文字列比較パスが重くなる
+- Hidden Class のプロパティ名比較も影響 (lookupOffset で Map.get に JSString を渡す)
+
+**Wasm JIT への影響:**
+- Wasm 内では文字列を扱わないので **直接の影響はない**
+- ただし JIT コンパイル時に関数名・プロパティ名の比較で JSString → JS string 変換が入り間接的に遅くなる
+
+**最も深刻: V8 との境界**
+```
+jsmini 内部: JSString で操作
+         ↕ 変換コスト
+V8 との境界: console.log, obj[name], typeof 等は JS string が必要
+```
+
+この変換が **全プロパティアクセスで毎回走る** と壊滅的に遅くなる。
+Phase 7 で Hidden Class のプロパティ名を `obj.__hc__` 等の JS string でアクセスしているので、
+ここが JSString になると HC の仕組みも影響を受ける。
+
+### なぜそれでもやるのか
+
+1. **「V8 の string をタダ乗りしている」ことを可視化する** — 今は V8 のおかげで速い。外すと何が起きるかを体験する
+2. **文字列の内部表現の設計判断を理解する** — ConsString にする閾値 (V8 は 13 文字以上)、Flatten のタイミング、エンコーディングの使い分け
+3. **「だから本物のエンジンは C++ で文字列を書く」** — Phase 7-8 の結論と同じ。JS の上に JS を重ねても遅くなるだけ
+4. **書籍の章として成立する** — 「文字列の章」で ConsString/SlicedString を説明するとき、実装経験があると解像度が全然違う
 
 ---
 
