@@ -264,5 +264,14 @@ for (const { name, source, jitEligible } of benchmarks) {
     console.log(`  wasm-jit     : ${jit.avg.toFixed(2)}ms (min: ${jit.min.toFixed(2)}ms) result=${jit.result}`);
     console.log(`  jit vs tw    : ${(tw.avg / jit.avg).toFixed(2)}x`);
   }
+
+  // GC 統計
+  try {
+    const gcResult = vmEvaluate(source, { traceGC: true }) as any;
+    if (gcResult.gcStats) {
+      const s = gcResult.gcStats;
+      console.log(`  heap         : alloc=${s.totalAllocated} peak=${s.peakSize} final=${s.currentSize} gc=${s.gcCount}x swept=${s.totalSwept}`);
+    }
+  } catch {}
   console.log();
 }

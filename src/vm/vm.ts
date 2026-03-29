@@ -5,6 +5,7 @@ import { createJSArray, setElement, pushElement } from "./js-array.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots } from "./js-object.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "./js-string.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
+import { Heap } from "./heap.js";
 
 type CallFrame = {
   func: BytecodeFunction;
@@ -22,6 +23,7 @@ export class VM {
   private frames: CallFrame[] = [];
   feedback: FeedbackCollector | null = null;
   jit: JitManager | null = null;
+  heap: Heap = new Heap();
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -37,6 +39,30 @@ export class VM {
 
   setGlobal(name: string, value: unknown): void {
     this.globals.set(name, value);
+  }
+
+  // GC: allocate 回数が閾値を超えたら Mark-and-Sweep を実行
+  private maybeGC(): void {
+    if (!this.heap.shouldCollect()) return;
+    const roots = this.collectRoots();
+    this.heap.collect(roots);
+  }
+
+  // ルートセット: 生きているオブジェクトの起点
+  private collectRoots(): unknown[] {
+    const roots: unknown[] = [];
+    // グローバル変数
+    for (const val of this.globals.values()) roots.push(val);
+    // スタック
+    for (let i = 0; i <= this.sp; i++) roots.push(this.stack[i]);
+    // 全 CallFrame の locals + thisValue
+    for (const frame of this.frames) {
+      for (const local of frame.locals) roots.push(local);
+      roots.push(frame.thisValue);
+      // 定数テーブル
+      for (const c of frame.func.constants) roots.push(c);
+    }
+    return roots;
   }
 
   private createICSlots(func: BytecodeFunction): ICSlot[] {
@@ -239,7 +265,8 @@ export class VM {
 
         // オブジェクト / 配列
         case "CreateObject":
-          this.push(createJSObject());
+          this.push(this.heap.allocate(createJSObject()));
+          this.maybeGC();
           break;
         case "CreateArray": {
           const count = instr.operand!;
@@ -247,7 +274,8 @@ export class VM {
           for (let i = 0; i < count; i++) {
             elems.unshift(this.pop());
           }
-          this.push(createJSArray(elems));
+          this.push(this.heap.allocate(createJSArray(elems)));
+          this.maybeGC();
           break;
         }
         case "SetProperty": {
@@ -472,9 +500,10 @@ export class VM {
           }
           // prototype が未設定なら作成
           if (ctor.bytecode && !ctor.prototype) {
-            ctor.prototype = createJSObject();
+            ctor.prototype = this.heap.allocate(createJSObject());
           }
-          const newObj = createJSObject();
+          const newObj = this.heap.allocate(createJSObject());
+          this.maybeGC();
           if (ctor.prototype) {
             jsObjSet(newObj, "__proto__", ctor.prototype);
           }
