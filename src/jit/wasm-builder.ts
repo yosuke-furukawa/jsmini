@@ -181,7 +181,7 @@ export class WasmBuilder {
 
   private buildExportSection(): number[] {
     const buf: number[] = [];
-    const exportCount = this.functions.length + (this.memoryPages > 0 ? 1 : 0);
+    const exportCount = this.functions.length + (this.memoryPages > 0 ? 1 : 0) + this.globals.length;
     writeLEB128(buf, exportCount);
     for (let i = 0; i < this.functions.length; i++) {
       const name = this.functions[i].name;
@@ -198,6 +198,14 @@ export class WasmBuilder {
       buf.push(...memName);
       buf.push(0x02); // export kind = memory
       writeLEB128(buf, 0); // memory index = 0
+    }
+    // Global exports
+    for (let i = 0; i < this.globals.length; i++) {
+      const gName = new TextEncoder().encode(`__global_${i}`);
+      writeLEB128(buf, gName.length);
+      buf.push(...gName);
+      buf.push(0x03); // export kind = global
+      writeLEB128(buf, i);
     }
     return buf;
   }

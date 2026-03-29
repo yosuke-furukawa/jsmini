@@ -45,10 +45,10 @@ HC + IC の情報を使って Wasm コンパイラがオブジェクトアクセ
 
 ## 8E-4. ベンチマーク + playground + ドキュメント
 
-- [ ] Vec dot ベンチ: TW / VM / Wasm の 3 層比較
-- [ ] playground リビルド: WAT 表示確認
-- [ ] BENCHMARK.md 更新
-- [ ] TODO チェック
+- [x] Vec add+dot ベンチ: TW 10.0ms / VM 22.4ms / Wasm 0.045ms (222x vs TW)
+- [x] Global export でヒープポインタをリセット可能に
+- [x] playground リビルド
+- [x] TODO チェック
 
 ---
 

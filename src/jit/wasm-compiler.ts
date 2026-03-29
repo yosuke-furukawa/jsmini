@@ -113,6 +113,9 @@ export function compileMultiSync(
     if ((anyArrayLocals || anyObjectProps || anyConstruct) && instance.exports.memory) {
       (result as any).__memory = instance.exports.memory;
     }
+    if (anyConstruct && instance.exports.__global_0) {
+      (result as any).__heapPtr = instance.exports.__global_0;
+    }
     return result;
   } catch {
     return null;
