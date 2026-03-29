@@ -43,14 +43,28 @@ Phase 9 でも同じことが起きるはず:
 - 独自文字列に置き換えると **VM は遅くなる** (V8 の string が最適化されているから)
 - **データ構造を理解した上で「だから V8 は C++ で書く」と結論付ける** のが学び
 
-### 5. 期待される計測結果
+### 5. 実測結果 (9-1 完了時点、VM のみ JSString 化)
 
+**全体ベンチ**: 数値系は影響なし。文字列を多く使うベンチで 3-7% 劣化。
+
+**文字列操作の直接比較 (V8-JITless)**:
 ```
-文字列連結ベンチ (1000 回):
-  V8 の string:         Xms (V8 の ConsString が効く)
-  独自 SeqString のみ:  遅い (毎回コピー)
-  独自 ConsString:      V8 の string より遅いが O(N^2) は回避
+比較 (100K 回):
+  JS string ===:        1.6ms
+  JSString equals:     23.0ms  (15x 遅い — flatten + バイト比較)
+  JSString ref equals:  2.5ms  (1.6x — 同一参照なら軽い)
+
+連結 (10K 回):
+  JS string +:          0.13ms
+  JSString concat:      6.3ms  (47x 遅い — オブジェクト生成 + Uint8Array)
 ```
+
+**V8 の string がなぜ速いか**:
+- `===` はインターン化された文字列同士ならポインタ比較 1 回
+- `+` は ConsString (ポインタ 2 つ) で O(1)、コピーなし
+- jsmini の JSString は Uint8Array のコピー + JS オブジェクト生成で 15-47x 遅い
+
+**Intern 化 (9-4) で比較は改善可能**: 参照比較なら 15x → 1.6x
 
 ## 注意: 性能劣化が起きることを承知で実装する
 
