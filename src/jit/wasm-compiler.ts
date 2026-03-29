@@ -80,12 +80,17 @@ export function compileMultiSync(
       }
     }
     const hasThis = func.bytecode.some(i => i.op === "LoadThis");
+    // インライン候補: funcIndex に含まれる全関数
+    const inlineCandidates = new Map<string, BytecodeFunction>();
+    for (const f of funcs) inlineCandidates.set(f.name, f);
     const ctx: TranslateContext = {
       spec: t, isI32: t === "i32", wasmType, funcIndex,
       arrayLocals, hasMemory: anyArrayLocals || anyObjectProps,
       objectPropOffsets, hasThis,
       heapPtrGlobal,
       objectSize: objectPropOffsets.size * 4,
+      inlineCandidates,
+      inlineLocalOffset: 0,
     };
     // hasThis な関数は this を追加パラメータとして渡す
     const paramCount = func.paramCount + (hasThis ? 1 : 0);
@@ -96,6 +101,16 @@ export function compileMultiSync(
     const needsObjTemp = func.bytecode.some(i => i.op === "SetPropertyAssign");
     if (needsTempLocal) extraLocals++;
     if (needsObjTemp) extraLocals += 2;
+    // インライン展開用の extra locals (コールバック引数退避)
+    // LdaLocal + Call パターンがあればインライン引数の最大数分を追加
+    let maxInlineArgs = 0;
+    for (let i = 1; i < func.bytecode.length; i++) {
+      if (func.bytecode[i].op === "Call" && func.bytecode[i - 1].op === "LdaLocal") {
+        const argc = func.bytecode[i].operand!;
+        if (argc > maxInlineArgs) maxInlineArgs = argc;
+      }
+    }
+    extraLocals += maxInlineArgs;
     const body = translateBytecode(func, ctx);
     if (!body) return null;
     builder.addFunction(func.name, params, results, body, extraLocals > 0 ? extraLocals : 0);
@@ -152,7 +167,9 @@ export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationTy
   const hasThis = func.bytecode.some(i => i.op === "LoadThis");
   if (objectPropOffsets.size > 0 || hasThis) hasMemory = true;
   const hasConstruct = func.bytecode.some(i => i.op === "Construct");
-  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: hasConstruct ? 0 : -1, objectSize: objectPropOffsets.size * 4 };
+  const inlineCandidates = new Map<string, BytecodeFunction>();
+  if (allFuncs) for (const f of allFuncs) inlineCandidates.set(f.name, f);
+  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: hasConstruct ? 0 : -1, objectSize: objectPropOffsets.size * 4, inlineCandidates, inlineLocalOffset: 0 };
 
   const body = translateBytecode(func, ctx);
   if (!body) return null;
@@ -296,8 +313,10 @@ type TranslateContext = {
   hasMemory: boolean;
   objectPropOffsets: Map<string, number>;
   hasThis: boolean;
-  heapPtrGlobal: number;  // bump allocator の global index (-1 = なし)
-  objectSize: number;     // 1 オブジェクトのバイト数 (propCount * 4)
+  heapPtrGlobal: number;
+  objectSize: number;
+  inlineCandidates: Map<string, BytecodeFunction>;  // 名前 → インライン対象の関数
+  inlineLocalOffset: number;  // インライン展開時の local offset
 };
 
 // jsmini バイトコード → Wasm 命令列に変換
@@ -596,11 +615,54 @@ function translateRange(
       }
 
       case "Call": {
+        const argc = instr.operand!;
+        // パターン 1: LdaGlobal + Call → Wasm 内の関数呼び出し
         if (pc > 0 && bytecode[pc - 1].op === "LdaGlobal") {
           const name = constants[bytecode[pc - 1].operand!] as string;
           const idx = funcIndex.get(name);
           if (idx !== undefined) {
             out.push(WASM_OP.call, idx);
+            break;
+          }
+        }
+        // パターン 2: LdaLocal + Call → コールバック関数のインライン展開
+        if (pc > 0 && bytecode[pc - 1].op === "LdaLocal") {
+          // LdaLocal は既にスタックに fn を push しているが、fn は関数参照で Wasm に持てない
+          // → fn を drop して、インライン候補から本体を展開
+          const calleeName = bytecode[pc - 1].op === "LdaLocal" ? null : null;
+          // inlineCandidates から paramCount が一致する関数を探す
+          let inlineTarget: BytecodeFunction | null = null;
+          for (const [name, candidate] of ctx.inlineCandidates) {
+            if (candidate.paramCount === argc && candidate !== func) {
+              inlineTarget = candidate;
+              break;
+            }
+          }
+          if (inlineTarget && isI32) {
+            // LdaLocal が push した fn 参照を drop
+            out.push(WASM_OP.drop);
+            // スタック上の引数 N 個を extra local に退避
+            // スタック: [arg0, arg1, ..., argN-1] (argN-1 が top)
+            const baseLocal = func.localCount + (func.bytecode.some(i => i.op === "SetPropertyComputed") ? 1 : 0) + (func.bytecode.some(i => i.op === "SetPropertyAssign") ? 2 : 0);
+            for (let i = argc - 1; i >= 0; i--) {
+              out.push(WASM_OP.local_set, baseLocal + i);
+            }
+            // インライン対象の本体を展開
+            // LdaLocal K → local.get (baseLocal + K)
+            const inlineBytecode = inlineTarget.bytecode;
+            for (let j = 0; j < inlineBytecode.length; j++) {
+              const ii = inlineBytecode[j];
+              if (ii.op === "LdaLocal") {
+                out.push(WASM_OP.local_get, baseLocal + ii.operand!);
+              } else if (ii.op === "Return") {
+                // Return は最初の 1 回だけ: 値をスタックに残して終了
+                break;
+              } else {
+                // その他の命令は通常通り変換
+                const saved = { ...ctx, inlineLocalOffset: baseLocal };
+                if (!translateRange(inlineTarget, j, j + 1, saved, out)) return false;
+              }
+            }
             break;
           }
         }
