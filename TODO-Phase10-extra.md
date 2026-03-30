@@ -109,16 +109,19 @@ var s = ""; for (var i = 0; i < 1000; i++) { s = s + "x"; }
 // → TW 2.5ms / VM 4.0ms
 ```
 
-**未実装の理由**:
-- Wasm GC array への JS → Wasm ブリッジが複雑 (`array.new_fixed` は Wasm 内のみ)
-- 文字列のバイト配列を Wasm に渡すには linear memory か array.new + array.set ループが必要
-- 将来: Wasm GC array のインポート API が整備されれば実装可能
+**手書き Wasm で検証済み**:
+- [x] linear memory + `i32.load8_u` で文字列バイト比較を Wasm 化
+- [x] strcmp(a, a_len, b, b_len): 長さ比較 → バイトループ比較
+- [x] ベンチ: Wasm strcmp 100K 回 = 2.05ms (VM の `===` 100K 回 = ~730ms、**350 倍速い**)
+- [ ] wasm-gc-compiler への自動組み込み (VM の StrictEqual から自動で Wasm strcmp を呼ぶ)
+  - flatten + linear memory にコピー → Wasm strcmp 呼び出し → 結果を返す
+  - 未実装 (組み込みの仕組みが複雑)
 
 ---
 
 ## 10E-5. クロージャを Wasm GC で JIT
 
-- [ ] クロージャの環境を Wasm GC struct で表現
+- [x] クロージャの環境を Wasm GC struct で表現
   ```wasm
   ;; function makeAdder(n) { return function(x) { return x + n; }; }
   (type $Env (struct (field $n i32)))
@@ -131,10 +134,12 @@ var s = ""; for (var i = 0; i < 1000; i++) { s = s + "x"; }
 - [ ] 環境のキャプチャ: 外側の関数のローカル変数を struct にまとめる
   - `makeAdder(5)` → `struct.new $Env (i32.const 5)` → ref を返す
   - `add5(10)` → `$inner($env, 10)` → env から n を struct.get
-- [ ] バイトコード解析: どの変数がキャプチャされるか検出
-  - 内側関数の `LdaGlobal` が外側関数のローカル変数を参照 → キャプチャ対象
-- [ ] テスト: `makeAdder(5)(10)` = 15 が Wasm GC で動く
-- [ ] テスト: `forEach(arr, function(x) { sum = sum + x; })` のコールバッククロージャ
+- [ ] バイトコード解析: どの変数がキャプチャされるか自動検出 (手動は検証済み)
+- [x] テスト: `makeAdder(5)(10)` = 15 — 手書き Wasm GC で動作確認
+- [x] テスト: 複数変数キャプチャ `f(x) = 3x + 7` — struct { a, b } で動作確認
+- [x] テスト: 10 万個のクロージャ生成 → OOM しない (V8 GC が Env struct を回収)
+- [x] ベンチ: apply × 100K = 2.93ms
+- [ ] wasm-gc-compiler への自動組み込み (未実装)
 
 ---
 
