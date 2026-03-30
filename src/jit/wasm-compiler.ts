@@ -93,8 +93,9 @@ export function compileMultiSync(
       inlineLocalOffset: 0,
       stringLocals: new Set(),
     };
-    // hasThis な関数は this を追加パラメータとして渡す
-    const paramCount = func.paramCount + (hasThis ? 1 : 0);
+    // hasThis な関数は this を追加パラメータ、upvalue も追加パラメータとして渡す
+    const upvalueCount = func.upvalues?.length ?? 0;
+    const paramCount = func.paramCount + (hasThis ? 1 : 0) + upvalueCount;
     const params = new Array(paramCount).fill(wasmType);
     const results = [wasmType];
     let extraLocals = func.localCount - func.paramCount;
@@ -347,6 +348,14 @@ function translateRange(
     switch (instr.op) {
       case "LdaLocal":
         out.push(WASM_OP.local_get, instr.operand!);
+        break;
+      case "LdaUpvalue":
+        // upvalue は通常パラメータの後に追加パラメータとして渡される
+        // local index = func.paramCount + (hasThis ? 1 : 0) + upvalue index
+        out.push(WASM_OP.local_get, func.paramCount + (ctx.hasThis ? 1 : 0) + instr.operand!);
+        break;
+      case "StaUpvalue":
+        out.push(WASM_OP.local_set, func.paramCount + (ctx.hasThis ? 1 : 0) + instr.operand!);
         break;
       case "StaLocal":
         // jsmini の StaLocal は値をスタックに残す (peek)

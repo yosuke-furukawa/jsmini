@@ -507,8 +507,12 @@ export class VM {
             if (this.feedback) this.feedback.recordCall(fn, args);
             // JIT: Wasm キャッシュがあればそちらで実行
             if (this.jit) {
-              const jitResult = this.jit.tryCall(fn, args);
+              // upvalue の値を追加引数として渡す
+              const upvalueValues = closureBoxes.map(b => b.value);
+              const jitResult = this.jit.tryCall(fn, args, upvalueValues);
               if (jitResult !== null) {
+                // upvalue の書き戻し (StaUpvalue で変更された可能性)
+                // → Wasm は値渡しなので書き戻しは不可。読み取り専用のクロージャのみ JIT 対象
                 this.push(jitResult.result);
                 break;
               }

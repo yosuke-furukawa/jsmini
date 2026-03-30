@@ -47,7 +47,7 @@ export class JitManager {
     this.tierLog.push(`[TIER] ${func.name}: ${tier} (call #${count})`);
   }
 
-  tryCall(func: BytecodeFunction, args: unknown[]): { result: unknown } | null {
+  tryCall(func: BytecodeFunction, args: unknown[], upvalueValues: unknown[] = []): { result: unknown } | null {
     const fb = this.feedback.get(func);
     const callCount = fb?.callCount ?? 0;
 
@@ -64,7 +64,7 @@ export class JitManager {
         this.logTier(func, "Bytecode VM", callCount);
         return null;
       }
-      return this.executeWasm(func, cached, args, callCount);
+      return this.executeWasm(func, cached, args, callCount, upvalueValues);
     }
 
     // しきい値チェック
@@ -116,7 +116,7 @@ export class JitManager {
 
     if (compiled) {
       this.logTier(func, `→ Wasm compiled (${spec}, arrays: [${arrayArgIndices}])`, callCount);
-      return this.executeWasm(func, compiled, args, callCount);
+      return this.executeWasm(func, compiled, args, callCount, upvalueValues);
     }
 
     this.logTier(func, "Bytecode VM", callCount);
@@ -183,6 +183,7 @@ export class JitManager {
     cached: CachedWasm,
     args: unknown[],
     callCount: number,
+    upvalueValues: unknown[] = [],
   ): { result: unknown } | null {
     const { fn, memory, arrayArgIndices } = cached;
 
@@ -207,6 +208,20 @@ export class JitManager {
       } else {
         this.deoptimize(func, args);
         this.logTier(func, "Bytecode VM (after deopt)", callCount);
+        return null;
+      }
+    }
+
+    // upvalue の値を追加引数として渡す
+    for (const uv of upvalueValues) {
+      if (typeof uv === "number") {
+        wasmArgs.push(uv);
+      } else if (isJSString(uv)) {
+        const id = getInternId(uv);
+        if (id < 0) { this.deoptimize(func, args); return null; }
+        wasmArgs.push(id);
+      } else {
+        // upvalue が数値/文字列でない → JIT 不可
         return null;
       }
     }
