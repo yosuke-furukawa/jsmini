@@ -90,16 +90,29 @@ Phase 10+:
 
 ---
 
-## 10E-4. ConsString を Wasm GC で表現
+## 10E-4. 文字列の Wasm 化 (flatten アプローチ)
 
-- [ ] ConsString → Wasm GC struct
-  ```wasm
-  (type $SeqString (struct (field $data (ref $i8array)) (field $length i32)))
-  (type $ConsString (struct (field $left (ref $String)) (field $right (ref $String)) (field $length i32)))
-  ```
-- [ ] 文字列連結: struct.new $ConsString
-- [ ] flatten: Wasm 内で ConsString を SeqString に変換
-- [ ] テスト: 文字列操作が Wasm GC で動く
+**方針**: ConsString を Wasm に持ち込むのではなく、Wasm に渡す直前に flatten。
+Wasm 内では常にフラットなバイト配列として扱う。
+
+**JIT 可能なケース** (文字列を参照のみ):
+```js
+// intern 済み文字列の比較ループ → 参照比較が Wasm 化可能
+function strcmp(a, b) { if (a === b) { return 0; } return 1; }
+// → TW 67ms / VM 73ms
+```
+
+**JIT 不可なケース** (ループ内で連結):
+```js
+// 文字列がループ内で成長 → flatten では解決できない
+var s = ""; for (var i = 0; i < 1000; i++) { s = s + "x"; }
+// → TW 2.5ms / VM 4.0ms
+```
+
+**未実装の理由**:
+- Wasm GC array への JS → Wasm ブリッジが複雑 (`array.new_fixed` は Wasm 内のみ)
+- 文字列のバイト配列を Wasm に渡すには linear memory か array.new + array.set ループが必要
+- 将来: Wasm GC array のインポート API が整備されれば実装可能
 
 ---
 
