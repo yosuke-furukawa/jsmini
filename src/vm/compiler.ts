@@ -670,7 +670,10 @@ class BytecodeCompiler {
           this.compileExpression(expr.callee.object);
           // メソッドを push
           this.emit("Dup"); // obj を複製 (this 用に残す)
-          if (!expr.callee.computed && expr.callee.property.type === "Identifier") {
+          if (expr.callee.computed) {
+            this.compileExpression(expr.callee.property);
+            this.emit("GetPropertyComputed");
+          } else if (expr.callee.property.type === "Identifier") {
             const nameIdx = this.addConstant(expr.callee.property.name);
             this.emitWithIC("GetProperty", nameIdx);
           }

@@ -630,6 +630,15 @@ export class VM {
             // ネイティブメソッド (console.log 等)
             const result = (method as Function).apply(thisObj, args);
             this.push(result);
+          } else if (typeof method === "object" && method !== null && "__closure" in method) {
+            // クロージャオブジェクト
+            const closure = method as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
+            const fn = closure.func;
+            const locals = new Array(fn.localCount).fill(undefined);
+            for (let i = 0; i < fn.paramCount; i++) {
+              locals[i] = args[i] ?? undefined;
+            }
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
           } else if (typeof method === "object" && method !== null && "bytecode" in method) {
             const fn = method as BytecodeFunction;
             const locals = new Array(fn.localCount).fill(undefined);

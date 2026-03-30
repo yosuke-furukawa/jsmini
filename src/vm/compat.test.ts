@@ -217,9 +217,18 @@ const cases: [string, string][] = [
     }
     make()();
   `],
-  // 注: arr[0]() (配列に格納した関数の呼び出し) は VM 未対応
-  // computed member の CallMethod が正しく関数を取得できないバグ
-  // クロージャ固有の問題ではない
+  ["クロージャ: ループ内でクロージャ生成", `
+    function run() {
+      var fns = [];
+      for (var i = 0; i < 3; i = i + 1) {
+        fns[i] = function(x) { return x + i; };
+      }
+      return fns[0](10) + fns[1](10) + fns[2](10);
+    }
+    run();
+  `],
+  ["配列に格納した関数の呼び出し", "var arr = []; arr[0] = function() { return 42; }; arr[0]();"],
+  ["配列に格納したクロージャの呼び出し", "function f(n) { return function() { return n; }; } var arr = []; arr[0] = f(99); arr[0]();"],
 
   // クロージャ: 2段以上のネスト
   ["クロージャ 2段: a → b → c", `
