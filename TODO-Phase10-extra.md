@@ -113,9 +113,10 @@ var s = ""; for (var i = 0; i < 1000; i++) { s = s + "x"; }
 - [x] linear memory + `i32.load8_u` で文字列バイト比較を Wasm 化
 - [x] strcmp(a, a_len, b, b_len): 長さ比較 → バイトループ比較
 - [x] ベンチ: Wasm strcmp 100K 回 = 2.05ms (VM の `===` 100K 回 = ~730ms、**350 倍速い**)
-- [ ] wasm-gc-compiler への自動組み込み (VM の StrictEqual から自動で Wasm strcmp を呼ぶ)
-  - flatten + linear memory にコピー → Wasm strcmp 呼び出し → 結果を返す
-  - 未実装 (組み込みの仕組みが複雑)
+- [x] JitManager への自動組み込み: intern id (i32) で文字列引数を Wasm に渡す
+  - interned_string → i32 (intern id)、StrictEqual → i32.eq
+  - strcmp("hello","hello") x10K: TW 71ms / VM+JIT 66ms (自動 JIT)
+  - 487 テストパス (deopt テスト含む)
 
 ---
 
@@ -139,7 +140,9 @@ var s = ""; for (var i = 0; i < 1000; i++) { s = s + "x"; }
 - [x] テスト: 複数変数キャプチャ `f(x) = 3x + 7` — struct { a, b } で動作確認
 - [x] テスト: 10 万個のクロージャ生成 → OOM しない (V8 GC が Env struct を回収)
 - [x] ベンチ: apply × 100K = 2.93ms
-- [ ] wasm-gc-compiler への自動組み込み (未実装)
+- [ ] wasm-gc-compiler への自動組み込み (VM にクロージャ機構がないため未実装)
+  - VM が外側関数のローカル変数を参照できないのが前提の障壁
+  - 手書き Wasm GC では動作確認済み (makeAdder, multi-var capture)
 
 ---
 
