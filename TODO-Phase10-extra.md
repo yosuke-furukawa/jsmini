@@ -97,16 +97,16 @@ Wasm 内では常にフラットなバイト配列として扱う。
 
 **JIT 可能なケース** (文字列を参照のみ):
 ```js
-// intern 済み文字列の比較ループ → 参照比較が Wasm 化可能
+// intern 済み文字列の比較ループ → intern id (i32) で Wasm 化
 function strcmp(a, b) { if (a === b) { return 0; } return 1; }
-// → TW 67ms / VM 73ms
+// → TW 70.8ms / VM 76.3ms / VM+JIT 66.2ms (1.1x vs TW — JIT で TW に勝つ)
 ```
 
 **JIT 不可なケース** (ループ内で連結):
 ```js
-// 文字列がループ内で成長 → flatten では解決できない
+// 文字列がループ内で成長 → Wasm 化不可 (VM のまま)
 var s = ""; for (var i = 0; i < 1000; i++) { s = s + "x"; }
-// → TW 2.5ms / VM 4.0ms
+// → TW 2.5ms / VM 4.0ms (JIT 不可、変化なし)
 ```
 
 **手書き Wasm で検証済み**:
