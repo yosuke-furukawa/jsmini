@@ -7,12 +7,16 @@ import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringTo
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 import { Heap } from "./heap.js";
 
+// Upvalue ボックス: ミュータブルキャプチャ用の参照ラッパー
+type UpvalueBox = { value: unknown };
+
 type CallFrame = {
   func: BytecodeFunction;
   pc: number;
   locals: unknown[];
   thisValue: unknown;
   icSlots: ICSlot[];
+  upvalueBoxes: UpvalueBox[];  // キャプチャされた変数のボックス
 };
 
 // スタックベースの Bytecode VM
@@ -77,6 +81,7 @@ export class VM {
       locals: new Array(func.localCount).fill(undefined),
       thisValue: undefined,
       icSlots: this.createICSlots(func),
+      upvalueBoxes: [],
     });
 
     return this.run();
@@ -102,8 +107,43 @@ export class VM {
         // 定数ロード
         case "LdaConst": {
           const val = constants[instr.operand!];
-          // 文字列リテラルは intern 済み JSString に変換
-          this.push(typeof val === "string" ? internString(val) : val);
+          if (typeof val === "string") {
+            this.push(internString(val));
+          } else if (typeof val === "object" && val !== null && "bytecode" in val) {
+            const fn = val as BytecodeFunction;
+            if (fn.upvalues && fn.upvalues.length > 0) {
+              // upvalue をキャプチャ: 親のローカルスロットをボックスで共有
+              // フレームごとにスロット → ボックスのマッピングを遅延作成
+              if (!(frame as any).__localBoxes) {
+                (frame as any).__localBoxes = new Map<number, UpvalueBox>();
+              }
+              const localBoxes = (frame as any).__localBoxes as Map<number, UpvalueBox>;
+
+              const capturedBoxes: UpvalueBox[] = fn.upvalues.map(uv => {
+                if (uv.parentSlot >= 0) {
+                  // 親のローカル変数をボックスで共有
+                  let box = localBoxes.get(uv.parentSlot);
+                  if (!box) {
+                    box = { value: frame.locals[uv.parentSlot] };
+                    localBoxes.set(uv.parentSlot, box);
+                  } else {
+                    // ボックスの値を最新のローカル値に同期
+                    box.value = frame.locals[uv.parentSlot];
+                  }
+                  return box;
+                } else {
+                  // 親の upvalue を引き継ぐ (ネストしたクロージャ)
+                  return frame.upvalueBoxes[-(uv.parentSlot + 1)];
+                }
+              });
+              // BytecodeFunction + キャプチャ済みボックスのペア
+              this.push({ __closure: true, func: fn, capturedBoxes });
+            } else {
+              this.push(val);
+            }
+          } else {
+            this.push(val);
+          }
           break;
         }
         case "LdaUndefined":
@@ -224,11 +264,27 @@ export class VM {
         }
 
         // ローカル変数
-        case "LdaLocal":
-          this.push(frame.locals[instr.operand!]);
+        case "LdaLocal": {
+          const slot = instr.operand!;
+          const box = (frame as any).__localBoxes?.get(slot) as UpvalueBox | undefined;
+          this.push(box ? box.value : frame.locals[slot]);
           break;
-        case "StaLocal":
-          frame.locals[instr.operand!] = this.peek();
+        }
+        case "StaLocal": {
+          const slot = instr.operand!;
+          const val = this.peek();
+          frame.locals[slot] = val;
+          const box = (frame as any).__localBoxes?.get(slot) as UpvalueBox | undefined;
+          if (box) box.value = val;
+          break;
+        }
+
+        // Upvalue (クロージャでキャプチャされた外部変数)
+        case "LdaUpvalue":
+          this.push(frame.upvalueBoxes[instr.operand!].value);
+          break;
+        case "StaUpvalue":
+          frame.upvalueBoxes[instr.operand!].value = this.peek();
           break;
 
         // グローバル変数
@@ -435,8 +491,18 @@ export class VM {
             args.unshift(this.pop());
           }
 
-          if (typeof callee === "object" && callee !== null && "bytecode" in callee) {
-            const fn = callee as BytecodeFunction;
+          // クロージャオブジェクトか通常の BytecodeFunction か判定
+          let fn: BytecodeFunction | null = null;
+          let closureBoxes: UpvalueBox[] = [];
+          if (typeof callee === "object" && callee !== null && "__closure" in callee) {
+            const closure = callee as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
+            fn = closure.func;
+            closureBoxes = closure.capturedBoxes;
+          } else if (typeof callee === "object" && callee !== null && "bytecode" in callee) {
+            fn = callee as BytecodeFunction;
+          }
+
+          if (fn) {
             // 型フィードバック記録
             if (this.feedback) this.feedback.recordCall(fn, args);
             // JIT: Wasm キャッシュがあればそちらで実行
@@ -451,7 +517,7 @@ export class VM {
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn) });
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
           } else {
             throw new Error("Not a function");
           }
@@ -478,7 +544,7 @@ export class VM {
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn) });
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: [] });
           } else {
             throw new Error("Not a function");
           }
@@ -520,7 +586,7 @@ export class VM {
             for (let i = 0; i < ctor.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor) });
+            this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor), upvalueBoxes: [] });
             (frame as any).__pendingNewObj = newObj;
           } else {
             throw new Error("Not a constructor");

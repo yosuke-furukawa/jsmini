@@ -171,6 +171,28 @@ const cases: [string, string][] = [
     });
     result[0] + result[1] + result[2];
   `],
+
+  // クロージャ
+  ["クロージャ: makeAdder", "function f(n) { return function(m) { return n + m; }; } f(5)(10);"],
+  ["クロージャ: counter", `
+    function counter() {
+      var c = 0;
+      return function() { c = c + 1; return c; };
+    }
+    var inc = counter();
+    inc();
+    inc();
+    inc();
+  `],
+  ["クロージャ: forEach + 外部変数", `
+    function forEach(arr, fn) { for (var i = 0; i < arr.length; i = i + 1) { fn(arr[i]); } }
+    function test() {
+      var sum = 0;
+      forEach([1, 2, 3], function(n) { sum = sum + n; });
+      return sum;
+    }
+    test();
+  `],
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {

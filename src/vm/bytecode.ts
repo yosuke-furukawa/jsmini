@@ -35,6 +35,8 @@ export type Opcode =
   | "StaGlobal"       // StaGlobal <nameIndex> — スタックトップをグローバル変数に格納 (pop しない)
   | "LdaLocal"        // LdaLocal <slot> — ローカル変数を push
   | "StaLocal"        // StaLocal <slot> — スタックトップをローカル変数に格納 (pop しない)
+  | "LdaUpvalue"      // LdaUpvalue <index> — キャプチャされた外部変数を push
+  | "StaUpvalue"      // StaUpvalue <index> — スタックトップをキャプチャ変数に格納 (pop しない)
 
   // オブジェクト / 配列
   | "CreateObject"    // 空オブジェクトを push
@@ -98,6 +100,11 @@ export type ExceptionHandler = {
   finallyStart: number; // finally ブロック開始アドレス (なければ -1)
 };
 
+export type UpvalueInfo = {
+  name: string;
+  parentSlot: number;  // 親関数のローカルスロット番号
+};
+
 export type BytecodeFunction = {
   name: string;
   paramCount: number;
@@ -105,7 +112,8 @@ export type BytecodeFunction = {
   bytecode: Instruction[];
   constants: unknown[];
   handlers: ExceptionHandler[];
-  icSlotCount: number;  // IC スロットの数
+  icSlotCount: number;
+  upvalues: UpvalueInfo[];  // キャプチャする外部変数の情報
 };
 
 // バイトコードを人間が読める形式にダンプ（ネスト関数も再帰的に表示）

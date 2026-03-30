@@ -23,6 +23,7 @@ class BytecodeCompiler {
   // ループスタック: break/continue のジャンプ先パッチ用
   private loopStack: { breakPatches: number[]; continueTarget: number }[] = [];
   private icSlotCount = 0;
+  private upvalues: { name: string; parentSlot: number }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
     this.parent = parent;
@@ -73,7 +74,37 @@ class BytecodeCompiler {
     return this.locals.get(name) ?? null;
   }
 
-  // 変数のロード: 関数内ならローカル、トップレベルならグローバル
+  // 親コンパイラのローカルを再帰的に探索して upvalue index を返す (-1 = 見つからない)
+  private resolveUpvalue(name: string): number {
+    if (!this.parent) return -1;
+    // 親のローカルにあるか
+    const parentSlot = this.parent.resolveLocal(name);
+    if (parentSlot !== null) {
+      // 既に同じ upvalue があれば再利用
+      for (let i = 0; i < this.upvalues.length; i++) {
+        if (this.upvalues[i].name === name) return i;
+      }
+      const idx = this.upvalues.length;
+      this.upvalues.push({ name, parentSlot });
+      return idx;
+    }
+    // 親の upvalue にあるか (ネストしたクロージャ)
+    if (this.parent.isFunction) {
+      const parentUpvalue = this.parent.resolveUpvalue(name);
+      if (parentUpvalue >= 0) {
+        for (let i = 0; i < this.upvalues.length; i++) {
+          if (this.upvalues[i].name === name) return i;
+        }
+        const idx = this.upvalues.length;
+        // parentSlot = -1 - parentUpvalue で「upvalue 参照」を表す
+        this.upvalues.push({ name, parentSlot: -(parentUpvalue + 1) });
+        return idx;
+      }
+    }
+    return -1;
+  }
+
+  // 変数のロード: ローカル → upvalue → グローバル の優先順で解決
   emitLoad(name: string): void {
     if (this.isFunction) {
       const slot = this.resolveLocal(name);
@@ -81,8 +112,12 @@ class BytecodeCompiler {
         this.emit("LdaLocal", slot);
         return;
       }
+      const upIdx = this.resolveUpvalue(name);
+      if (upIdx >= 0) {
+        this.emit("LdaUpvalue", upIdx);
+        return;
+      }
     }
-    // グローバル
     const nameIdx = this.addConstant(name);
     this.emit("LdaGlobal", nameIdx);
   }
@@ -93,6 +128,11 @@ class BytecodeCompiler {
       const slot = this.resolveLocal(name);
       if (slot !== null) {
         this.emit("StaLocal", slot);
+        return;
+      }
+      const upIdx = this.resolveUpvalue(name);
+      if (upIdx >= 0) {
+        this.emit("StaUpvalue", upIdx);
         return;
       }
     }
@@ -109,6 +149,7 @@ class BytecodeCompiler {
       constants: this.constants,
       handlers: this.handlers,
       icSlotCount: this.icSlotCount,
+      upvalues: this.upvalues,
     };
   }
 

@@ -48,7 +48,7 @@ outer(1) を呼ぶ → outer の locals[0] = 1 (n)
 
 ## 11-0. Upvalue の型定義
 
-- [ ] `BytecodeFunction` に `upvalues` 情報を追加
+- [x] `BytecodeFunction` に `upvalues` 情報を追加
   ```typescript
   type UpvalueInfo = {
     name: string;
@@ -56,39 +56,39 @@ outer(1) を呼ぶ → outer の locals[0] = 1 (n)
   };
   // BytecodeFunction.upvalues: UpvalueInfo[]
   ```
-- [ ] 新しい opcode: `LdaUpvalue <index>`, `StaUpvalue <index>`
-- [ ] VM の CallFrame に `upvalueValues: unknown[]` を追加
+- [x] 新しい opcode: `LdaUpvalue <index>`, `StaUpvalue <index>`
+- [x] VM の CallFrame に `upvalueValues: unknown[]` を追加
 
 ---
 
 ## 11-1. コンパイラ — Upvalue の検出
 
-- [ ] 子コンパイラが変数を解決するとき:
+- [x] 子コンパイラが変数を解決するとき:
   1. 自分のローカルにある → `LdaLocal`
   2. 自分のローカルにない + 親のローカルにある → `LdaUpvalue` (upvalue として登録)
   3. どこにもない → `LdaGlobal`
-- [ ] `resolveLocal` を拡張: 親コンパイラのローカルを再帰的に探索
-- [ ] 子コンパイラの `upvalues` リストにキャプチャ情報を記録
-- [ ] テスト: `inner` のバイトコードに `LdaUpvalue 0` が出ること
+- [x] `resolveLocal` を拡張: 親コンパイラのローカルを再帰的に探索
+- [x] 子コンパイラの `upvalues` リストにキャプチャ情報を記録
+- [x] テスト: `inner` のバイトコードに `LdaUpvalue 0` が出ること
 
 ---
 
 ## 11-2. VM — Upvalue の実行
 
-- [ ] `LdaConst` で BytecodeFunction をスタックに push するとき:
+- [x] `LdaConst` で BytecodeFunction をスタックに push するとき:
   - 親フレームの locals から upvalue の値をキャプチャ
   - 関数オブジェクトに `capturedValues: unknown[]` を付与
-- [ ] `Call` で関数を呼ぶとき:
+- [x] `Call` で関数を呼ぶとき:
   - CallFrame に `upvalueValues` を設定
-- [ ] `LdaUpvalue <index>` — `frame.upvalueValues[index]` を push
-- [ ] `StaUpvalue <index>` — `frame.upvalueValues[index]` に store
-- [ ] テスト: `outer(1)(5)` が 6 を返す
+- [x] `LdaUpvalue <index>` — `frame.upvalueValues[index]` を push
+- [x] `StaUpvalue <index>` — `frame.upvalueValues[index]` に store
+- [x] テスト: `outer(1)(5)` が 6 を返す
 
 ---
 
 ## 11-3. ミュータブルなキャプチャ
 
-- [ ] キャプチャした変数を内側から書き換えるケース:
+- [x] キャプチャした変数を内側から書き換えるケース:
   ```js
   function counter() {
     var count = 0;
@@ -98,21 +98,21 @@ outer(1) を呼ぶ → outer の locals[0] = 1 (n)
   c(); // 1
   c(); // 2
   ```
-- [ ] 値コピーではなく **参照** でキャプチャする必要がある
+- [x] 値コピーではなく **参照** でキャプチャする必要がある
   - Lua の upvalue: ローカル変数への参照 (open upvalue) → 関数終了時に値をコピー (closed upvalue)
   - シンプル版: 配列の要素への参照 `{ value: unknown }` ボックス
-- [ ] テスト: counter パターン
+- [x] テスト: counter パターン
 
 ---
 
 ## 11-4. compat テスト + ベンチマーク
 
-- [ ] compat.test.ts にクロージャテストケースを追加:
+- [x] compat.test.ts にクロージャテストケースを追加:
   - `function f(n) { return function(m) { return n + m; }; } f(5)(10);` → 15
   - `function counter() { var c = 0; return function() { c = c + 1; return c; }; } var inc = counter(); inc(); inc();` → 2
   - forEach + コールバックで外側変数を参照
-- [ ] 既存テスト全パス
-- [ ] Phase 10E-5 のクロージャ JIT が VM 上でも動くことを確認
+- [x] 既存テスト全パス
+- [x] Phase 10E-5 のクロージャ JIT が VM 上でも動くことを確認
 
 ---
 
