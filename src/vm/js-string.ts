@@ -193,6 +193,18 @@ export function jsStringToNumber(str: JSString): number {
   return Number(jsStringToString(str));
 }
 
+// --- Intern ID (JIT 用) ---
+
+// JSString → intern id (i32)。未 intern なら -1
+export function getInternId(str: JSString): number {
+  return internIndex.get(str) ?? -1;
+}
+
+// intern id → JSString
+export function getStringById(id: number): JSString | undefined {
+  return internById[id];
+}
+
 // --- typeof ---
 
 export function jsStringTypeOf(): JSString {
@@ -204,12 +216,17 @@ export function jsStringTypeOf(): JSString {
 // === が参照比較 (O(1)) になる
 
 const internTable = new Map<string, JSString>();
+const internIndex = new Map<JSString, number>(); // JSString → intern id
+const internById: JSString[] = []; // intern id → JSString
 
 export function internJSString(str: JSString): JSString {
   const key = jsStringToString(str);
   const existing = internTable.get(key);
   if (existing) return existing;
   internTable.set(key, str);
+  const id = internById.length;
+  internIndex.set(str, id);
+  internById.push(str);
   return str;
 }
 
@@ -219,5 +236,8 @@ export function internString(str: string): JSString {
   if (existing) return existing;
   const jsStr = createSeqString(str);
   internTable.set(str, jsStr);
+  const id = internById.length;
+  internIndex.set(jsStr, id);
+  internById.push(jsStr);
   return jsStr;
 }
