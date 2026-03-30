@@ -365,6 +365,11 @@ function translateRange(
         break;
       case "LdaConst": {
         const val = constants[instr.operand!];
+        // BytecodeFunction (クロージャ参照) → ダミー値 (インライン展開で消える)
+        if (typeof val === "object" && val !== null && "bytecode" in val) {
+          out.push(WASM_OP.i32_const, ...i32ToLEB128(0));
+          break;
+        }
         if (typeof val !== "number") return false;
         if (isI32) {
           out.push(WASM_OP.i32_const, ...i32ToLEB128(val | 0));
@@ -693,11 +698,26 @@ function translateRange(
               const ii = inlineBytecode[j];
               if (ii.op === "LdaLocal") {
                 out.push(WASM_OP.local_get, baseLocal + ii.operand!);
+              } else if (ii.op === "LdaUpvalue") {
+                // 1 段クロージャ: upvalue は親関数のローカル変数
+                // upvalue の parentSlot が親の locals のどこかを指す
+                const uvInfo = inlineTarget.upvalues?.[ii.operand!];
+                if (uvInfo && uvInfo.parentSlot >= 0) {
+                  // 親関数 (= 今コンパイル中の func) の local を参照
+                  out.push(WASM_OP.local_get, uvInfo.parentSlot);
+                } else {
+                  return false; // 多段 or 解決不能
+                }
+              } else if (ii.op === "StaUpvalue") {
+                const uvInfo = inlineTarget.upvalues?.[ii.operand!];
+                if (uvInfo && uvInfo.parentSlot >= 0) {
+                  out.push(WASM_OP.local_set, uvInfo.parentSlot);
+                } else {
+                  return false;
+                }
               } else if (ii.op === "Return") {
-                // Return は最初の 1 回だけ: 値をスタックに残して終了
                 break;
               } else {
-                // その他の命令は通常通り変換
                 const saved = { ...ctx, inlineLocalOffset: baseLocal };
                 if (!translateRange(inlineTarget, j, j + 1, saved, out)) return false;
               }
