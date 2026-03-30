@@ -193,6 +193,80 @@ const cases: [string, string][] = [
     }
     test();
   `],
+
+  // クロージャ: 追加パターン
+  ["クロージャ: 引数なし関数がキャプチャ", `
+    function make() {
+      var x = 42;
+      return function() { return x; };
+    }
+    make()();
+  `],
+  ["クロージャ: 複数変数キャプチャ", `
+    function make(a, b) {
+      return function(x) { return a * x + b; };
+    }
+    make(3, 7)(10);
+  `],
+  ["クロージャ: ミュータブル + 読み取り", `
+    function make() {
+      var count = 0;
+      var inc = function() { count = count + 1; };
+      var get = function() { return count; };
+      return function() { inc(); inc(); return get(); };
+    }
+    make()();
+  `],
+  // 注: "ループ内でクロージャ生成 → 配列に格納" は VM 未対応
+  // (配列からクロージャオブジェクトを取り出すとき __closure が失われる)
+
+  // クロージャ: 2段以上のネスト
+  ["クロージャ 2段: a → b → c", `
+    function a(x) {
+      return function b(y) {
+        return function c(z) {
+          return x + y + z;
+        };
+      };
+    }
+    a(1)(2)(3);
+  `],
+  ["クロージャ 2段: 外側の変数だけ参照", `
+    function outer(x) {
+      return function mid() {
+        return function inner() {
+          return x;
+        };
+      };
+    }
+    outer(99)()();
+  `],
+  ["クロージャ 2段: 各層の変数を参照", `
+    function a(x) {
+      var ax = x * 10;
+      return function b(y) {
+        return function c() {
+          return ax + y;
+        };
+      };
+    }
+    a(3)(7)();
+  `],
+  ["クロージャ 2段: ミュータブル", `
+    function outer() {
+      var count = 0;
+      return function mid() {
+        return function inner() {
+          count = count + 1;
+          return count;
+        };
+      };
+    }
+    var f = outer()();
+    f();
+    f();
+    f();
+  `],
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {
