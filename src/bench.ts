@@ -217,6 +217,30 @@ const benchmarks = [
     `,
     jitEligible: false,
   },
+  {
+    name: "closure makeAdder (10000 calls)",
+    source: `
+      function makeAdder(n) { return function(x) { return x + n; }; }
+      var add5 = makeAdder(5);
+      var sum = 0;
+      for (var i = 0; i < 10000; i = i + 1) { sum = sum + add5(i); }
+      sum;
+    `,
+    jitEligible: false,
+  },
+  {
+    name: "closure counter (10000 calls)",
+    source: `
+      function counter() {
+        var c = 0;
+        return function() { c = c + 1; return c; };
+      }
+      var inc = counter();
+      for (var i = 0; i < 10000; i = i + 1) { inc(); }
+      inc();
+    `,
+    jitEligible: false,
+  },
 ];
 
 function bench(fn: () => unknown, warmup = 5, runs = 10): { result: unknown; avg: number; min: number; error?: string } {
