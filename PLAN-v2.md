@@ -273,19 +273,27 @@ Phase 8E: オブジェクト JIT + コールバックインライン化 ✅
   → Vec dot/add が Wasm で 222x
   → reduce(add) がインライン展開で 364x
 
-Phase 9: 独自文字列表現
+Phase 9: 独自文字列表現 ✅
   → ConsString / SlicedString / Intern 化
   → 「なぜ V8 は std::string を使わないのか」
-  → 性能は劣化する (V8 の string をタダ乗りしなくなるため)
+  → 文字列比較 15x 遅い、連結 47x 遅い (V8 の string は C++ で最適化)
+  → Intern 化で比較を参照比較に改善
 
-Phase 10: GC (自前の Mark-and-Sweep)
+Phase 10: GC (自前の Mark-and-Sweep) ✅
   → ルートセット、Mark-and-Sweep、Stop-the-world
+  → Vec 2000 iter: alloc=2002, sweep=1998, final=2
   → 「なぜ GC が必要か」「なぜ Generational GC か」
 
-Phase 10+: Wasm GC 連携
-  → 自前 GC を理解した上で V8 の Wasm GC に委譲
-  → 文字列・クロージャ・動的オブジェクト生成も JIT 対象に
-  → 「JS エンジンの全レイヤーが繋がる」
+Phase 10E: Wasm GC 連携 ✅
+  → Wasm GC struct で Vec を表現 (158x vs TW、メモリリークなし)
+  → 文字列: intern id (i32) で JIT 化、i32.eq で比較 (TW に勝つ)
+  → クロージャ: 手書き Wasm GC で動作確認 (自動組み込みは Phase 11 待ち)
+
+Phase 11: VM クロージャ対応
+  → Upvalue で外側の関数スコープの変数をキャプチャ
+  → outer(1)(5) = 6 が VM で動く
+  → 「なぜクロージャに Environment チェーンが必要か」
+  → Phase 10E-5 のクロージャ JIT の前提条件
 ```
 
 ---
@@ -301,4 +309,5 @@ Phase 10+: Wasm GC 連携
 | Hidden Class | Phase 6-8 | Element Kind、遷移チェーン、IC |
 | 文字列の内部表現 | Phase 9 | ConsString、エンコーディング、Intern 化 |
 | GC | Phase 10 | Mark-and-Sweep、ルートセット、Generational |
-| Wasm GC | Phase 10+ | struct/ref 型、GC ヒープ管理の委譲 |
+| Wasm GC | Phase 10E | struct/ref 型、GC ヒープ管理の委譲、文字列 intern JIT |
+| クロージャ | Phase 11 | Upvalue、変数キャプチャ、ミュータブルキャプチャ |
