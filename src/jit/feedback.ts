@@ -1,5 +1,6 @@
 import type { BytecodeFunction } from "../vm/bytecode.js";
 import { getElementKind, isTrackedArray } from "../vm/js-array.js";
+import { isJSString, getInternId } from "../vm/js-string.js";
 
 // 詳細な型分類
 // number をさらに int32 / uint32 / f64 に細分化
@@ -8,6 +9,7 @@ export type DetailedType =
   | "int32"        // 整数、-2^31 <= x < 2^31
   | "uint32"       // 非負整数、0 <= x < 2^32
   | "f64"          // 小数 or 範囲外の整数
+  | "interned_string" // intern 済み文字列 (intern id で i32 比較可能)
   | "smi_array"    // 整数のみの配列 (Element Kind = SMI)
   | "double_array" // 数値のみの配列 (Element Kind = DOUBLE)
   | "array"        // 汎用配列 (Element Kind = GENERIC or 未追跡)
@@ -116,6 +118,9 @@ export function classifyType(val: unknown): DetailedType {
   if (val === null) return "null";
   if (val === undefined) return "undefined";
   if (typeof val === "boolean") return "boolean";
+  if (isJSString(val)) {
+    return getInternId(val) >= 0 ? "interned_string" : "string";
+  }
   if (typeof val === "string") return "string";
   if (typeof val === "function") return "function";
   if (typeof val === "number") {
@@ -141,7 +146,8 @@ export function toWasmType(t: DetailedType): WasmNumericType | null {
   switch (t) {
     case "int32":
     case "uint32":
-    case "smi_array":  // 配列は i32 (Wasm memory base address)
+    case "smi_array":       // 配列は i32 (Wasm memory base address)
+    case "interned_string":  // 文字列は i32 (intern id)
       return "i32";
     case "f64":
     case "double_array":

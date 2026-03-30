@@ -91,6 +91,7 @@ export function compileMultiSync(
       objectSize: objectPropOffsets.size * 4,
       inlineCandidates,
       inlineLocalOffset: 0,
+      stringLocals: new Set(),
     };
     // hasThis な関数は this を追加パラメータとして渡す
     const paramCount = func.paramCount + (hasThis ? 1 : 0);
@@ -170,7 +171,7 @@ export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationTy
   if (needsHeap) hasMemory = true;
   const inlineCandidates = new Map<string, BytecodeFunction>();
   if (allFuncs) for (const f of allFuncs) inlineCandidates.set(f.name, f);
-  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: needsHeap ? 0 : -1, objectSize: objectPropOffsets.size * 4, inlineCandidates, inlineLocalOffset: 0 };
+  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: needsHeap ? 0 : -1, objectSize: objectPropOffsets.size * 4, inlineCandidates, inlineLocalOffset: 0, stringLocals: new Set() };
 
   const body = translateBytecode(func, ctx);
   if (!body) return null;
@@ -316,8 +317,9 @@ type TranslateContext = {
   hasThis: boolean;
   heapPtrGlobal: number;
   objectSize: number;
-  inlineCandidates: Map<string, BytecodeFunction>;  // 名前 → インライン対象の関数
-  inlineLocalOffset: number;  // インライン展開時の local offset
+  inlineCandidates: Map<string, BytecodeFunction>;
+  inlineLocalOffset: number;
+  stringLocals: Set<number>;  // 文字列引数のローカル (offset, len のペアで 2 local 消費)
 };
 
 // jsmini バイトコード → Wasm 命令列に変換

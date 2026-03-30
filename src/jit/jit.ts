@@ -3,6 +3,7 @@ import { FeedbackCollector, classifyType, isArrayType } from "./feedback.js";
 import { compileToWasmSync, compileMultiSync } from "./wasm-compiler.js";
 import type { WasmNumericType } from "./feedback.js";
 import { getElementKind, isTrackedArray } from "../vm/js-array.js";
+import { isJSString, getInternId, getStringById } from "../vm/js-string.js";
 
 export type JitOptions = {
   threshold: number;
@@ -11,7 +12,8 @@ export type JitOptions = {
 type CachedWasm = {
   fn: (...args: number[]) => number;
   memory: WebAssembly.Memory | null;
-  arrayArgIndices: number[];  // 配列引数の位置
+  arrayArgIndices: number[];
+  stringArgIndices: number[];  // 文字列引数の位置
 };
 
 export class JitManager {
@@ -88,8 +90,10 @@ export class JitManager {
     // 配列引数の位置を特定
     const detailedTypes = fb.argTypes[0];
     const arrayArgIndices: number[] = [];
+    const stringArgIndices: number[] = [];
     for (let i = 0; i < detailedTypes.length; i++) {
       if (isArrayType(detailedTypes[i])) arrayArgIndices.push(i);
+      if (detailedTypes[i] === "interned_string") stringArgIndices.push(i);
     }
 
     // 型特殊化
@@ -100,10 +104,11 @@ export class JitManager {
     let compiled: CachedWasm | null = null;
     if (arrayArgIndices.length > 0) {
       compiled = this.compileWithRelatedFuncs(func, spec, arrayArgIndices);
+      if (compiled) compiled.stringArgIndices = stringArgIndices;
     } else {
       const wasmFn = compileToWasmSync(func, spec);
       if (wasmFn) {
-        compiled = { fn: wasmFn, memory: null, arrayArgIndices: [] };
+        compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices };
       }
     }
 
@@ -132,14 +137,14 @@ export class JitManager {
     if (!wasmFn) return null;
 
     const memory = (result as any).__memory as WebAssembly.Memory | undefined;
-    const cached: CachedWasm = { fn: wasmFn, memory: memory ?? null, arrayArgIndices };
+    const cached: CachedWasm = { fn: wasmFn, memory: memory ?? null, arrayArgIndices, stringArgIndices: [] };
 
     // 関連関数もキャッシュに登録
     for (const f of funcsToCompile) {
       if (f !== func) {
         const relFn = result.get(f.name);
         if (relFn) {
-          this.wasmCache.set(f, { fn: relFn, memory: memory ?? null, arrayArgIndices: [] });
+          this.wasmCache.set(f, { fn: relFn, memory: memory ?? null, arrayArgIndices: [], stringArgIndices: [] });
         }
       }
     }
@@ -186,16 +191,28 @@ export class JitManager {
       return this.executeWithArrayArgs(func, fn, memory, args, arrayArgIndices, callCount);
     }
 
-    // 数値のみの引数
-    // 型ガード
-    if (!args.every(a => typeof a === "number")) {
-      this.deoptimize(func, args);
-      this.logTier(func, "Bytecode VM (after deopt)", callCount);
-      return null;
+    // 引数の型チェック + 変換
+    const { stringArgIndices } = cached;
+    const wasmArgs: number[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (stringArgIndices.includes(i)) {
+        // 文字列引数: intern id に変換
+        if (!isJSString(a)) { this.deoptimize(func, args); return null; }
+        const id = getInternId(a);
+        if (id < 0) { this.deoptimize(func, args); return null; }
+        wasmArgs.push(id);
+      } else if (typeof a === "number") {
+        wasmArgs.push(a);
+      } else {
+        this.deoptimize(func, args);
+        this.logTier(func, "Bytecode VM (after deopt)", callCount);
+        return null;
+      }
     }
 
     this.logTier(func, "Wasm", callCount);
-    return { result: fn(...(args as number[])) };
+    return { result: fn(...wasmArgs) };
   }
 
   private executeWithArrayArgs(
