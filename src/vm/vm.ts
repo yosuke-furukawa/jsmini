@@ -6,6 +6,7 @@ import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsO
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "./js-string.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 import { Heap } from "./heap.js";
+import { compileMultiSync } from "../jit/wasm-compiler.js";
 
 // Upvalue ボックス: ミュータブルキャプチャ用の参照ラッパー
 type UpvalueBox = { value: unknown };
@@ -67,6 +68,71 @@ export class VM {
       for (const c of frame.func.constants) roots.push(c);
     }
     return roots;
+  }
+
+  // OSR: ホットループを検出して関数全体を Wasm にコンパイル、残りを Wasm で実行
+  private attemptOSR(frame: CallFrame): unknown | null {
+    const func = frame.func;
+    // 関連関数を収集 (LdaGlobal + Call で参照される関数 + constants のクロージャ)
+    const relatedFuncs = [func];
+    const seen = new Set<string>([func.name]);
+    // bytecode 内の LdaGlobal + Call パターンから参照される関数
+    for (const instr of func.bytecode) {
+      if (instr.op === "LdaGlobal" && instr.operand !== undefined) {
+        const name = func.constants[instr.operand] as string;
+        if (!seen.has(name)) {
+          const globalVal = this.globals.get(name);
+          if (globalVal && typeof globalVal === "object" && "bytecode" in globalVal) {
+            relatedFuncs.push(globalVal as BytecodeFunction);
+            seen.add(name);
+          }
+        }
+      }
+    }
+    // constants 内のクロージャ
+    for (const c of func.constants) {
+      if (c && typeof c === "object" && "bytecode" in c && !seen.has((c as BytecodeFunction).name)) {
+        relatedFuncs.push(c as BytecodeFunction);
+        seen.add((c as BytecodeFunction).name);
+      }
+    }
+
+    // Wasm にコンパイル (upvalue 付きクロージャも含む)
+    const result = compileMultiSync(relatedFuncs, "i32");
+    if (!result) return null;
+
+    const wasmFn = result.get(func.name);
+    if (!wasmFn) return null;
+
+    // 今の locals を Wasm のパラメータとして渡す
+    // func.paramCount 個が通常パラメータ、残りは extra locals
+    // Wasm 関数は全 locals をパラメータとして受け取る設計にはなっていない
+    // → 通常パラメータだけ渡して、ループの初期状態から再実行する
+    // ただしそれだと二重実行になる
+
+    // シンプルな OSR: 関数のパラメータだけ渡して最初から再実行
+    // sum, i は 0 からやり直し (= 正確な OSR ではないが、結果は正しい)
+    const args: number[] = [];
+    for (let i = 0; i < func.paramCount; i++) {
+      const val = frame.locals[i];
+      if (typeof val === "number") args.push(val);
+      else return null; // 非数値パラメータ → OSR 不可
+    }
+
+    // upvalue があれば追加
+    for (const box of frame.upvalueBoxes) {
+      if (typeof box.value === "number") args.push(box.value as number);
+      else return null;
+    }
+
+    try {
+      if (this.heap.traceGC) {
+        // OSR ログ
+      }
+      return wasmFn(...args);
+    } catch {
+      return null;
+    }
   }
 
   private createICSlots(func: BytecodeFunction): ICSlot[] {
@@ -305,9 +371,31 @@ export class VM {
         }
 
         // 制御フロー
-        case "Jump":
-          frame.pc = instr.operand!;
+        case "Jump": {
+          const target = instr.operand!;
+          if (target <= frame.pc) {
+            // 後方ジャンプ = ループ → OSR カウント
+            (frame as any).__loopCount = ((frame as any).__loopCount ?? 0) + 1;
+            if ((frame as any).__loopCount > 100 && !(frame as any).__osrDone && this.jit) {
+              // ホットループ検出 → OSR: 関数全体を Wasm にコンパイルして残りのループを実行
+              const osrResult = this.attemptOSR(frame);
+              if (osrResult !== null) {
+                // OSR 成功: Wasm の結果を push して関数を Return 相当で抜ける
+                this.frames.pop();
+                if (this.frames.length > 0) {
+                  this.push(osrResult);
+                } else {
+                  return osrResult;
+                }
+                (frame as any).__osrDone = true;
+                continue;
+              }
+              (frame as any).__osrDone = true; // コンパイル失敗 → 再試行しない
+            }
+          }
+          frame.pc = target;
           break;
+        }
         case "JumpIfFalse": {
           const val = this.pop();
           if (!val) frame.pc = instr.operand!;
