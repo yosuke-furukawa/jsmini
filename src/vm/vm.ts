@@ -124,7 +124,7 @@ export class VM {
         const methodName = func.constants[func.bytecode[i].operand!] as string;
         // globals から constructor を探し、prototype からメソッドを取得
         for (const [, gval] of this.globals) {
-          if (gval && typeof gval === "object" && "bytecode" in (gval as any) && (gval as any).prototype) {
+          if (gval && typeof gval === "object" && "bytecode" in (gval as any) && (gval as any).prototype && isJSObject((gval as any).prototype)) {
             const method = jsObjGet((gval as any).prototype, methodName);
             if (method && typeof method === "object" && "bytecode" in (method as any) && !seen.has((method as any).name)) {
               relatedFuncs.push(method as BytecodeFunction);
