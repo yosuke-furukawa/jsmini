@@ -40,6 +40,7 @@ export class VM {
   heap: Heap = new Heap();
   maxSteps = 0;
   private stepCount = 0;
+  private _runBaseFrameCount = 0;
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -151,8 +152,9 @@ export class VM {
   }
 
   // 例外をフレームスタックをアンワインドしてハンドラを探す
-  private unwindToHandler(throwValue: unknown): boolean {
-    while (this.frames.length > 0) {
+  // minFrameCount より下のフレームは探さない (callInternal の境界)
+  private unwindToHandler(throwValue: unknown, minFrameCount = 0): boolean {
+    while (this.frames.length > minFrameCount) {
       const frame = this.frames[this.frames.length - 1];
       const handler = frame.func.handlers?.find(
         h => frame.pc - 1 >= h.tryStart && frame.pc - 1 < h.tryEnd && h.catchStart >= 0
@@ -222,7 +224,7 @@ export class VM {
       }
     }
     const err = new TypeError("Cannot convert object to primitive value");
-    if (this.unwindToHandler(err)) return THROWN_SENTINEL;
+    if (this.unwindToHandler(err, this._runBaseFrameCount)) return THROWN_SENTINEL;
     throw err;
   }
 
@@ -241,6 +243,12 @@ export class VM {
   }
 
   private run(baseFrameCount = 0): unknown {
+    const prevBase = this._runBaseFrameCount;
+    this._runBaseFrameCount = baseFrameCount;
+    try { return this._runLoop(baseFrameCount); } finally { this._runBaseFrameCount = prevBase; }
+  }
+
+  private _runLoop(baseFrameCount: number): unknown {
     while (this.frames.length > baseFrameCount) {
       const frame = this.frames[this.frames.length - 1];
       const { bytecode, constants } = frame.func;
@@ -452,7 +460,7 @@ export class VM {
           const name = constants[instr.operand!] as string;
           if (!this.globals.has(name)) {
             const err = new ReferenceError(`${name} is not defined`);
-            if (!this.unwindToHandler(err)) throw err;
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
             break;
           }
           this.push(this.globals.get(name));
@@ -665,8 +673,8 @@ export class VM {
         // throw
         case "Throw": {
           const throwValue = this.pop();
-          if (!this.unwindToHandler(throwValue)) {
-            // どのフレームにもハンドラがない: JS 例外として脱出
+          if (!this.unwindToHandler(throwValue, this._runBaseFrameCount)) {
+            // 現在の run() スコープ内にハンドラがない: JS 例外として上位に伝播
             throw { __thrown: true, value: throwValue };
           }
           break;

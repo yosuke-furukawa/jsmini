@@ -284,7 +284,9 @@ const cases: [string, string][] = [
   ["valueOf: 乗算", "var x = {valueOf: function() { return 5; }}; x * 4;"],
   ["valueOf: 比較", "var x = {valueOf: function() { return 10; }}; x > 5;"],
   ["toString: 文字列連結", 'var x = {toString: function() { return "hello"; }}; x + " world";'],
-  // NOTE: valueOf が throw するケースは VM の toPrimitive 例外伝播が未完のため省略
+  ["valueOf が throw → catch", 'var x = {valueOf: function() { throw "err"; }}; var r; try { x + 1; } catch(e) { r = e; } r;'],
+  ["valueOf throw 評価順序", 'var x = {valueOf: function() { throw "x"; }}; var y = {valueOf: function() { throw "y"; }}; var r; try { x + y; } catch(e) { r = e; } r;'],
+  ["valueOf/toString 両方 {} → TypeError", 'var r; try { 1 + {valueOf: function() {return {}}, toString: function() {return {}}}; } catch(e) { r = e instanceof TypeError; } r;'],
   ["valueOf 優先", "var x = {valueOf: function() { return 10; }, toString: function() { return \"s\"; }}; x + 1;"],
 
   // let/const ブロックスコープ
@@ -306,7 +308,6 @@ const cases: [string, string][] = [
 
   // instanceof ネイティブコンストラクタ
   ["instanceof ReferenceError", 'var r; try { nonexistent; } catch(e) { r = e instanceof ReferenceError; } r;'],
-  // NOTE: null.x の TypeError は VM で JS ネイティブ例外が漏れるため省略
 
   // NaN / Infinity
   ["NaN", "NaN !== NaN;"],
