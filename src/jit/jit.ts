@@ -14,6 +14,7 @@ type CachedWasm = {
   memory: WebAssembly.Memory | null;
   arrayArgIndices: number[];
   stringArgIndices: number[];  // 文字列引数の位置
+  spec: WasmNumericType;       // i32 or f64
 };
 
 export class JitManager {
@@ -108,7 +109,7 @@ export class JitManager {
     } else {
       const wasmFn = compileToWasmSync(func, spec);
       if (wasmFn) {
-        compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices };
+        compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec };
       }
     }
 
@@ -137,14 +138,14 @@ export class JitManager {
     if (!wasmFn) return null;
 
     const memory = (result as any).__memory as WebAssembly.Memory | undefined;
-    const cached: CachedWasm = { fn: wasmFn, memory: memory ?? null, arrayArgIndices, stringArgIndices: [] };
+    const cached: CachedWasm = { fn: wasmFn, memory: memory ?? null, arrayArgIndices, stringArgIndices: [], spec };
 
     // 関連関数もキャッシュに登録
     for (const f of funcsToCompile) {
       if (f !== func) {
         const relFn = result.get(f.name);
         if (relFn) {
-          this.wasmCache.set(f, { fn: relFn, memory: memory ?? null, arrayArgIndices: [], stringArgIndices: [] });
+          this.wasmCache.set(f, { fn: relFn, memory: memory ?? null, arrayArgIndices: [], stringArgIndices: [], spec });
         }
       }
     }
@@ -204,6 +205,12 @@ export class JitManager {
         if (id < 0) { this.deoptimize(func, args); return null; }
         wasmArgs.push(id);
       } else if (typeof a === "number") {
+        // i32 特殊化のとき、小数が渡されたら deopt
+        if (cached.spec === "i32" && !Number.isInteger(a)) {
+          this.deoptimize(func, args);
+          this.logTier(func, "Bytecode VM (after deopt: float to i32)", callCount);
+          return null;
+        }
         wasmArgs.push(a);
       } else {
         this.deoptimize(func, args);
