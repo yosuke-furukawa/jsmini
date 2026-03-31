@@ -41,6 +41,7 @@ export class VM {
   maxSteps = 0;
   private stepCount = 0;
   private _runBaseFrameCount = 0;
+  objectPrototype: Record<string, unknown> = {}; // Object.prototype (12-0 で初期化)
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -525,10 +526,13 @@ export class VM {
         }
 
         // オブジェクト / 配列
-        case "CreateObject":
-          this.push(this.heap.allocate(createJSObject()));
+        case "CreateObject": {
+          const newObj = this.heap.allocate(createJSObject());
+          jsObjSet(newObj, "__proto__", this.objectPrototype);
+          this.push(newObj);
           this.maybeGC();
           break;
+        }
         case "CreateArray": {
           const count = instr.operand!;
           const elems: unknown[] = [];
@@ -583,7 +587,17 @@ export class VM {
             this.push(jsObjGet(obj, name));
           } else {
             const name = constants[instr.operand!] as string;
-            this.push(isJSObject(obj) ? jsObjGet(obj, name) : (obj as Record<string, unknown>)[name]);
+            if (isJSObject(obj)) {
+              this.push(jsObjGet(obj, name));
+            } else {
+              // BytecodeFunction の prototype を遅延作成
+              if (name === "prototype" && typeof obj === "object" && obj !== null && "bytecode" in obj && !(obj as any).prototype) {
+                const proto = this.heap.allocate(createJSObject());
+                jsObjSet(proto, "__proto__", this.objectPrototype);
+                (obj as any).prototype = proto;
+              }
+              this.push((obj as Record<string, unknown>)[name]);
+            }
           }
           break;
         }
@@ -794,7 +808,9 @@ export class VM {
           }
           // prototype が未設定なら作成
           if (ctor.bytecode && !ctor.prototype) {
-            ctor.prototype = this.heap.allocate(createJSObject());
+            const proto = this.heap.allocate(createJSObject());
+            jsObjSet(proto, "__proto__", this.objectPrototype);
+            ctor.prototype = proto;
           }
           const newObj = this.heap.allocate(createJSObject());
           this.maybeGC();

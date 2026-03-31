@@ -2,7 +2,8 @@ import { compile } from "./compiler.js";
 import { VM } from "./vm.js";
 import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
-import { isJSString, jsStringToString } from "./js-string.js";
+import { isJSString, jsStringToString, internString } from "./js-string.js";
+import { isJSObject, getProperty as jsObjGet } from "./js-object.js";
 export { disassemble } from "./bytecode.js";
 
 type ConsoleOptions = {
@@ -35,6 +36,20 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
 
   const func = compile(source);
   const vm = new VM();
+
+  // Object.prototype: 全オブジェクトの __proto__ チェーンの終端
+  vm.objectPrototype = {
+    toString: (..._args: unknown[]) => internString("[object Object]"),
+    valueOf: function(this: unknown) { return this; },
+    hasOwnProperty: function(this: unknown, name: unknown) {
+      const key = isJSString(name) ? jsStringToString(name) : String(name);
+      if (isJSObject(this)) {
+        return jsObjGet(this, key) !== undefined &&
+          key !== "__proto__" && key !== "__hc__" && key !== "__slots__";
+      }
+      return Object.prototype.hasOwnProperty.call(this, key);
+    },
+  };
 
   vm.setGlobal("undefined", undefined);
   vm.setGlobal("NaN", NaN);
