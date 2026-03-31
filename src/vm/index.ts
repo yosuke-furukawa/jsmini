@@ -3,7 +3,8 @@ import { VM } from "./vm.js";
 import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
 import { isJSString, jsStringToString, internString, createSeqString } from "./js-string.js";
-import { isJSObject, getProperty as jsObjGet } from "./js-object.js";
+import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass } from "./js-object.js";
+import { Heap } from "./heap.js";
 export { disassemble } from "./bytecode.js";
 
 type ConsoleOptions = {
@@ -137,6 +138,78 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   vm.setGlobal("TypeError", TypeError);
   vm.setGlobal("SyntaxError", SyntaxError);
   vm.setGlobal("RangeError", RangeError);
+
+  // グローバル関数
+  vm.setGlobal("isNaN", (v: unknown) => Number.isNaN(Number(v)));
+  vm.setGlobal("isFinite", (v: unknown) => Number.isFinite(Number(v)));
+  vm.setGlobal("parseInt", (s: unknown, radix?: number) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
+  vm.setGlobal("parseFloat", (s: unknown) => parseFloat(isJSString(s) ? jsStringToString(s) : String(s)));
+
+  // JSObject のキーを取得するヘルパー (内部プロパティを除外)
+  const jsObjKeys = (obj: unknown): string[] => {
+    if (isJSObject(obj)) {
+      const props = getHiddenClass(obj).properties;
+      return [...props.keys()].filter(k => k !== "__proto__");
+    }
+    return Object.keys(obj as Record<string, unknown>);
+  };
+
+  // Object
+  vm.setGlobal("Object", {
+    keys: (obj: unknown) => jsObjKeys(obj).map(k => internString(k)),
+    values: (obj: unknown) => jsObjKeys(obj).map(k => jsObjGet(obj as any, k)),
+    entries: (obj: unknown) => jsObjKeys(obj).map(k => [internString(k), jsObjGet(obj as any, k)]),
+    assign: (target: unknown, ...sources: unknown[]) => {
+      for (const src of sources) {
+        for (const k of jsObjKeys(src)) {
+          if (isJSObject(target)) {
+            jsObjSet(target, k, jsObjGet(src as any, k));
+          } else {
+            (target as Record<string, unknown>)[k] = jsObjGet(src as any, k);
+          }
+        }
+      }
+      return target;
+    },
+    create: (proto: unknown) => {
+      const obj = vm.heap.allocate(createJSObject());
+      if (proto !== null) jsObjSet(obj, "__proto__", proto);
+      return obj;
+    },
+    freeze: (obj: unknown) => obj, // 最小限: freeze は no-op
+    prototype: vm.objectPrototype,
+  });
+
+  // Math
+  vm.setGlobal("Math", {
+    floor: Math.floor, ceil: Math.ceil, round: Math.round,
+    abs: Math.abs, min: Math.min, max: Math.max,
+    sqrt: Math.sqrt, pow: Math.pow, log: Math.log,
+    random: Math.random, PI: Math.PI, E: Math.E,
+    sign: Math.sign, trunc: Math.trunc,
+  });
+
+  // JSON (JSString ↔ ネイティブ文字列の変換が必要)
+  vm.setGlobal("JSON", {
+    stringify: (val: unknown) => {
+      // JSObject/JSString を再帰的にネイティブに変換
+      const toNative = (v: unknown): unknown => {
+        if (isJSString(v)) return jsStringToString(v);
+        if (isJSObject(v)) {
+          const result: Record<string, unknown> = {};
+          for (const k of jsObjKeys(v)) result[k] = toNative(jsObjGet(v, k));
+          return result;
+        }
+        if (Array.isArray(v)) return v.map(toNative);
+        return v;
+      };
+      return internString(JSON.stringify(toNative(val)));
+    },
+    parse: (s: unknown) => {
+      const str = isJSString(s) ? jsStringToString(s) : String(s);
+      return JSON.parse(str);
+    },
+  });
 
   // console.log: JSString → JS string に変換してから出力
   const userLog = options.console?.log ?? console.log;

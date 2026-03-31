@@ -768,17 +768,17 @@ export class VM {
             fn = callee as BytecodeFunction;
           }
 
-          if (fn) {
+          if (typeof callee === "function") {
+            // ネイティブ関数 (isNaN, parseInt, Math.floor 等)
+            this.push((callee as Function)(...args));
+          } else if (fn) {
             // 型フィードバック記録
             if (this.feedback) this.feedback.recordCall(fn, args);
             // JIT: Wasm キャッシュがあればそちらで実行
             if (this.jit) {
-              // upvalue の値を追加引数として渡す
               const upvalueValues = closureBoxes.map(b => b.value);
               const jitResult = this.jit.tryCall(fn, args, upvalueValues);
               if (jitResult !== null) {
-                // upvalue の書き戻し (StaUpvalue で変更された可能性)
-                // → Wasm は値渡しなので書き戻しは不可。読み取り専用のクロージャのみ JIT 対象
                 this.push(jitResult.result);
                 break;
               }
