@@ -108,6 +108,52 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     sign: Math.sign, trunc: Math.trunc,
   });
 
+  // Object
+  const strArg = (v: unknown) => isJSString(v) ? jsStringToString(v) : String(v);
+  env.defineReadOnly("Object", {
+    keys: (obj: unknown) => {
+      if (typeof obj === "object" && obj !== null) {
+        return Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol("));
+      }
+      return [];
+    },
+    values: (obj: unknown) => {
+      if (typeof obj === "object" && obj !== null) {
+        return Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map(k => (obj as any)[k]);
+      }
+      return [];
+    },
+    entries: (obj: unknown) => {
+      if (typeof obj === "object" && obj !== null) {
+        return Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map(k => [k, (obj as any)[k]]);
+      }
+      return [];
+    },
+    assign: Object.assign,
+    create: Object.create,
+    freeze: (obj: unknown) => obj,
+  });
+
+  // JSON
+  env.defineReadOnly("JSON", {
+    stringify: (val: unknown) => {
+      const toNative = (v: unknown): unknown => {
+        if (isJSString(v)) return jsStringToString(v);
+        if (Array.isArray(v)) return v.map(toNative);
+        if (v && typeof v === "object") {
+          const result: Record<string, unknown> = {};
+          for (const k of Object.keys(v).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol("))) {
+            result[k] = toNative((v as any)[k]);
+          }
+          return result;
+        }
+        return v;
+      };
+      return internString(JSON.stringify(toNative(val)));
+    },
+    parse: (s: unknown) => JSON.parse(isJSString(s) ? jsStringToString(s) : String(s)),
+  });
+
   // console オブジェクトを組み込み (JSString → JS string 変換付き)
   const userLog = options.console?.log ?? console.log;
   const consoleObj: Record<string, (...args: unknown[]) => void> = {
@@ -695,6 +741,30 @@ function evalNewExpression(
   return newObj;
 }
 
+// jsmini の JSFunction をネイティブから呼べるようにするヘルパー
+function evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment): unknown {
+  if (!isJSFunction(fn)) return undefined;
+  const jsFn = fn;
+  const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
+  for (let i = 0; i < jsFn.params.length; i++) {
+    const param = jsFn.params[i];
+    if (param.type === "RestElement") {
+      fnEnv.define(param.argument.name, args.slice(i));
+    } else {
+      bindPattern(param, args[i] ?? undefined, fnEnv, "let");
+    }
+  }
+  hoistVarDeclarations(jsFn.body.body, fnEnv);
+  hoistFunctionDeclarations(jsFn.body.body, fnEnv);
+  try {
+    for (const s of jsFn.body.body) evalStatement(s, fnEnv);
+  } catch (e) {
+    if (e instanceof ReturnSignal) return e.value;
+    throw e;
+  }
+  return undefined;
+}
+
 function evalCallExpression(
   expr: Expression & { type: "CallExpression" },
   env: Environment,
@@ -706,6 +776,20 @@ function evalCallExpression(
     thisValue = evalExpression(expr.callee.object, env);
     const key = resolveMemberKey(expr.callee, env);
     fn = getProperty(thisValue as JSObject, key);
+    // JSString のメソッド: ネイティブ文字列メソッドに委譲
+    if (fn === undefined && isJSString(thisValue)) {
+      const str = jsStringToString(thisValue);
+      const nativeFn = (str as any)[key];
+      if (typeof nativeFn === "function") {
+        fn = (...a: unknown[]) => {
+          const nativeArgs = a.map(x => isJSString(x) ? jsStringToString(x) : x);
+          const result = nativeFn.apply(str, nativeArgs);
+          if (typeof result === "string") return internString(result);
+          if (Array.isArray(result)) return result.map((s: string) => typeof s === "string" ? internString(s) : s);
+          return result;
+        };
+      }
+    }
   } else {
     fn = evalExpression(expr.callee, env);
   }
@@ -740,6 +824,13 @@ function evalCallExpression(
 
   // ネイティブ関数 (console.log 等)
   if (typeof fn === "function") {
+    // コールバック系メソッド: jsmini 関数を呼べるようにラップ
+    if (thisValue !== undefined && args.some(a => isJSFunction(a))) {
+      const wrappedArgs = args.map(a =>
+        isJSFunction(a) ? (...nativeArgs: unknown[]) => evalCallWithJSFunction(a, nativeArgs, env) : a
+      );
+      return (fn as Function).apply(thisValue, wrappedArgs);
+    }
     return (fn as Function)(...args);
   }
 

@@ -1550,6 +1550,48 @@ var jsmini = (() => {
       sign: Math.sign,
       trunc: Math.trunc
     });
+    const strArg = (v) => isJSString(v) ? jsStringToString(v) : String(v);
+    env.defineReadOnly("Object", {
+      keys: (obj) => {
+        if (typeof obj === "object" && obj !== null) {
+          return Object.keys(obj).filter((k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol("));
+        }
+        return [];
+      },
+      values: (obj) => {
+        if (typeof obj === "object" && obj !== null) {
+          return Object.keys(obj).filter((k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map((k) => obj[k]);
+        }
+        return [];
+      },
+      entries: (obj) => {
+        if (typeof obj === "object" && obj !== null) {
+          return Object.keys(obj).filter((k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map((k) => [k, obj[k]]);
+        }
+        return [];
+      },
+      assign: Object.assign,
+      create: Object.create,
+      freeze: (obj) => obj
+    });
+    env.defineReadOnly("JSON", {
+      stringify: (val) => {
+        const toNative = (v) => {
+          if (isJSString(v)) return jsStringToString(v);
+          if (Array.isArray(v)) return v.map(toNative);
+          if (v && typeof v === "object") {
+            const result = {};
+            for (const k of Object.keys(v).filter((k2) => k2 !== "__proto__" && k2 !== "__hc__" && k2 !== "__slots__" && !k2.startsWith("Symbol("))) {
+              result[k] = toNative(v[k]);
+            }
+            return result;
+          }
+          return v;
+        };
+        return internString(JSON.stringify(toNative(val)));
+      },
+      parse: (s) => JSON.parse(isJSString(s) ? jsStringToString(s) : String(s))
+    });
     const userLog = options.console?.log ?? console.log;
     const consoleObj = {
       log: (...args) => userLog(...args.map((a) => isJSString(a) ? jsStringToString(a) : a))
@@ -2082,6 +2124,28 @@ var jsmini = (() => {
     }
     return newObj;
   }
+  function evalCallWithJSFunction(fn, args, env) {
+    if (!isJSFunction(fn)) return void 0;
+    const jsFn = fn;
+    const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
+    for (let i = 0; i < jsFn.params.length; i++) {
+      const param = jsFn.params[i];
+      if (param.type === "RestElement") {
+        fnEnv.define(param.argument.name, args.slice(i));
+      } else {
+        bindPattern(param, args[i] ?? void 0, fnEnv, "let");
+      }
+    }
+    hoistVarDeclarations(jsFn.body.body, fnEnv);
+    hoistFunctionDeclarations(jsFn.body.body, fnEnv);
+    try {
+      for (const s of jsFn.body.body) evalStatement(s, fnEnv);
+    } catch (e) {
+      if (e instanceof ReturnSignal) return e.value;
+      throw e;
+    }
+    return void 0;
+  }
   function evalCallExpression(expr, env) {
     let thisValue = void 0;
     let fn;
@@ -2089,6 +2153,19 @@ var jsmini = (() => {
       thisValue = evalExpression(expr.callee.object, env);
       const key = resolveMemberKey(expr.callee, env);
       fn = getProperty(thisValue, key);
+      if (fn === void 0 && isJSString(thisValue)) {
+        const str = jsStringToString(thisValue);
+        const nativeFn = str[key];
+        if (typeof nativeFn === "function") {
+          fn = (...a) => {
+            const nativeArgs = a.map((x) => isJSString(x) ? jsStringToString(x) : x);
+            const result = nativeFn.apply(str, nativeArgs);
+            if (typeof result === "string") return internString(result);
+            if (Array.isArray(result)) return result.map((s) => typeof s === "string" ? internString(s) : s);
+            return result;
+          };
+        }
+      }
     } else {
       fn = evalExpression(expr.callee, env);
     }
@@ -2118,6 +2195,12 @@ var jsmini = (() => {
       return void 0;
     }
     if (typeof fn === "function") {
+      if (thisValue !== void 0 && args.some((a) => isJSFunction(a))) {
+        const wrappedArgs = args.map(
+          (a) => isJSFunction(a) ? (...nativeArgs) => evalCallWithJSFunction(a, nativeArgs, env) : a
+        );
+        return fn.apply(thisValue, wrappedArgs);
+      }
       return fn(...args);
     }
     if (!isJSFunction(fn)) {
