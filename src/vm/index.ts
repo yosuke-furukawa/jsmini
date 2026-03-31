@@ -2,7 +2,9 @@ import { compile } from "./compiler.js";
 import { VM } from "./vm.js";
 import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
-import { isJSString, jsStringToString } from "./js-string.js";
+import { isJSString, jsStringToString, internString, createSeqString } from "./js-string.js";
+import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass } from "./js-object.js";
+import { Heap } from "./heap.js";
 export { disassemble } from "./bytecode.js";
 
 type ConsoleOptions = {
@@ -36,6 +38,99 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   const func = compile(source);
   const vm = new VM();
 
+  // Object.prototype: 全オブジェクトの __proto__ チェーンの終端
+  vm.objectPrototype = {
+    toString: (..._args: unknown[]) => internString("[object Object]"),
+    valueOf: function(this: unknown) { return this; },
+    hasOwnProperty: function(this: unknown, name: unknown) {
+      const key = isJSString(name) ? jsStringToString(name) : String(name);
+      if (isJSObject(this)) {
+        return jsObjGet(this, key) !== undefined &&
+          key !== "__proto__" && key !== "__hc__" && key !== "__slots__";
+      }
+      return Object.prototype.hasOwnProperty.call(this, key);
+    },
+  };
+
+  // Array.prototype: コールバック系メソッド
+  vm.arrayPrototype = {
+    map: function(this: unknown[], fn: unknown) {
+      const result: unknown[] = [];
+      for (let i = 0; i < this.length; i++) {
+        result[i] = vm.callFunction(fn, undefined, [this[i], i, this]);
+      }
+      return result;
+    },
+    filter: function(this: unknown[], fn: unknown) {
+      const result: unknown[] = [];
+      for (let i = 0; i < this.length; i++) {
+        if (vm.callFunction(fn, undefined, [this[i], i, this])) result.push(this[i]);
+      }
+      return result;
+    },
+    forEach: function(this: unknown[], fn: unknown) {
+      for (let i = 0; i < this.length; i++) {
+        vm.callFunction(fn, undefined, [this[i], i, this]);
+      }
+    },
+    reduce: function(this: unknown[], fn: unknown, init: unknown) {
+      let acc = init;
+      let start = 0;
+      if (acc === undefined) { acc = this[0]; start = 1; }
+      for (let i = start; i < this.length; i++) {
+        acc = vm.callFunction(fn, undefined, [acc, this[i], i, this]);
+      }
+      return acc;
+    },
+    find: function(this: unknown[], fn: unknown) {
+      for (let i = 0; i < this.length; i++) {
+        if (vm.callFunction(fn, undefined, [this[i], i, this])) return this[i];
+      }
+      return undefined;
+    },
+    some: function(this: unknown[], fn: unknown) {
+      for (let i = 0; i < this.length; i++) {
+        if (vm.callFunction(fn, undefined, [this[i], i, this])) return true;
+      }
+      return false;
+    },
+    every: function(this: unknown[], fn: unknown) {
+      for (let i = 0; i < this.length; i++) {
+        if (!vm.callFunction(fn, undefined, [this[i], i, this])) return false;
+      }
+      return true;
+    },
+  };
+
+  // String.prototype: JSString のメソッド (ネイティブ文字列に変換して委譲)
+  const strArg = (v: unknown) => isJSString(v) ? jsStringToString(v) : String(v);
+  const strRet = (v: string) => internString(v);
+  vm.stringPrototype = {
+    charAt:      function(this: unknown, i: number) { return strRet(strArg(this).charAt(i)); },
+    charCodeAt:  function(this: unknown, i: number) { return strArg(this).charCodeAt(i); },
+    indexOf:     function(this: unknown, s: unknown, from?: number) { return strArg(this).indexOf(strArg(s), from); },
+    lastIndexOf: function(this: unknown, s: unknown, from?: number) { return strArg(this).lastIndexOf(strArg(s), from); },
+    includes:    function(this: unknown, s: unknown, from?: number) { return strArg(this).includes(strArg(s), from); },
+    startsWith:  function(this: unknown, s: unknown) { return strArg(this).startsWith(strArg(s)); },
+    endsWith:    function(this: unknown, s: unknown) { return strArg(this).endsWith(strArg(s)); },
+    slice:       function(this: unknown, s: number, e?: number) { return strRet(strArg(this).slice(s, e)); },
+    substring:   function(this: unknown, s: number, e?: number) { return strRet(strArg(this).substring(s, e)); },
+    toUpperCase: function(this: unknown) { return strRet(strArg(this).toUpperCase()); },
+    toLowerCase: function(this: unknown) { return strRet(strArg(this).toLowerCase()); },
+    trim:        function(this: unknown) { return strRet(strArg(this).trim()); },
+    trimStart:   function(this: unknown) { return strRet(strArg(this).trimStart()); },
+    trimEnd:     function(this: unknown) { return strRet(strArg(this).trimEnd()); },
+    repeat:      function(this: unknown, n: number) { return strRet(strArg(this).repeat(n)); },
+    padStart:    function(this: unknown, len: number, fill?: unknown) { return strRet(strArg(this).padStart(len, fill !== undefined ? strArg(fill) : undefined)); },
+    padEnd:      function(this: unknown, len: number, fill?: unknown) { return strRet(strArg(this).padEnd(len, fill !== undefined ? strArg(fill) : undefined)); },
+    replace:     function(this: unknown, s: unknown, r: unknown) { return strRet(strArg(this).replace(strArg(s), strArg(r))); },
+    split:       function(this: unknown, sep: unknown, limit?: number) {
+      return strArg(this).split(strArg(sep), limit).map(s => internString(s));
+    },
+    toString:    function(this: unknown) { return this; },
+    valueOf:     function(this: unknown) { return this; },
+  };
+
   vm.setGlobal("undefined", undefined);
   vm.setGlobal("NaN", NaN);
   vm.setGlobal("Infinity", Infinity);
@@ -43,6 +138,78 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   vm.setGlobal("TypeError", TypeError);
   vm.setGlobal("SyntaxError", SyntaxError);
   vm.setGlobal("RangeError", RangeError);
+
+  // グローバル関数
+  vm.setGlobal("isNaN", (v: unknown) => Number.isNaN(Number(v)));
+  vm.setGlobal("isFinite", (v: unknown) => Number.isFinite(Number(v)));
+  vm.setGlobal("parseInt", (s: unknown, radix?: number) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
+  vm.setGlobal("parseFloat", (s: unknown) => parseFloat(isJSString(s) ? jsStringToString(s) : String(s)));
+
+  // JSObject のキーを取得するヘルパー (内部プロパティを除外)
+  const jsObjKeys = (obj: unknown): string[] => {
+    if (isJSObject(obj)) {
+      const props = getHiddenClass(obj).properties;
+      return [...props.keys()].filter(k => k !== "__proto__");
+    }
+    return Object.keys(obj as Record<string, unknown>);
+  };
+
+  // Object
+  vm.setGlobal("Object", {
+    keys: (obj: unknown) => jsObjKeys(obj).map(k => internString(k)),
+    values: (obj: unknown) => jsObjKeys(obj).map(k => jsObjGet(obj as any, k)),
+    entries: (obj: unknown) => jsObjKeys(obj).map(k => [internString(k), jsObjGet(obj as any, k)]),
+    assign: (target: unknown, ...sources: unknown[]) => {
+      for (const src of sources) {
+        for (const k of jsObjKeys(src)) {
+          if (isJSObject(target)) {
+            jsObjSet(target, k, jsObjGet(src as any, k));
+          } else {
+            (target as Record<string, unknown>)[k] = jsObjGet(src as any, k);
+          }
+        }
+      }
+      return target;
+    },
+    create: (proto: unknown) => {
+      const obj = vm.heap.allocate(createJSObject());
+      if (proto !== null) jsObjSet(obj, "__proto__", proto);
+      return obj;
+    },
+    freeze: (obj: unknown) => obj, // 最小限: freeze は no-op
+    prototype: vm.objectPrototype,
+  });
+
+  // Math
+  vm.setGlobal("Math", {
+    floor: Math.floor, ceil: Math.ceil, round: Math.round,
+    abs: Math.abs, min: Math.min, max: Math.max,
+    sqrt: Math.sqrt, pow: Math.pow, log: Math.log,
+    random: Math.random, PI: Math.PI, E: Math.E,
+    sign: Math.sign, trunc: Math.trunc,
+  });
+
+  // JSON (JSString ↔ ネイティブ文字列の変換が必要)
+  vm.setGlobal("JSON", {
+    stringify: (val: unknown) => {
+      // JSObject/JSString を再帰的にネイティブに変換
+      const toNative = (v: unknown): unknown => {
+        if (isJSString(v)) return jsStringToString(v);
+        if (isJSObject(v)) {
+          const result: Record<string, unknown> = {};
+          for (const k of jsObjKeys(v)) result[k] = toNative(jsObjGet(v, k));
+          return result;
+        }
+        if (Array.isArray(v)) return v.map(toNative);
+        return v;
+      };
+      return internString(JSON.stringify(toNative(val)));
+    },
+    parse: (s: unknown) => {
+      const str = isJSString(s) ? jsStringToString(s) : String(s);
+      return JSON.parse(str);
+    },
+  });
 
   // console.log: JSString → JS string に変換してから出力
   const userLog = options.console?.log ?? console.log;

@@ -218,6 +218,39 @@ const benchmarks = [
     jitEligible: false,
   },
   {
+    name: "prototype method (2000 objects x5) — メソッド共有",
+    source: `
+      function Point(x, y) { this.x = x; this.y = y; }
+      Point.prototype.dist = function() { return this.x * this.x + this.y * this.y; };
+      var sum = 0;
+      for (var i = 0; i < 2000; i = i + 1) {
+        var p = new Point(i, i + 1);
+        for (var j = 0; j < 5; j = j + 1) {
+          sum = sum + p.dist();
+        }
+      }
+      sum;
+    `,
+    jitEligible: false,
+  },
+  {
+    name: "inline method (2000 objects x5) — メソッドコピー",
+    source: `
+      function makePoint(x, y) {
+        return { x: x, y: y, dist: function() { return x * x + y * y; } };
+      }
+      var sum = 0;
+      for (var i = 0; i < 2000; i = i + 1) {
+        var p = makePoint(i, i + 1);
+        for (var j = 0; j < 5; j = j + 1) {
+          sum = sum + p.dist();
+        }
+      }
+      sum;
+    `,
+    jitEligible: false,
+  },
+  {
     name: "closure makeAdder (10000 calls)",
     source: `
       function makeAdder(n) { return function(x) { return x + n; }; }

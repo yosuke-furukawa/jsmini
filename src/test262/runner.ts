@@ -4,9 +4,13 @@ import { evaluate } from "../interpreter/evaluator.js";
 import { vmEvaluate } from "../vm/index.js";
 
 const useVM = process.argv.includes("--vm");
-const run = useVM
-  ? (s: string, opts?: Record<string, unknown>) => vmEvaluate(s, opts)
-  : (s: string, opts?: Record<string, unknown>) => evaluate(s, opts);
+const useJIT = process.argv.includes("--jit");
+const modeName = useJIT ? "JIT" : useVM ? "bytecode VM" : "tree-walking";
+const run = useJIT
+  ? (s: string, opts?: Record<string, unknown>) => vmEvaluate(s, { ...opts, jit: true, jitThreshold: 1 })
+  : useVM
+    ? (s: string, opts?: Record<string, unknown>) => vmEvaluate(s, opts)
+    : (s: string, opts?: Record<string, unknown>) => evaluate(s, opts);
 
 const TEST262_ROOT = path.resolve(import.meta.dirname, "../../test262");
 
@@ -209,7 +213,7 @@ for (const testFile of allTests) {
   }
 }
 
-console.log(`\n=== Test262 Results (${useVM ? "bytecode VM" : "tree-walking"}) ===`);
+console.log(`\n=== Test262 Results (${modeName}) ===`);
 console.log(`Total: ${allTests.length}`);
 console.log(`Pass:  ${pass}`);
 console.log(`Fail:  ${fail}`);

@@ -41,6 +41,9 @@ export class VM {
   maxSteps = 0;
   private stepCount = 0;
   private _runBaseFrameCount = 0;
+  objectPrototype: Record<string, unknown> = {};
+  arrayPrototype: Record<string, unknown> = {};
+  stringPrototype: Record<string, unknown> = {};
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -108,10 +111,36 @@ export class VM {
         seen.add((c as BytecodeFunction).name);
       }
     }
+    // upvalue 経由で参照される関数 (コンストラクタ等)
+    for (const box of frame.upvalueBoxes) {
+      if (box.value && typeof box.value === "object" && "bytecode" in box.value && !seen.has((box.value as BytecodeFunction).name)) {
+        relatedFuncs.push(box.value as BytecodeFunction);
+        seen.add((box.value as BytecodeFunction).name);
+      }
+    }
+    // CallMethod の対象: GetProperty + CallMethod パターンで prototype メソッドを探す
+    for (let i = 0; i < func.bytecode.length - 1; i++) {
+      if (func.bytecode[i].op === "GetProperty" && func.bytecode[i + 1].op === "CallMethod") {
+        const methodName = func.constants[func.bytecode[i].operand!] as string;
+        // globals から constructor を探し、prototype からメソッドを取得
+        for (const [, gval] of this.globals) {
+          if (gval && typeof gval === "object" && "bytecode" in (gval as any) && (gval as any).prototype && isJSObject((gval as any).prototype)) {
+            const method = jsObjGet((gval as any).prototype, methodName);
+            if (method && typeof method === "object" && "bytecode" in (method as any) && !seen.has((method as any).name)) {
+              relatedFuncs.push(method as BytecodeFunction);
+              seen.add((method as any).name);
+            }
+          }
+        }
+      }
+    }
 
     // Wasm にコンパイル (upvalue 付きクロージャも含む)
     const result = compileMultiSync(relatedFuncs, "i32");
-    if (!result) return null;
+    if (!result) {
+      (frame as any).__osrDone = true; // 再試行しない
+      return null;
+    }
 
     const wasmFn = result.get(func.name);
     if (!wasmFn) return null;
@@ -134,6 +163,10 @@ export class VM {
     // upvalue があれば追加
     for (const box of frame.upvalueBoxes) {
       if (typeof box.value === "number") args.push(box.value as number);
+      else if (typeof box.value === "object" && box.value !== null && "bytecode" in box.value) {
+        // BytecodeFunction (コンストラクタ等) → Wasm 内では funcIndex で解決されるのでダミー
+        args.push(0);
+      }
       else return null;
     }
 
@@ -168,6 +201,34 @@ export class VM {
       this.frames.pop();
     }
     return false;
+  }
+
+  // jsmini 関数 (BytecodeFunction or クロージャ or ネイティブ) を呼ぶ汎用ヘルパー
+  callFunction(fn: unknown, thisValue: unknown, args: unknown[]): unknown {
+    if (typeof fn === "function") {
+      return (fn as Function).apply(thisValue, args);
+    }
+    if (typeof fn === "object" && fn !== null && "__closure" in (fn as any)) {
+      const closure = fn as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
+      const saved = this.sp;
+      const base = this.frames.length;
+      const locals = new Array(closure.func.localCount).fill(undefined);
+      for (let i = 0; i < closure.func.paramCount && i < args.length; i++) locals[i] = args[i];
+      this.frames.push({ func: closure.func, pc: 0, locals, thisValue, icSlots: this.createICSlots(closure.func), upvalueBoxes: closure.capturedBoxes });
+      try { this.run(base); } catch (e: any) {
+        this.sp = saved;
+        const tv = e?.__thrown ? e.value : e;
+        if (this.unwindToHandler(tv)) return THROWN_SENTINEL;
+        throw e;
+      }
+      const result = this.sp > saved ? this.stack[this.sp] : undefined;
+      this.sp = saved;
+      return result;
+    }
+    if (typeof fn === "object" && fn !== null && "bytecode" in (fn as any)) {
+      return this.callInternal(fn as BytecodeFunction, thisValue, args);
+    }
+    throw new TypeError("Not a function");
   }
 
   // BytecodeFunction を直接呼び出す (ToPrimitive 等の内部用)
@@ -525,10 +586,13 @@ export class VM {
         }
 
         // オブジェクト / 配列
-        case "CreateObject":
-          this.push(this.heap.allocate(createJSObject()));
+        case "CreateObject": {
+          const newObj = this.heap.allocate(createJSObject());
+          jsObjSet(newObj, "__proto__", this.objectPrototype);
+          this.push(newObj);
           this.maybeGC();
           break;
+        }
         case "CreateArray": {
           const count = instr.operand!;
           const elems: unknown[] = [];
@@ -583,7 +647,24 @@ export class VM {
             this.push(jsObjGet(obj, name));
           } else {
             const name = constants[instr.operand!] as string;
-            this.push(isJSObject(obj) ? jsObjGet(obj, name) : (obj as Record<string, unknown>)[name]);
+            if (isJSObject(obj)) {
+              this.push(jsObjGet(obj, name));
+            } else {
+              // BytecodeFunction の prototype を遅延作成
+              if (name === "prototype" && typeof obj === "object" && obj !== null && "bytecode" in obj && !(obj as any).prototype) {
+                const proto = this.heap.allocate(createJSObject());
+                jsObjSet(proto, "__proto__", this.objectPrototype);
+                (obj as any).prototype = proto;
+              }
+              // 配列/文字列のメソッド: prototype を優先
+              if (Array.isArray(obj) && name in this.arrayPrototype) {
+                this.push(this.arrayPrototype[name]);
+              } else if (isJSString(obj) && name in this.stringPrototype) {
+                this.push(this.stringPrototype[name]);
+              } else {
+                this.push((obj as Record<string, unknown>)[name]);
+              }
+            }
           }
           break;
         }
@@ -717,17 +798,17 @@ export class VM {
             fn = callee as BytecodeFunction;
           }
 
-          if (fn) {
+          if (typeof callee === "function") {
+            // ネイティブ関数 (isNaN, parseInt, Math.floor 等)
+            this.push((callee as Function)(...args));
+          } else if (fn) {
             // 型フィードバック記録
             if (this.feedback) this.feedback.recordCall(fn, args);
             // JIT: Wasm キャッシュがあればそちらで実行
             if (this.jit) {
-              // upvalue の値を追加引数として渡す
               const upvalueValues = closureBoxes.map(b => b.value);
               const jitResult = this.jit.tryCall(fn, args, upvalueValues);
               if (jitResult !== null) {
-                // upvalue の書き戻し (StaUpvalue で変更された可能性)
-                // → Wasm は値渡しなので書き戻しは不可。読み取り専用のクロージャのみ JIT 対象
                 this.push(jitResult.result);
                 break;
               }
@@ -761,6 +842,12 @@ export class VM {
             // クロージャオブジェクト
             const closure = method as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
             const fn = closure.func;
+            if (this.feedback) this.feedback.recordCall(fn, args);
+            // JIT: thisObj を追加引数として渡す
+            if (this.jit) {
+              const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
+              if (jitResult !== null) { this.push(jitResult.result); break; }
+            }
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
@@ -768,6 +855,12 @@ export class VM {
             this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
           } else if (typeof method === "object" && method !== null && "bytecode" in method) {
             const fn = method as BytecodeFunction;
+            if (this.feedback) this.feedback.recordCall(fn, args);
+            // JIT: thisObj を追加引数として渡す
+            if (this.jit) {
+              const jitResult = this.jit.tryCall(fn, args, [], thisObj);
+              if (jitResult !== null) { this.push(jitResult.result); break; }
+            }
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
@@ -794,7 +887,9 @@ export class VM {
           }
           // prototype が未設定なら作成
           if (ctor.bytecode && !ctor.prototype) {
-            ctor.prototype = this.heap.allocate(createJSObject());
+            const proto = this.heap.allocate(createJSObject());
+            jsObjSet(proto, "__proto__", this.objectPrototype);
+            ctor.prototype = proto;
           }
           const newObj = this.heap.allocate(createJSObject());
           this.maybeGC();

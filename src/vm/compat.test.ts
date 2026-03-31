@@ -312,6 +312,15 @@ const cases: [string, string][] = [
   // NaN / Infinity
   ["NaN", "NaN !== NaN;"],
   ["Infinity", "Infinity > 99999999;"],
+
+  // Phase 12: グローバル関数 / オブジェクト (TW/VM 共通で動くもの)
+  ["isNaN", "isNaN(NaN);"],
+  ["isFinite", "isFinite(42);"],
+  ["parseInt", 'parseInt("42");'],
+  ["parseFloat", 'parseFloat("3.14");'],
+  ["Math.floor", "Math.floor(3.7);"],
+  ["Math.max", "Math.max(1,2,3);"],
+  ["Math.sqrt", "Math.sqrt(9);"],
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {
@@ -333,6 +342,50 @@ describe("VM 互換テスト: evaluate vs vmEvaluate", () => {
       } else {
         assert.deepEqual(vmResult, twResult);
       }
+    });
+  }
+});
+
+// VM 固有: プロトタイプチェーン + ビルトインメソッド (TW は Object.create(null) でプロトタイプなし)
+const vmOnlyCases: [string, string, unknown][] = [
+  // Object.prototype
+  ["obj.toString()", "var o = {}; o.toString();", "[object Object]"],
+  ["obj.hasOwnProperty(true)", 'var o = {x:1}; o.hasOwnProperty("x");', true],
+  ["obj.hasOwnProperty(false)", 'var o = {x:1}; o.hasOwnProperty("y");', false],
+  ["obj.valueOf() === obj", "var o = {}; o.valueOf() === o;", true],
+
+  // Foo.prototype
+  ["Foo.prototype.method", "function Foo(){this.x=1;} Foo.prototype.get=function(){return this.x;}; var f=new Foo(); f.get();", 1],
+  ["new obj の toString", "function Foo(){} var f=new Foo(); f.toString();", "[object Object]"],
+
+  // Array.prototype コールバック
+  ["map", "[1,2,3].map(function(x){return x*2;})[1];", 4],
+  ["filter", "[1,2,3,4].filter(function(x){return x%2===0;}).length;", 2],
+  ["forEach", "var s=0; [1,2,3].forEach(function(x){s=s+x;}); s;", 6],
+  ["reduce", "[1,2,3,4].reduce(function(acc,x){return acc+x;}, 0);", 10],
+  ["find", "[1,2,3,4].find(function(x){return x>2;});", 3],
+  ["some", "[1,2,3].some(function(x){return x>2;});", true],
+  ["every", "[1,2,3].every(function(x){return x>0;});", true],
+
+  // String.prototype
+  ["charAt", '"hello".charAt(1);', "e"],
+  ["indexOf", '"hello world".indexOf("world");', 6],
+  ["slice", '"hello".slice(1,3);', "el"],
+  ["toUpperCase", '"hello".toUpperCase();', "HELLO"],
+  ["trim", '"  hello  ".trim();', "hello"],
+  ["split.length", '"a-b-c".split("-").length;', 3],
+  ["includes", '"hello".includes("ell");', true],
+  ["replace", '"hello".replace("ell", "ELL");', "hELLo"],
+
+  // Object.keys
+  ["Object.keys", "Object.keys({x:1, y:2}).length;", 2],
+];
+
+describe("VM プロトタイプチェーン + ビルトイン", () => {
+  for (const [name, source, expected] of vmOnlyCases) {
+    it(name, () => {
+      const result = vmEvaluate(source);
+      assert.deepEqual(result, expected);
     });
   }
 });
