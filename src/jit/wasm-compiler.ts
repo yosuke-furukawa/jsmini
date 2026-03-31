@@ -71,11 +71,17 @@ export function compileMultiSync(
     // オブジェクトプロパティのオフセット収集
     const objectPropOffsets = new Map<string, number>();
     let propCounter = 0;
-    for (const instr of func.bytecode) {
-      if ((instr.op === "GetProperty" || instr.op === "SetPropertyAssign") && instr.operand !== undefined) {
-        const name = func.constants[instr.operand] as string;
-        if (name !== "length" && !objectPropOffsets.has(name)) {
-          objectPropOffsets.set(name, propCounter++);
+    // 自身 + 関連関数 (Construct で呼ばれるコンストラクタ等) のプロパティを収集
+    const propsFromFuncs = [func, ...funcs.filter(f => f !== func)];
+    for (const pf of propsFromFuncs) {
+      for (let ii = 0; ii < pf.bytecode.length; ii++) {
+        const instr = pf.bytecode[ii];
+        if ((instr.op === "GetProperty" || instr.op === "SetPropertyAssign") && instr.operand !== undefined) {
+          if (instr.op === "GetProperty" && ii + 1 < pf.bytecode.length && pf.bytecode[ii + 1].op === "CallMethod") continue;
+          const name = pf.constants[instr.operand] as string;
+          if (name !== "length" && !objectPropOffsets.has(name)) {
+            objectPropOffsets.set(name, propCounter++);
+          }
         }
       }
     }
@@ -498,6 +504,13 @@ function translateRange(
 
       case "GetProperty": {
         const name = constants[instr.operand!] as string;
+        // GetProperty + CallMethod パターン → CallMethod 側でインライン展開する
+        // GetProperty はメソッド参照を push するが、インライン展開では不要
+        // Dup で this が複製されてるので、ここでは method ref として dummy (0) を push
+        if (pc + 1 < bytecode.length && bytecode[pc + 1].op === "CallMethod" && pc > 0 && bytecode[pc - 1].op === "Dup") {
+          out.push(WASM_OP.i32_const, 0x00); // dummy method ref (CallMethod で drop される)
+          break;
+        }
         if (name === "length" && ctx.hasMemory) {
           // 配列の length
           out.push(WASM_OP.i32_load, 0x02, 0x00);
@@ -819,49 +832,43 @@ function translateRange(
         // bump allocate: base = heapPtr; heapPtr += objectSize
         if (ctx.heapPtrGlobal >= 0 && ctx.objectSize > 0 && isI32) {
           const argc = instr.operand!;
-          // ctorRef を drop (LdaGlobal が skip されているので pop は不要)
-          // ただし LdaGlobal が skip されず push されている場合は drop が必要
-          // → LdaGlobal ハンドラで skip されているので ctorRef はスタックにない
-
-          // bump allocate
-          out.push(WASM_OP.global_get, ctx.heapPtrGlobal);  // base = heapPtr
-          // heapPtr += objectSize
-          out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
-          out.push(WASM_OP.i32_const, ...i32ToLEB128(ctx.objectSize));
-          out.push(WASM_OP.i32_add);
-          out.push(WASM_OP.global_set, ctx.heapPtrGlobal);
-
-          // スタック: [arg0, arg1, ..., base]
-          // constructor expects: (arg0, arg1, ..., this_base)
-          // → そのまま call $ctor
           // constructor を funcIndex から探す
           let ctorName: string | null = null;
-          let needDrop = false; // LdaLocal/LdaUpvalue の場合は ctorRef を drop する必要がある
+          let needDrop = false;
           if (pc > 0) {
             const prev = bytecode[pc - 1];
             if (prev.op === "LdaGlobal") {
               ctorName = constants[prev.operand!] as string;
-              // LdaGlobal のハンドラで funcIndex にある場合はスキップされるので drop 不要
               needDrop = !funcIndex.has(ctorName);
             } else if (prev.op === "LdaLocal" || prev.op === "LdaUpvalue") {
-              // constants から名前付き BytecodeFunction を探す
-              for (const c of constants) {
-                if (c && typeof c === "object" && "bytecode" in (c as any)) ctorName = (c as any).name;
+              if (prev.op === "LdaUpvalue" && func.upvalues?.[prev.operand!]) {
+                ctorName = func.upvalues[prev.operand!].name;
+              } else {
+                for (const c of constants) {
+                  if (c && typeof c === "object" && "bytecode" in (c as any)) ctorName = (c as any).name;
+                }
               }
-              needDrop = true; // LdaLocal/LdaUpvalue は常にスタックに push する
+              needDrop = true;
             }
           }
           if (ctorName) {
             const idx = funcIndex.get(ctorName);
             if (idx !== undefined) {
-              if (needDrop) {
-                // ctorRef をスタックから除去 (args の下にあるので一旦退避が必要)
-                // 実際は Construct の直前に [arg0, arg1, ctorRef] の順でスタックに乗ってる
-                // drop して args を call に渡す
-                out.push(WASM_OP.drop);
-              }
+              // スタック: [arg0, arg1, ctorRef?]
+              if (needDrop) out.push(WASM_OP.drop); // ctorRef を除去
+              // スタック: [arg0, arg1]
+
+              // bump allocate: base = heapPtr; heapPtr += objectSize
+              out.push(WASM_OP.global_get, ctx.heapPtrGlobal); // [arg0, arg1, base]
+              out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
+              out.push(WASM_OP.i32_const, ...i32ToLEB128(ctx.objectSize));
+              out.push(WASM_OP.i32_add);
+              out.push(WASM_OP.global_set, ctx.heapPtrGlobal);
+
+              // call $ctor(arg0, arg1, base)
               out.push(WASM_OP.call, idx);
-              out.push(WASM_OP.drop);
+              out.push(WASM_OP.drop); // ctor return value (undefined) を捨てる
+              // base address を結果として残す
               out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
               out.push(WASM_OP.i32_const, ...i32ToLEB128(ctx.objectSize));
               out.push(WASM_OP.i32_sub);
