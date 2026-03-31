@@ -43,6 +43,7 @@ export class VM {
   private _runBaseFrameCount = 0;
   objectPrototype: Record<string, unknown> = {};
   arrayPrototype: Record<string, unknown> = {};
+  stringPrototype: Record<string, unknown> = {};
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -625,9 +626,11 @@ export class VM {
                 jsObjSet(proto, "__proto__", this.objectPrototype);
                 (obj as any).prototype = proto;
               }
-              // 配列のメソッド: arrayPrototype を優先
+              // 配列/文字列のメソッド: prototype を優先
               if (Array.isArray(obj) && name in this.arrayPrototype) {
                 this.push(this.arrayPrototype[name]);
+              } else if (isJSString(obj) && name in this.stringPrototype) {
+                this.push(this.stringPrototype[name]);
               } else {
                 this.push((obj as Record<string, unknown>)[name]);
               }

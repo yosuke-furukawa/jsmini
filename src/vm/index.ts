@@ -2,7 +2,7 @@ import { compile } from "./compiler.js";
 import { VM } from "./vm.js";
 import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
-import { isJSString, jsStringToString, internString } from "./js-string.js";
+import { isJSString, jsStringToString, internString, createSeqString } from "./js-string.js";
 import { isJSObject, getProperty as jsObjGet } from "./js-object.js";
 export { disassemble } from "./bytecode.js";
 
@@ -99,6 +99,35 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
       }
       return true;
     },
+  };
+
+  // String.prototype: JSString のメソッド (ネイティブ文字列に変換して委譲)
+  const strArg = (v: unknown) => isJSString(v) ? jsStringToString(v) : String(v);
+  const strRet = (v: string) => internString(v);
+  vm.stringPrototype = {
+    charAt:      function(this: unknown, i: number) { return strRet(strArg(this).charAt(i)); },
+    charCodeAt:  function(this: unknown, i: number) { return strArg(this).charCodeAt(i); },
+    indexOf:     function(this: unknown, s: unknown, from?: number) { return strArg(this).indexOf(strArg(s), from); },
+    lastIndexOf: function(this: unknown, s: unknown, from?: number) { return strArg(this).lastIndexOf(strArg(s), from); },
+    includes:    function(this: unknown, s: unknown, from?: number) { return strArg(this).includes(strArg(s), from); },
+    startsWith:  function(this: unknown, s: unknown) { return strArg(this).startsWith(strArg(s)); },
+    endsWith:    function(this: unknown, s: unknown) { return strArg(this).endsWith(strArg(s)); },
+    slice:       function(this: unknown, s: number, e?: number) { return strRet(strArg(this).slice(s, e)); },
+    substring:   function(this: unknown, s: number, e?: number) { return strRet(strArg(this).substring(s, e)); },
+    toUpperCase: function(this: unknown) { return strRet(strArg(this).toUpperCase()); },
+    toLowerCase: function(this: unknown) { return strRet(strArg(this).toLowerCase()); },
+    trim:        function(this: unknown) { return strRet(strArg(this).trim()); },
+    trimStart:   function(this: unknown) { return strRet(strArg(this).trimStart()); },
+    trimEnd:     function(this: unknown) { return strRet(strArg(this).trimEnd()); },
+    repeat:      function(this: unknown, n: number) { return strRet(strArg(this).repeat(n)); },
+    padStart:    function(this: unknown, len: number, fill?: unknown) { return strRet(strArg(this).padStart(len, fill !== undefined ? strArg(fill) : undefined)); },
+    padEnd:      function(this: unknown, len: number, fill?: unknown) { return strRet(strArg(this).padEnd(len, fill !== undefined ? strArg(fill) : undefined)); },
+    replace:     function(this: unknown, s: unknown, r: unknown) { return strRet(strArg(this).replace(strArg(s), strArg(r))); },
+    split:       function(this: unknown, sep: unknown, limit?: number) {
+      return strArg(this).split(strArg(sep), limit).map(s => internString(s));
+    },
+    toString:    function(this: unknown) { return this; },
+    valueOf:     function(this: unknown) { return this; },
   };
 
   vm.setGlobal("undefined", undefined);
