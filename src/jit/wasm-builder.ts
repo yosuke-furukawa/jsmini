@@ -25,6 +25,7 @@ export const WASM_TYPE = {
 export const WASM_OP = {
   local_get: 0x20,
   local_set: 0x21,
+  local_tee: 0x22,
   global_get: 0x23,
   global_set: 0x24,
   // i32

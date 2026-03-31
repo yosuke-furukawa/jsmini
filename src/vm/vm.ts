@@ -111,6 +111,13 @@ export class VM {
         seen.add((c as BytecodeFunction).name);
       }
     }
+    // upvalue 経由で参照される関数 (コンストラクタ等)
+    for (const box of frame.upvalueBoxes) {
+      if (box.value && typeof box.value === "object" && "bytecode" in box.value && !seen.has((box.value as BytecodeFunction).name)) {
+        relatedFuncs.push(box.value as BytecodeFunction);
+        seen.add((box.value as BytecodeFunction).name);
+      }
+    }
     // CallMethod の対象: GetProperty + CallMethod パターンで prototype メソッドを探す
     for (let i = 0; i < func.bytecode.length - 1; i++) {
       if (func.bytecode[i].op === "GetProperty" && func.bytecode[i + 1].op === "CallMethod") {
@@ -130,7 +137,10 @@ export class VM {
 
     // Wasm にコンパイル (upvalue 付きクロージャも含む)
     const result = compileMultiSync(relatedFuncs, "i32");
-    if (!result) return null;
+    if (!result) {
+      (frame as any).__osrDone = true; // 再試行しない
+      return null;
+    }
 
     const wasmFn = result.get(func.name);
     if (!wasmFn) return null;
@@ -153,6 +163,10 @@ export class VM {
     // upvalue があれば追加
     for (const box of frame.upvalueBoxes) {
       if (typeof box.value === "number") args.push(box.value as number);
+      else if (typeof box.value === "object" && box.value !== null && "bytecode" in box.value) {
+        // BytecodeFunction (コンストラクタ等) → Wasm 内では funcIndex で解決されるのでダミー
+        args.push(0);
+      }
       else return null;
     }
 
