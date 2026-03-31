@@ -23,6 +23,7 @@ class BytecodeCompiler {
   // ループスタック: break/continue のジャンプ先パッチ用
   private loopStack: { breakPatches: number[]; continueTarget: number }[] = [];
   private icSlotCount = 0;
+  private upvalues: { name: string; parentSlot: number }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
     this.parent = parent;
@@ -73,26 +74,65 @@ class BytecodeCompiler {
     return this.locals.get(name) ?? null;
   }
 
-  // 変数のロード: 関数内ならローカル、トップレベルならグローバル
+  // 親コンパイラのローカルを再帰的に探索して upvalue index を返す (-1 = 見つからない)
+  private resolveUpvalue(name: string): number {
+    if (!this.parent) return -1;
+    // 親のローカルにあるか
+    const parentSlot = this.parent.resolveLocal(name);
+    if (parentSlot !== null) {
+      // 既に同じ upvalue があれば再利用
+      for (let i = 0; i < this.upvalues.length; i++) {
+        if (this.upvalues[i].name === name) return i;
+      }
+      const idx = this.upvalues.length;
+      this.upvalues.push({ name, parentSlot });
+      return idx;
+    }
+    // 親の upvalue にあるか (ネストしたクロージャ)
+    if (this.parent.isFunction) {
+      const parentUpvalue = this.parent.resolveUpvalue(name);
+      if (parentUpvalue >= 0) {
+        for (let i = 0; i < this.upvalues.length; i++) {
+          if (this.upvalues[i].name === name) return i;
+        }
+        const idx = this.upvalues.length;
+        // parentSlot = -1 - parentUpvalue で「upvalue 参照」を表す
+        this.upvalues.push({ name, parentSlot: -(parentUpvalue + 1) });
+        return idx;
+      }
+    }
+    return -1;
+  }
+
+  // 変数のロード: ローカル → upvalue → グローバル の優先順で解決
   emitLoad(name: string): void {
+    const slot = this.resolveLocal(name);
+    if (slot !== null) {
+      this.emit("LdaLocal", slot);
+      return;
+    }
     if (this.isFunction) {
-      const slot = this.resolveLocal(name);
-      if (slot !== null) {
-        this.emit("LdaLocal", slot);
+      const upIdx = this.resolveUpvalue(name);
+      if (upIdx >= 0) {
+        this.emit("LdaUpvalue", upIdx);
         return;
       }
     }
-    // グローバル
     const nameIdx = this.addConstant(name);
     this.emit("LdaGlobal", nameIdx);
   }
 
   // 変数のストア
   emitStore(name: string): void {
+    const slot = this.resolveLocal(name);
+    if (slot !== null) {
+      this.emit("StaLocal", slot);
+      return;
+    }
     if (this.isFunction) {
-      const slot = this.resolveLocal(name);
-      if (slot !== null) {
-        this.emit("StaLocal", slot);
+      const upIdx = this.resolveUpvalue(name);
+      if (upIdx >= 0) {
+        this.emit("StaUpvalue", upIdx);
         return;
       }
     }
@@ -109,16 +149,35 @@ class BytecodeCompiler {
       constants: this.constants,
       handlers: this.handlers,
       icSlotCount: this.icSlotCount,
+      upvalues: this.upvalues,
     };
   }
 
   // 変数バインディング: スタックトップの値を変数に格納して Pop
+  // let/const のバインディングパターンから変数名を抽出して事前に declareLocal する
+  private preDeclareBindingNames(id: any): void {
+    if (id.type === "Identifier") {
+      if (this.resolveLocal(id.name) === null) {
+        this.declareLocal(id.name);
+      }
+    } else if (id.type === "ObjectPattern") {
+      for (const prop of id.properties) {
+        this.preDeclareBindingNames(prop.value);
+      }
+    } else if (id.type === "ArrayPattern") {
+      for (const elem of id.elements) {
+        if (elem) this.preDeclareBindingNames(elem);
+      }
+    }
+  }
+
   compileBindingTarget(id: any): void {
     if (id.type === "Identifier") {
-      if (this.isFunction) {
+      if (this.isFunction || this.resolveLocal(id.name) !== null) {
         const slot = this.resolveLocal(id.name) ?? this.declareLocal(id.name);
         this.emit("StaLocal", slot);
       } else {
+        // トップレベル var: グローバルに格納
         const nameIdx = this.addConstant(id.name);
         this.emit("StaGlobal", nameIdx);
       }
@@ -184,6 +243,12 @@ class BytecodeCompiler {
         break;
 
       case "VariableDeclaration": {
+        // let/const はトップレベルでもローカルスロットを使う (ブロックスコープ)
+        if (!this.isFunction && stmt.kind !== "var") {
+          for (const decl of stmt.declarations) {
+            this.preDeclareBindingNames(decl.id);
+          }
+        }
         for (const decl of stmt.declarations) {
           if (decl.init) {
             this.compileExpression(decl.init);
@@ -201,10 +266,11 @@ class BytecodeCompiler {
         const fnBytecode = fnCompiler.finish(stmt.id.name);
         const fnIndex = this.addConstant(fnBytecode);
         this.emit("LdaConst", fnIndex);
-        if (this.isFunction) {
-          const slot = this.resolveLocal(stmt.id.name) ?? this.declareLocal(stmt.id.name);
-          this.emit("StaLocal", slot);
-        } else {
+        const fnSlot = this.resolveLocal(stmt.id.name) ?? this.declareLocal(stmt.id.name);
+        this.emit("StaLocal", fnSlot);
+        // トップレベル関数はグローバルにも登録 (再帰呼び出し + JIT 用)
+        if (!this.isFunction) {
+          this.emit("Dup");
           const nameIdx = this.addConstant(stmt.id.name);
           this.emit("StaGlobal", nameIdx);
         }
@@ -298,6 +364,11 @@ class BytecodeCompiler {
       }
 
       case "ForStatement": {
+        // for (let/const ...) のブロックスコープ
+        const forHasBlockScoped = stmt.init?.type === "VariableDeclaration" && stmt.init.kind !== "var";
+        if (forHasBlockScoped) {
+          this.scopeStack.push(new Map(this.locals));
+        }
         if (stmt.init) {
           if (stmt.init.type === "VariableDeclaration") {
             this.compileStatement(stmt.init);
@@ -329,11 +400,14 @@ class BytecodeCompiler {
         }
         const loop = this.loopStack.pop()!;
         for (const bp of loop.breakPatches) this.patch(bp, this.currentOffset());
+        if (forHasBlockScoped) {
+          this.locals = this.scopeStack.pop()!;
+        }
         break;
       }
 
       case "BlockStatement": {
-        const hasBlockScoped = this.isFunction && stmt.body.some(
+        const hasBlockScoped = stmt.body.some(
           (s: any) => s.type === "VariableDeclaration" && s.kind !== "var"
         );
         if (hasBlockScoped) {
@@ -629,7 +703,10 @@ class BytecodeCompiler {
           this.compileExpression(expr.callee.object);
           // メソッドを push
           this.emit("Dup"); // obj を複製 (this 用に残す)
-          if (!expr.callee.computed && expr.callee.property.type === "Identifier") {
+          if (expr.callee.computed) {
+            this.compileExpression(expr.callee.property);
+            this.emit("GetPropertyComputed");
+          } else if (expr.callee.property.type === "Identifier") {
             const nameIdx = this.addConstant(expr.callee.property.name);
             this.emitWithIC("GetProperty", nameIdx);
           }
@@ -732,15 +809,45 @@ class BytecodeCompiler {
       }
 
       case "UnaryExpression": {
-        this.compileExpression(expr.argument);
-        if (expr.operator === "-") {
-          this.emit("Negate");
-        } else if (expr.operator === "!") {
-          this.emit("LogicalNot");
-        } else if (expr.operator === "typeof") {
-          this.emit("TypeOf");
+        if (expr.operator === "typeof" && expr.argument.type === "Identifier") {
+          // typeof 未定義変数は ReferenceError にせず "undefined" を返す
+          const name = expr.argument.name;
+          const local = this.resolveLocal(name);
+          if (local !== null) {
+            this.emit("LdaLocal", local);
+            this.emit("TypeOf");
+          } else {
+            const upvalue = this.resolveUpvalue(name);
+            if (upvalue >= 0) {
+              this.emit("LdaUpvalue", upvalue);
+              this.emit("TypeOf");
+            } else {
+              // グローバル: TypeOfGlobal で安全にアクセス
+              this.emit("TypeOfGlobal", this.addConstant(name));
+            }
+          }
         } else {
-          throw new Error(`Unsupported unary operator: ${expr.operator}`);
+          this.compileExpression(expr.argument);
+          if (expr.operator === "-") {
+            this.emit("Negate");
+          } else if (expr.operator === "!") {
+            this.emit("LogicalNot");
+          } else if (expr.operator === "typeof") {
+            this.emit("TypeOf");
+          } else {
+            throw new Error(`Unsupported unary operator: ${expr.operator}`);
+          }
+        }
+        break;
+      }
+
+      case "SequenceExpression": {
+        // カンマ演算子: 各式を評価して最後の値を返す
+        for (let i = 0; i < expr.expressions.length; i++) {
+          this.compileExpression(expr.expressions[i]);
+          if (i < expr.expressions.length - 1) {
+            this.emit("Pop"); // 最後以外は捨てる
+          }
         }
         break;
       }

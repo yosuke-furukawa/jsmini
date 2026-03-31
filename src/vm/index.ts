@@ -17,6 +17,8 @@ type VMOptions = {
   traceGC?: boolean;
   jit?: boolean;
   jitThreshold?: number;
+  maxSteps?: number;
+  onStep?: () => void;
 };
 
 export type VMResult = {
@@ -35,6 +37,12 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   const vm = new VM();
 
   vm.setGlobal("undefined", undefined);
+  vm.setGlobal("NaN", NaN);
+  vm.setGlobal("Infinity", Infinity);
+  vm.setGlobal("ReferenceError", ReferenceError);
+  vm.setGlobal("TypeError", TypeError);
+  vm.setGlobal("SyntaxError", SyntaxError);
+  vm.setGlobal("RangeError", RangeError);
 
   // console.log: JSString → JS string に変換してから出力
   const userLog = options.console?.log ?? console.log;
@@ -59,6 +67,9 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
 
   // GC トレース
   if (options.traceGC) vm.heap.traceGC = true;
+
+  // ステップ数上限
+  if (options.maxSteps) vm.maxSteps = options.maxSteps;
 
   const rawValue = vm.execute(func);
   // JSString → JS string に変換して返す

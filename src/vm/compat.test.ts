@@ -171,6 +171,147 @@ const cases: [string, string][] = [
     });
     result[0] + result[1] + result[2];
   `],
+
+  // クロージャ
+  ["クロージャ: makeAdder", "function f(n) { return function(m) { return n + m; }; } f(5)(10);"],
+  ["クロージャ: counter", `
+    function counter() {
+      var c = 0;
+      return function() { c = c + 1; return c; };
+    }
+    var inc = counter();
+    inc();
+    inc();
+    inc();
+  `],
+  ["クロージャ: forEach + 外部変数", `
+    function forEach(arr, fn) { for (var i = 0; i < arr.length; i = i + 1) { fn(arr[i]); } }
+    function test() {
+      var sum = 0;
+      forEach([1, 2, 3], function(n) { sum = sum + n; });
+      return sum;
+    }
+    test();
+  `],
+
+  // クロージャ: 追加パターン
+  ["クロージャ: 引数なし関数がキャプチャ", `
+    function make() {
+      var x = 42;
+      return function() { return x; };
+    }
+    make()();
+  `],
+  ["クロージャ: 複数変数キャプチャ", `
+    function make(a, b) {
+      return function(x) { return a * x + b; };
+    }
+    make(3, 7)(10);
+  `],
+  ["クロージャ: ミュータブル + 読み取り", `
+    function make() {
+      var count = 0;
+      var inc = function() { count = count + 1; };
+      var get = function() { return count; };
+      return function() { inc(); inc(); return get(); };
+    }
+    make()();
+  `],
+  ["クロージャ: ループ内でクロージャ生成", `
+    function run() {
+      var fns = [];
+      for (var i = 0; i < 3; i = i + 1) {
+        fns[i] = function(x) { return x + i; };
+      }
+      return fns[0](10) + fns[1](10) + fns[2](10);
+    }
+    run();
+  `],
+  ["配列に格納した関数の呼び出し", "var arr = []; arr[0] = function() { return 42; }; arr[0]();"],
+  ["配列に格納したクロージャの呼び出し", "function f(n) { return function() { return n; }; } var arr = []; arr[0] = f(99); arr[0]();"],
+
+  // クロージャ: 2段以上のネスト
+  ["クロージャ 2段: a → b → c", `
+    function a(x) {
+      return function b(y) {
+        return function c(z) {
+          return x + y + z;
+        };
+      };
+    }
+    a(1)(2)(3);
+  `],
+  ["クロージャ 2段: 外側の変数だけ参照", `
+    function outer(x) {
+      return function mid() {
+        return function inner() {
+          return x;
+        };
+      };
+    }
+    outer(99)()();
+  `],
+  ["クロージャ 2段: 各層の変数を参照", `
+    function a(x) {
+      var ax = x * 10;
+      return function b(y) {
+        return function c() {
+          return ax + y;
+        };
+      };
+    }
+    a(3)(7)();
+  `],
+  ["クロージャ 2段: ミュータブル", `
+    function outer() {
+      var count = 0;
+      return function mid() {
+        return function inner() {
+          count = count + 1;
+          return count;
+        };
+      };
+    }
+    var f = outer()();
+    f();
+    f();
+    f();
+  `],
+
+  // ToPrimitive (valueOf / toString)
+  ["valueOf: 加算", "var x = {valueOf: function() { return 42; }}; x + 1;"],
+  ["valueOf: 減算", "var x = {valueOf: function() { return 10; }}; x - 3;"],
+  ["valueOf: 乗算", "var x = {valueOf: function() { return 5; }}; x * 4;"],
+  ["valueOf: 比較", "var x = {valueOf: function() { return 10; }}; x > 5;"],
+  ["toString: 文字列連結", 'var x = {toString: function() { return "hello"; }}; x + " world";'],
+  ["valueOf が throw → catch", 'var x = {valueOf: function() { throw "err"; }}; var r; try { x + 1; } catch(e) { r = e; } r;'],
+  ["valueOf throw 評価順序", 'var x = {valueOf: function() { throw "x"; }}; var y = {valueOf: function() { throw "y"; }}; var r; try { x + y; } catch(e) { r = e; } r;'],
+  ["valueOf/toString 両方 {} → TypeError", 'var r; try { 1 + {valueOf: function() {return {}}, toString: function() {return {}}}; } catch(e) { r = e instanceof TypeError; } r;'],
+  ["valueOf 優先", "var x = {valueOf: function() { return 10; }, toString: function() { return \"s\"; }}; x + 1;"],
+
+  // let/const ブロックスコープ
+  ["let ブロックスコープ (トップレベル)", "let x = 1; { let x = 2; } x;"],
+  ["const ブロックスコープ (トップレベル)", "const x = 1; { const x = 2; } x;"],
+  ["for-let スコープ", "var value; for (let x = 23; ; ) { value = x; break; } typeof value;"],
+  ["var はブロックスコープなし", "var x = 1; { var x = 2; } x;"],
+
+  // typeof 未宣言変数
+  ["typeof 未宣言変数", 'typeof nonexistent;'],
+  ["typeof 未宣言 === undefined", 'typeof nonexistent === "undefined";'],
+
+  // 空文字列 falsy
+  ["空文字列 if", 'var r = "no"; if ("") { r = "yes"; } r;'],
+  ["空文字列 while", 'var c = 0; while ("") { c = c + 1; } c;'],
+  ["空文字列 論理NOT", '!"";'],
+  ["空文字列 論理OR", '"" || "fallback";'],
+  ["非空文字列 truthy", 'var r = "no"; if ("x") { r = "yes"; } r;'],
+
+  // instanceof ネイティブコンストラクタ
+  ["instanceof ReferenceError", 'var r; try { nonexistent; } catch(e) { r = e instanceof ReferenceError; } r;'],
+
+  // NaN / Infinity
+  ["NaN", "NaN !== NaN;"],
+  ["Infinity", "Infinity > 99999999;"],
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {

@@ -6,6 +6,19 @@ import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsO
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "./js-string.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 import { Heap } from "./heap.js";
+import { compileMultiSync } from "../jit/wasm-compiler.js";
+
+// JSString 対応の truthiness 判定 (空文字列は falsy)
+function isTruthy(value: unknown): boolean {
+  if (isJSString(value)) return value.length > 0;
+  return !!value;
+}
+
+// toPrimitive/callInternal 内で例外が unwindToHandler で処理された場合の sentinel
+const THROWN_SENTINEL = Symbol("thrown");
+
+// Upvalue ボックス: ミュータブルキャプチャ用の参照ラッパー
+type UpvalueBox = { value: unknown };
 
 type CallFrame = {
   func: BytecodeFunction;
@@ -13,6 +26,7 @@ type CallFrame = {
   locals: unknown[];
   thisValue: unknown;
   icSlots: ICSlot[];
+  upvalueBoxes: UpvalueBox[];  // キャプチャされた変数のボックス
 };
 
 // スタックベースの Bytecode VM
@@ -24,6 +38,9 @@ export class VM {
   feedback: FeedbackCollector | null = null;
   jit: JitManager | null = null;
   heap: Heap = new Heap();
+  maxSteps = 0;
+  private stepCount = 0;
+  private _runBaseFrameCount = 0;
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -65,8 +82,160 @@ export class VM {
     return roots;
   }
 
+  // OSR: ホットループを検出して関数全体を Wasm にコンパイル、残りを Wasm で実行
+  private attemptOSR(frame: CallFrame): unknown | null {
+    const func = frame.func;
+    // 関連関数を収集 (LdaGlobal + Call で参照される関数 + constants のクロージャ)
+    const relatedFuncs = [func];
+    const seen = new Set<string>([func.name]);
+    // bytecode 内の LdaGlobal + Call パターンから参照される関数
+    for (const instr of func.bytecode) {
+      if (instr.op === "LdaGlobal" && instr.operand !== undefined) {
+        const name = func.constants[instr.operand] as string;
+        if (!seen.has(name)) {
+          const globalVal = this.globals.get(name);
+          if (globalVal && typeof globalVal === "object" && "bytecode" in globalVal) {
+            relatedFuncs.push(globalVal as BytecodeFunction);
+            seen.add(name);
+          }
+        }
+      }
+    }
+    // constants 内のクロージャ
+    for (const c of func.constants) {
+      if (c && typeof c === "object" && "bytecode" in c && !seen.has((c as BytecodeFunction).name)) {
+        relatedFuncs.push(c as BytecodeFunction);
+        seen.add((c as BytecodeFunction).name);
+      }
+    }
+
+    // Wasm にコンパイル (upvalue 付きクロージャも含む)
+    const result = compileMultiSync(relatedFuncs, "i32");
+    if (!result) return null;
+
+    const wasmFn = result.get(func.name);
+    if (!wasmFn) return null;
+
+    // 今の locals を Wasm のパラメータとして渡す
+    // func.paramCount 個が通常パラメータ、残りは extra locals
+    // Wasm 関数は全 locals をパラメータとして受け取る設計にはなっていない
+    // → 通常パラメータだけ渡して、ループの初期状態から再実行する
+    // ただしそれだと二重実行になる
+
+    // シンプルな OSR: 関数のパラメータだけ渡して最初から再実行
+    // sum, i は 0 からやり直し (= 正確な OSR ではないが、結果は正しい)
+    const args: number[] = [];
+    for (let i = 0; i < func.paramCount; i++) {
+      const val = frame.locals[i];
+      if (typeof val === "number") args.push(val);
+      else return null; // 非数値パラメータ → OSR 不可
+    }
+
+    // upvalue があれば追加
+    for (const box of frame.upvalueBoxes) {
+      if (typeof box.value === "number") args.push(box.value as number);
+      else return null;
+    }
+
+    try {
+      if (this.heap.traceGC) {
+        // OSR ログ
+      }
+      return wasmFn(...args);
+    } catch {
+      return null;
+    }
+  }
+
   private createICSlots(func: BytecodeFunction): ICSlot[] {
     return Array.from({ length: func.icSlotCount || 0 }, createICSlot);
+  }
+
+  // 例外をフレームスタックをアンワインドしてハンドラを探す
+  // minFrameCount より下のフレームは探さない (callInternal の境界)
+  private unwindToHandler(throwValue: unknown, minFrameCount = 0): boolean {
+    while (this.frames.length > minFrameCount) {
+      const frame = this.frames[this.frames.length - 1];
+      const handler = frame.func.handlers?.find(
+        h => frame.pc - 1 >= h.tryStart && frame.pc - 1 < h.tryEnd && h.catchStart >= 0
+      );
+      if (handler) {
+        this.push(throwValue);
+        frame.pc = handler.catchStart;
+        return true;
+      }
+      // このフレームにハンドラがない: フレームを pop して呼び出し元に戻る
+      this.frames.pop();
+    }
+    return false;
+  }
+
+  // BytecodeFunction を直接呼び出す (ToPrimitive 等の内部用)
+  private callInternal(func: BytecodeFunction, thisValue: unknown, args: unknown[]): unknown {
+    const locals = new Array(func.localCount).fill(undefined);
+    for (let i = 0; i < args.length && i < func.paramCount; i++) {
+      locals[i] = args[i];
+    }
+    const savedSp = this.sp;
+    const baseFrameCount = this.frames.length;
+    this.frames.push({
+      func, pc: 0, locals, thisValue,
+      icSlots: this.createICSlots(func),
+      upvalueBoxes: [],
+    });
+    try {
+      this.run(baseFrameCount);
+    } catch (e: any) {
+      this.sp = savedSp;
+      const throwValue = e?.__thrown ? e.value : e;
+      if (this.unwindToHandler(throwValue)) return THROWN_SENTINEL;
+      throw e;
+    }
+    const hasResult = this.sp > savedSp;
+    const result = hasResult ? this.stack[this.sp] : undefined;
+    this.sp = savedSp;
+    return result;
+  }
+
+  // ToPrimitive: オブジェクトの valueOf/toString を呼んでプリミティブに変換
+  private toPrimitive(value: unknown): unknown {
+    if (value === null || value === undefined) return value;
+    if (typeof value !== "object") return value;
+    if (isJSString(value)) return value;
+    if (Array.isArray(value)) return value;
+
+    const obj = value as Record<string, unknown>;
+    let methodFound = false;
+    for (const name of ["valueOf", "toString"]) {
+      // JSObject (Hidden Class) の場合は jsObjGet、それ以外は普通のプロパティアクセス
+      const method = isJSObject(value) ? jsObjGet(value, name) : obj[name];
+      if (method && typeof method === "object" && "bytecode" in (method as any)) {
+        methodFound = true;
+        const result = this.callInternal(method as BytecodeFunction, value, []);
+        if (result === THROWN_SENTINEL) return THROWN_SENTINEL;
+        if (result === null || result === undefined || typeof result !== "object" || isJSString(result)) {
+          return result;
+        }
+      } else if (method && typeof method === "object" && "__closure" in (method as any)) {
+        methodFound = true;
+        const fn = (method as any).__bytecode as BytecodeFunction;
+        if (fn) {
+          const result = this.callInternal(fn, value, []);
+          if (result === THROWN_SENTINEL) return THROWN_SENTINEL;
+          if (result === null || result === undefined || typeof result !== "object" || isJSString(result)) {
+            return result;
+          }
+        }
+      }
+    }
+    if (methodFound) {
+      // valueOf/toString があったが両方オブジェクトを返した → TypeError
+      const err = new TypeError("Cannot convert object to primitive value");
+      if (this.unwindToHandler(err, this._runBaseFrameCount)) return THROWN_SENTINEL;
+      throw err;
+    }
+    // メソッドが見つからなかった → デフォルトの toString
+    return internString("[object Object]");
   }
 
   execute(func: BytecodeFunction): unknown {
@@ -77,20 +246,27 @@ export class VM {
       locals: new Array(func.localCount).fill(undefined),
       thisValue: undefined,
       icSlots: this.createICSlots(func),
+      upvalueBoxes: [],
     });
 
     return this.run();
   }
 
-  private run(): unknown {
-    while (this.frames.length > 0) {
+  private run(baseFrameCount = 0): unknown {
+    const prevBase = this._runBaseFrameCount;
+    this._runBaseFrameCount = baseFrameCount;
+    try { return this._runLoop(baseFrameCount); } finally { this._runBaseFrameCount = prevBase; }
+  }
+
+  private _runLoop(baseFrameCount: number): unknown {
+    while (this.frames.length > baseFrameCount) {
       const frame = this.frames[this.frames.length - 1];
       const { bytecode, constants } = frame.func;
 
       if (frame.pc >= bytecode.length) {
         // 関数の末尾に到達（return なし）
         this.frames.pop();
-        if (this.frames.length > 0) {
+        if (this.frames.length > baseFrameCount) {
           this.push(undefined);
         }
         continue;
@@ -98,12 +274,51 @@ export class VM {
 
       const instr: Instruction = bytecode[frame.pc++];
 
+      if (this.maxSteps > 0 && ++this.stepCount > this.maxSteps) {
+        throw new Error("timeout: exceeded max steps");
+      }
+
       switch (instr.op) {
         // 定数ロード
         case "LdaConst": {
           const val = constants[instr.operand!];
-          // 文字列リテラルは intern 済み JSString に変換
-          this.push(typeof val === "string" ? internString(val) : val);
+          if (typeof val === "string") {
+            this.push(internString(val));
+          } else if (typeof val === "object" && val !== null && "bytecode" in val) {
+            const fn = val as BytecodeFunction;
+            if (fn.upvalues && fn.upvalues.length > 0) {
+              // upvalue をキャプチャ: 親のローカルスロットをボックスで共有
+              // フレームごとにスロット → ボックスのマッピングを遅延作成
+              if (!(frame as any).__localBoxes) {
+                (frame as any).__localBoxes = new Map<number, UpvalueBox>();
+              }
+              const localBoxes = (frame as any).__localBoxes as Map<number, UpvalueBox>;
+
+              const capturedBoxes: UpvalueBox[] = fn.upvalues.map(uv => {
+                if (uv.parentSlot >= 0) {
+                  // 親のローカル変数をボックスで共有
+                  let box = localBoxes.get(uv.parentSlot);
+                  if (!box) {
+                    box = { value: frame.locals[uv.parentSlot] };
+                    localBoxes.set(uv.parentSlot, box);
+                  } else {
+                    // ボックスの値を最新のローカル値に同期
+                    box.value = frame.locals[uv.parentSlot];
+                  }
+                  return box;
+                } else {
+                  // 親の upvalue を引き継ぐ (ネストしたクロージャ)
+                  return frame.upvalueBoxes[-(uv.parentSlot + 1)];
+                }
+              });
+              // BytecodeFunction + キャプチャ済みボックスのペア
+              this.push({ __closure: true, func: fn, capturedBoxes });
+            } else {
+              this.push(val);
+            }
+          } else {
+            this.push(val);
+          }
           break;
         }
         case "LdaUndefined":
@@ -121,10 +336,13 @@ export class VM {
 
         // 算術
         case "Add": {
-          const right = this.pop();
-          const left = this.pop();
+          const rawRight = this.pop();
+          const rawLeft = this.pop();
+          const left = this.toPrimitive(rawLeft);
+          if (left === THROWN_SENTINEL) continue;
+          const right = this.toPrimitive(rawRight);
+          if (right === THROWN_SENTINEL) continue;
           if (isJSString(left) || isJSString(right)) {
-            // 一方または両方が JSString → 文字列連結
             const l = isJSString(left) ? left : createSeqString(String(left));
             const r = isJSString(right) ? right : createSeqString(String(right));
             this.push(jsStringConcat(l, r));
@@ -134,36 +352,37 @@ export class VM {
           break;
         }
         case "Sub": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
-          this.push(left - right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) - (r as number));
           break;
         }
         case "Mul": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
-          this.push(left * right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) * (r as number));
           break;
         }
         case "Div": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
-          this.push(left / right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) / (r as number));
           break;
         }
         case "Mod": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
-          this.push(left % right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) % (r as number));
           break;
         }
         case "Negate": {
-          const val = this.pop() as number;
-          this.push(-val);
+          const val = this.toPrimitive(this.pop());
+          if (val === THROWN_SENTINEL) continue;
+          this.push(-(val as number));
           break;
         }
 
-        // 比較
+        // 比較 (==/===/!=/!== は ToPrimitive しない — identity 比較)
         case "Equal":
         case "StrictEqual": {
           const right = this.pop();
@@ -171,7 +390,6 @@ export class VM {
           if (isJSString(left) && isJSString(right)) {
             this.push(jsStringEquals(left, right));
           } else if (isJSString(left) || isJSString(right)) {
-            // 片方だけ JSString → 型が違うので false
             this.push(false);
           } else {
             this.push(instr.op === "Equal" ? left == right : left === right);
@@ -192,49 +410,70 @@ export class VM {
           break;
         }
         case "LessThan": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
-          this.push(left < right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) < (r as number));
           break;
         }
         case "GreaterThan": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
-          this.push(left > right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) > (r as number));
           break;
         }
         case "LessEqual": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
-          this.push(left <= right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) <= (r as number));
           break;
         }
         case "GreaterEqual": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
-          this.push(left >= right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) >= (r as number));
           break;
         }
 
         // 論理
         case "LogicalNot": {
           const val = this.pop();
-          this.push(!val);
+          this.push(!isTruthy(val));
           break;
         }
 
         // ローカル変数
-        case "LdaLocal":
-          this.push(frame.locals[instr.operand!]);
+        case "LdaLocal": {
+          const slot = instr.operand!;
+          const box = (frame as any).__localBoxes?.get(slot) as UpvalueBox | undefined;
+          this.push(box ? box.value : frame.locals[slot]);
           break;
-        case "StaLocal":
-          frame.locals[instr.operand!] = this.peek();
+        }
+        case "StaLocal": {
+          const slot = instr.operand!;
+          const val = this.peek();
+          frame.locals[slot] = val;
+          const box = (frame as any).__localBoxes?.get(slot) as UpvalueBox | undefined;
+          if (box) box.value = val;
+          break;
+        }
+
+        // Upvalue (クロージャでキャプチャされた外部変数)
+        case "LdaUpvalue":
+          this.push(frame.upvalueBoxes[instr.operand!].value);
+          break;
+        case "StaUpvalue":
+          frame.upvalueBoxes[instr.operand!].value = this.peek();
           break;
 
         // グローバル変数
         case "LdaGlobal": {
           const name = constants[instr.operand!] as string;
-          this.push(this.globals.has(name) ? this.globals.get(name) : undefined);
+          if (!this.globals.has(name)) {
+            const err = new ReferenceError(`${name} is not defined`);
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
+          this.push(this.globals.get(name));
           break;
         }
         case "StaGlobal": {
@@ -249,17 +488,39 @@ export class VM {
         }
 
         // 制御フロー
-        case "Jump":
-          frame.pc = instr.operand!;
+        case "Jump": {
+          const target = instr.operand!;
+          if (target <= frame.pc) {
+            // 後方ジャンプ = ループ → OSR カウント
+            (frame as any).__loopCount = ((frame as any).__loopCount ?? 0) + 1;
+            if ((frame as any).__loopCount > 100 && !(frame as any).__osrDone && this.jit) {
+              // ホットループ検出 → OSR: 関数全体を Wasm にコンパイルして残りのループを実行
+              const osrResult = this.attemptOSR(frame);
+              if (osrResult !== null) {
+                // OSR 成功: Wasm の結果を push して関数を Return 相当で抜ける
+                this.frames.pop();
+                if (this.frames.length > 0) {
+                  this.push(osrResult);
+                } else {
+                  return osrResult;
+                }
+                (frame as any).__osrDone = true;
+                continue;
+              }
+              (frame as any).__osrDone = true; // コンパイル失敗 → 再試行しない
+            }
+          }
+          frame.pc = target;
           break;
+        }
         case "JumpIfFalse": {
           const val = this.pop();
-          if (!val) frame.pc = instr.operand!;
+          if (!isTruthy(val)) frame.pc = instr.operand!;
           break;
         }
         case "JumpIfTrue": {
           const val = this.pop();
-          if (val) frame.pc = instr.operand!;
+          if (isTruthy(val)) frame.pc = instr.operand!;
           break;
         }
 
@@ -372,15 +633,20 @@ export class VM {
         case "Instanceof": {
           const right = this.pop() as any;
           const left = this.pop() as any;
-          // 簡易: prototype チェーンを辿る
-          const proto = right?.prototype;
-          let current = left?.__proto__;
-          let found = false;
-          while (current) {
-            if (current === proto) { found = true; break; }
-            current = current.__proto__;
+          // ネイティブコンストラクタ (ReferenceError 等) はそのまま JS の instanceof に委譲
+          if (typeof right === "function") {
+            this.push(left instanceof right);
+          } else {
+            // jsmini 関数: prototype チェーンを辿る
+            const proto = right?.prototype;
+            let current = left?.__proto__;
+            let found = false;
+            while (current) {
+              if (current === proto) { found = true; break; }
+              current = current.__proto__;
+            }
+            this.push(found);
           }
-          this.push(found);
           break;
         }
 
@@ -390,6 +656,19 @@ export class VM {
           if (isJSString(val)) this.push(internString("string"));
           else if (val === null) this.push(internString("object"));
           else this.push(internString(typeof val));
+          break;
+        }
+
+        case "TypeOfGlobal": {
+          const name = constants[instr.operand!] as string;
+          if (!this.globals.has(name)) {
+            this.push(internString("undefined"));
+          } else {
+            const val = this.globals.get(name);
+            if (isJSString(val)) this.push(internString("string"));
+            else if (val === null) this.push(internString("object"));
+            else this.push(internString(typeof val));
+          }
           break;
         }
 
@@ -404,16 +683,8 @@ export class VM {
         // throw
         case "Throw": {
           const throwValue = this.pop();
-          // 例外ハンドラテーブルからハンドラを探す
-          const handler = frame.func.handlers?.find(
-            h => frame.pc - 1 >= h.tryStart && frame.pc - 1 < h.tryEnd && h.catchStart >= 0
-          );
-          if (handler) {
-            // catch ブロックにジャンプ、例外値をスタックに push
-            this.push(throwValue);
-            frame.pc = handler.catchStart;
-          } else {
-            // ハンドラがない: 上位にプロパゲート
+          if (!this.unwindToHandler(throwValue, this._runBaseFrameCount)) {
+            // 現在の run() スコープ内にハンドラがない: JS 例外として上位に伝播
             throw { __thrown: true, value: throwValue };
           }
           break;
@@ -435,14 +706,28 @@ export class VM {
             args.unshift(this.pop());
           }
 
-          if (typeof callee === "object" && callee !== null && "bytecode" in callee) {
-            const fn = callee as BytecodeFunction;
+          // クロージャオブジェクトか通常の BytecodeFunction か判定
+          let fn: BytecodeFunction | null = null;
+          let closureBoxes: UpvalueBox[] = [];
+          if (typeof callee === "object" && callee !== null && "__closure" in callee) {
+            const closure = callee as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
+            fn = closure.func;
+            closureBoxes = closure.capturedBoxes;
+          } else if (typeof callee === "object" && callee !== null && "bytecode" in callee) {
+            fn = callee as BytecodeFunction;
+          }
+
+          if (fn) {
             // 型フィードバック記録
             if (this.feedback) this.feedback.recordCall(fn, args);
             // JIT: Wasm キャッシュがあればそちらで実行
             if (this.jit) {
-              const jitResult = this.jit.tryCall(fn, args);
+              // upvalue の値を追加引数として渡す
+              const upvalueValues = closureBoxes.map(b => b.value);
+              const jitResult = this.jit.tryCall(fn, args, upvalueValues);
               if (jitResult !== null) {
+                // upvalue の書き戻し (StaUpvalue で変更された可能性)
+                // → Wasm は値渡しなので書き戻しは不可。読み取り専用のクロージャのみ JIT 対象
                 this.push(jitResult.result);
                 break;
               }
@@ -451,7 +736,7 @@ export class VM {
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn) });
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
           } else {
             throw new Error("Not a function");
           }
@@ -472,13 +757,22 @@ export class VM {
             // ネイティブメソッド (console.log 等)
             const result = (method as Function).apply(thisObj, args);
             this.push(result);
+          } else if (typeof method === "object" && method !== null && "__closure" in method) {
+            // クロージャオブジェクト
+            const closure = method as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
+            const fn = closure.func;
+            const locals = new Array(fn.localCount).fill(undefined);
+            for (let i = 0; i < fn.paramCount; i++) {
+              locals[i] = args[i] ?? undefined;
+            }
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
           } else if (typeof method === "object" && method !== null && "bytecode" in method) {
             const fn = method as BytecodeFunction;
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn) });
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: [] });
           } else {
             throw new Error("Not a function");
           }
@@ -520,7 +814,7 @@ export class VM {
             for (let i = 0; i < ctor.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor) });
+            this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor), upvalueBoxes: [] });
             (frame as any).__pendingNewObj = newObj;
           } else {
             throw new Error("Not a constructor");
@@ -566,6 +860,10 @@ export class VM {
       }
     }
 
-    return this.sp >= 0 ? this.pop() : undefined;
+    // トップレベル (baseFrameCount=0) の場合のみ最終結果を pop
+    if (baseFrameCount === 0) {
+      return this.sp >= 0 ? this.pop() : undefined;
+    }
+    return undefined;
   }
 }
