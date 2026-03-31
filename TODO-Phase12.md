@@ -67,10 +67,16 @@ NG: Object.keys, Object.create
 
 ## ステップ
 
-- [ ] 12-0: JSObject に `__proto__` を追加、getProperty でプロトタイプチェーンを辿る
-- [ ] 12-1: Object.prototype (toString, hasOwnProperty, valueOf)
-- [ ] 12-2: Foo.prototype.method パターン (new で __proto__ を Foo.prototype に設定)
-- [ ] 12-3: Array.prototype (push, map, filter, forEach, indexOf, join, slice, concat)
-- [ ] 12-4: String.prototype (charAt, indexOf, slice, trim, toUpperCase, toLowerCase)
-- [ ] 12-5: Object.keys, Object.create, Object.assign
-- [ ] 12-6: test262 準拠率確認 + compat テスト追加
+- [x] 12-0: JSObject に `__proto__` を追加、getProperty でプロトタイプチェーンを辿る
+- [x] 12-1: Object.prototype (toString, hasOwnProperty, valueOf) — 12-0 でカバー
+- [x] 12-2: Foo.prototype.method パターン (new で __proto__ を Foo.prototype に設定) — 12-0 でカバー
+- [x] 12-3: Array.prototype (map, filter, forEach, reduce, find, some, every)
+- [x] 12-4: String.prototype (charAt, indexOf, slice, trim, toUpperCase, toLowerCase, etc.)
+- [x] 12-5: Object.keys/values/entries/assign/create, Math, JSON, isNaN, parseInt, parseFloat
+- [x] 12-6: test262 準拠率確認 + compat テスト追加
+
+## 結果
+
+- test262: TW 252/841 (30.9%), VM 252/841 (30.9%)
+- npm test: 552/552 pass
+- TW/VM 差: 2件 (for-head のクロージャキャプチャ)
