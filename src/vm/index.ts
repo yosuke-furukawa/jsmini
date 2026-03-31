@@ -51,6 +51,56 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     },
   };
 
+  // Array.prototype: コールバック系メソッド
+  vm.arrayPrototype = {
+    map: function(this: unknown[], fn: unknown) {
+      const result: unknown[] = [];
+      for (let i = 0; i < this.length; i++) {
+        result[i] = vm.callFunction(fn, undefined, [this[i], i, this]);
+      }
+      return result;
+    },
+    filter: function(this: unknown[], fn: unknown) {
+      const result: unknown[] = [];
+      for (let i = 0; i < this.length; i++) {
+        if (vm.callFunction(fn, undefined, [this[i], i, this])) result.push(this[i]);
+      }
+      return result;
+    },
+    forEach: function(this: unknown[], fn: unknown) {
+      for (let i = 0; i < this.length; i++) {
+        vm.callFunction(fn, undefined, [this[i], i, this]);
+      }
+    },
+    reduce: function(this: unknown[], fn: unknown, init: unknown) {
+      let acc = init;
+      let start = 0;
+      if (acc === undefined) { acc = this[0]; start = 1; }
+      for (let i = start; i < this.length; i++) {
+        acc = vm.callFunction(fn, undefined, [acc, this[i], i, this]);
+      }
+      return acc;
+    },
+    find: function(this: unknown[], fn: unknown) {
+      for (let i = 0; i < this.length; i++) {
+        if (vm.callFunction(fn, undefined, [this[i], i, this])) return this[i];
+      }
+      return undefined;
+    },
+    some: function(this: unknown[], fn: unknown) {
+      for (let i = 0; i < this.length; i++) {
+        if (vm.callFunction(fn, undefined, [this[i], i, this])) return true;
+      }
+      return false;
+    },
+    every: function(this: unknown[], fn: unknown) {
+      for (let i = 0; i < this.length; i++) {
+        if (!vm.callFunction(fn, undefined, [this[i], i, this])) return false;
+      }
+      return true;
+    },
+  };
+
   vm.setGlobal("undefined", undefined);
   vm.setGlobal("NaN", NaN);
   vm.setGlobal("Infinity", Infinity);

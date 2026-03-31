@@ -41,7 +41,8 @@ export class VM {
   maxSteps = 0;
   private stepCount = 0;
   private _runBaseFrameCount = 0;
-  objectPrototype: Record<string, unknown> = {}; // Object.prototype (12-0 で初期化)
+  objectPrototype: Record<string, unknown> = {};
+  arrayPrototype: Record<string, unknown> = {};
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -169,6 +170,34 @@ export class VM {
       this.frames.pop();
     }
     return false;
+  }
+
+  // jsmini 関数 (BytecodeFunction or クロージャ or ネイティブ) を呼ぶ汎用ヘルパー
+  callFunction(fn: unknown, thisValue: unknown, args: unknown[]): unknown {
+    if (typeof fn === "function") {
+      return (fn as Function).apply(thisValue, args);
+    }
+    if (typeof fn === "object" && fn !== null && "__closure" in (fn as any)) {
+      const closure = fn as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
+      const saved = this.sp;
+      const base = this.frames.length;
+      const locals = new Array(closure.func.localCount).fill(undefined);
+      for (let i = 0; i < closure.func.paramCount && i < args.length; i++) locals[i] = args[i];
+      this.frames.push({ func: closure.func, pc: 0, locals, thisValue, icSlots: this.createICSlots(closure.func), upvalueBoxes: closure.capturedBoxes });
+      try { this.run(base); } catch (e: any) {
+        this.sp = saved;
+        const tv = e?.__thrown ? e.value : e;
+        if (this.unwindToHandler(tv)) return THROWN_SENTINEL;
+        throw e;
+      }
+      const result = this.sp > saved ? this.stack[this.sp] : undefined;
+      this.sp = saved;
+      return result;
+    }
+    if (typeof fn === "object" && fn !== null && "bytecode" in (fn as any)) {
+      return this.callInternal(fn as BytecodeFunction, thisValue, args);
+    }
+    throw new TypeError("Not a function");
   }
 
   // BytecodeFunction を直接呼び出す (ToPrimitive 等の内部用)
@@ -596,7 +625,12 @@ export class VM {
                 jsObjSet(proto, "__proto__", this.objectPrototype);
                 (obj as any).prototype = proto;
               }
-              this.push((obj as Record<string, unknown>)[name]);
+              // 配列のメソッド: arrayPrototype を優先
+              if (Array.isArray(obj) && name in this.arrayPrototype) {
+                this.push(this.arrayPrototype[name]);
+              } else {
+                this.push((obj as Record<string, unknown>)[name]);
+              }
             }
           }
           break;
