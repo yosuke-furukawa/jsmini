@@ -165,6 +165,57 @@ export class VM {
     return false;
   }
 
+  // BytecodeFunction を直接呼び出す (ToPrimitive 等の内部用)
+  private callInternal(func: BytecodeFunction, thisValue: unknown, args: unknown[]): unknown {
+    const locals = new Array(func.localCount).fill(undefined);
+    for (let i = 0; i < args.length && i < func.paramCount; i++) {
+      locals[i] = args[i];
+    }
+    // スタックポインタを保存してフレームを追加実行
+    const savedSp = this.sp;
+    const baseFrameCount = this.frames.length;
+    this.frames.push({
+      func, pc: 0, locals, thisValue,
+      icSlots: this.createICSlots(func),
+      upvalueBoxes: [],
+    });
+    this.run(baseFrameCount);
+    // Return で push された結果を取得し、sp を復元
+    const hasResult = this.sp > savedSp;
+    const result = hasResult ? this.stack[this.sp] : undefined;
+    this.sp = savedSp;
+    return result;
+  }
+
+  // ToPrimitive: オブジェクトの valueOf/toString を呼んでプリミティブに変換
+  private toPrimitive(value: unknown): unknown {
+    if (value === null || value === undefined) return value;
+    if (typeof value !== "object") return value;
+    if (isJSString(value)) return value;
+    if (Array.isArray(value)) return value;
+    if (!isJSObject(value)) return value;
+    for (const name of ["valueOf", "toString"]) {
+      const method = jsObjGet(value as any, name);
+      if (method && typeof method === "object" && "bytecode" in (method as any)) {
+        // BytecodeFunction
+        const result = this.callInternal(method as BytecodeFunction, value, []);
+        if (result === null || result === undefined || typeof result !== "object" || isJSString(result)) {
+          return result;
+        }
+      } else if (method && typeof method === "object" && "__closure" in (method as any)) {
+        // クロージャオブジェクト
+        const fn = (method as any).__bytecode as BytecodeFunction;
+        if (fn) {
+          const result = this.callInternal(fn, value, []);
+          if (result === null || result === undefined || typeof result !== "object" || isJSString(result)) {
+            return result;
+          }
+        }
+      }
+    }
+    throw new TypeError("Cannot convert object to primitive value");
+  }
+
   execute(func: BytecodeFunction): unknown {
     // トップレベルをフレームとして実行
     this.frames.push({
@@ -179,15 +230,15 @@ export class VM {
     return this.run();
   }
 
-  private run(): unknown {
-    while (this.frames.length > 0) {
+  private run(baseFrameCount = 0): unknown {
+    while (this.frames.length > baseFrameCount) {
       const frame = this.frames[this.frames.length - 1];
       const { bytecode, constants } = frame.func;
 
       if (frame.pc >= bytecode.length) {
         // 関数の末尾に到達（return なし）
         this.frames.pop();
-        if (this.frames.length > 0) {
+        if (this.frames.length > baseFrameCount) {
           this.push(undefined);
         }
         continue;
@@ -257,8 +308,10 @@ export class VM {
 
         // 算術
         case "Add": {
-          const right = this.pop();
-          const left = this.pop();
+          const rawRight = this.pop();
+          const rawLeft = this.pop();
+          const left = this.toPrimitive(rawLeft);
+          const right = this.toPrimitive(rawRight);
           if (isJSString(left) || isJSString(right)) {
             // 一方または両方が JSString → 文字列連結
             const l = isJSString(left) ? left : createSeqString(String(left));
@@ -270,36 +323,36 @@ export class VM {
           break;
         }
         case "Sub": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
+          const right = this.toPrimitive(this.pop()) as number;
+          const left = this.toPrimitive(this.pop()) as number;
           this.push(left - right);
           break;
         }
         case "Mul": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
+          const right = this.toPrimitive(this.pop()) as number;
+          const left = this.toPrimitive(this.pop()) as number;
           this.push(left * right);
           break;
         }
         case "Div": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
+          const right = this.toPrimitive(this.pop()) as number;
+          const left = this.toPrimitive(this.pop()) as number;
           this.push(left / right);
           break;
         }
         case "Mod": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
+          const right = this.toPrimitive(this.pop()) as number;
+          const left = this.toPrimitive(this.pop()) as number;
           this.push(left % right);
           break;
         }
         case "Negate": {
-          const val = this.pop() as number;
+          const val = this.toPrimitive(this.pop()) as number;
           this.push(-val);
           break;
         }
 
-        // 比較
+        // 比較 (==/===/!=/!== は ToPrimitive しない — identity 比較)
         case "Equal":
         case "StrictEqual": {
           const right = this.pop();
@@ -307,7 +360,6 @@ export class VM {
           if (isJSString(left) && isJSString(right)) {
             this.push(jsStringEquals(left, right));
           } else if (isJSString(left) || isJSString(right)) {
-            // 片方だけ JSString → 型が違うので false
             this.push(false);
           } else {
             this.push(instr.op === "Equal" ? left == right : left === right);
@@ -328,26 +380,26 @@ export class VM {
           break;
         }
         case "LessThan": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
+          const right = this.toPrimitive(this.pop()) as number;
+          const left = this.toPrimitive(this.pop()) as number;
           this.push(left < right);
           break;
         }
         case "GreaterThan": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
+          const right = this.toPrimitive(this.pop()) as number;
+          const left = this.toPrimitive(this.pop()) as number;
           this.push(left > right);
           break;
         }
         case "LessEqual": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
+          const right = this.toPrimitive(this.pop()) as number;
+          const left = this.toPrimitive(this.pop()) as number;
           this.push(left <= right);
           break;
         }
         case "GreaterEqual": {
-          const right = this.pop() as number;
-          const left = this.pop() as number;
+          const right = this.toPrimitive(this.pop()) as number;
+          const left = this.toPrimitive(this.pop()) as number;
           this.push(left >= right);
           break;
         }
@@ -778,6 +830,10 @@ export class VM {
       }
     }
 
-    return this.sp >= 0 ? this.pop() : undefined;
+    // トップレベル (baseFrameCount=0) の場合のみ最終結果を pop
+    if (baseFrameCount === 0) {
+      return this.sp >= 0 ? this.pop() : undefined;
+    }
+    return undefined;
   }
 }
