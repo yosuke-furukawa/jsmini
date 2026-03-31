@@ -93,6 +93,21 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   env.defineReadOnly("SyntaxError", SyntaxError);
   env.defineReadOnly("RangeError", RangeError);
 
+  // グローバル関数
+  env.defineReadOnly("isNaN", (v: unknown) => Number.isNaN(Number(v)));
+  env.defineReadOnly("isFinite", (v: unknown) => Number.isFinite(Number(v)));
+  env.defineReadOnly("parseInt", (s: unknown, radix?: number) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
+  env.defineReadOnly("parseFloat", (s: unknown) => parseFloat(isJSString(s) ? jsStringToString(s) : String(s)));
+
+  // Math
+  env.defineReadOnly("Math", {
+    floor: Math.floor, ceil: Math.ceil, round: Math.round,
+    abs: Math.abs, min: Math.min, max: Math.max,
+    sqrt: Math.sqrt, pow: Math.pow, log: Math.log,
+    random: Math.random, PI: Math.PI, E: Math.E,
+    sign: Math.sign, trunc: Math.trunc,
+  });
+
   // console オブジェクトを組み込み (JSString → JS string 変換付き)
   const userLog = options.console?.log ?? console.log;
   const consoleObj: Record<string, (...args: unknown[]) => void> = {
