@@ -660,11 +660,15 @@ class BytecodeCompiler {
             // TODO: spread
             continue;
           }
-          this.emit("Dup"); // obj を残す
+          // stack: [obj] → Dup → [obj, obj] → value → [obj, obj, value]
+          // SetProperty: pop value, peek obj → [obj, obj]
+          // Pop: → [obj]  (次のプロパティ or 最終結果として obj を残す)
+          this.emit("Dup");
           this.compileExpression(prop.value);
           const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
           const nameIdx = this.addConstant(key);
           this.emitWithIC("SetProperty", nameIdx);
+          this.emit("Pop"); // Dup のコピーを除去、元の obj はスタックに残る
         }
         break;
       }

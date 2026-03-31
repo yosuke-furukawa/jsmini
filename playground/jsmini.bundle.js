@@ -2836,6 +2836,7 @@ var jsmini = (() => {
             const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
             const nameIdx = this.addConstant(key);
             this.emitWithIC("SetProperty", nameIdx);
+            this.emit("Pop");
           }
           break;
         }
