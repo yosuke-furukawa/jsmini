@@ -16,6 +16,43 @@ function isTruthy(value: unknown): boolean {
   return !!value;
 }
 
+// ToPrimitive: オブジェクトの valueOf/toString を呼んでプリミティブに変換
+function toPrimitive(value: unknown, hint: "number" | "string" = "number"): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value !== "object") return value;
+  if (isJSString(value)) return value;
+  if (Array.isArray(value)) return value;
+
+  const obj = value as Record<string, unknown>;
+  const methods = hint === "string" ? ["toString", "valueOf"] : ["valueOf", "toString"];
+  for (const name of methods) {
+    const method = getProperty(obj, name);
+    if (typeof method === "function") {
+      const result = (method as Function).call(obj);
+      if (result === null || result === undefined || typeof result !== "object" || isJSString(result)) {
+        return result;
+      }
+    }
+    if (isJSFunction(method)) {
+      const jsFn = method;
+      const fnEnv = new Environment(jsFn.closure, true);
+      fnEnv.setThis(obj);
+      hoistVarDeclarations(jsFn.body.body, fnEnv);
+      try {
+        for (const s of jsFn.body.body) evalStatement(s, fnEnv);
+      } catch (e) {
+        if (e instanceof ReturnSignal) {
+          const r = e.value;
+          if (r === null || r === undefined || typeof r !== "object" || isJSString(r)) return r;
+          continue;
+        }
+        throw e;
+      }
+    }
+  }
+  throw new TypeError("Cannot convert object to primitive value");
+}
+
 // MemberExpression のキーを解決する共通ヘルパー
 function resolveMemberKey(expr: MemberExpression, env: Environment): string {
   if (expr.computed) {
@@ -787,8 +824,11 @@ function evalBinaryExpression(
   expr: Expression & { type: "BinaryExpression" },
   env: Environment,
 ): unknown {
-  const left = evalExpression(expr.left, env);
-  const right = evalExpression(expr.right, env);
+  const rawLeft = evalExpression(expr.left, env);
+  const rawRight = evalExpression(expr.right, env);
+  // 算術/比較演算子はオブジェクトを ToPrimitive で変換
+  const left = toPrimitive(rawLeft);
+  const right = toPrimitive(rawRight);
   switch (expr.operator) {
     case "+":
       if (isJSString(left) || isJSString(right)) {
@@ -807,25 +847,25 @@ function evalBinaryExpression(
     case ">=": return (left as number) >= (right as number);
     case "==":
     case "===":
-      if (isJSString(left) && isJSString(right)) return jsStringEquals(left, right);
-      if (isJSString(left) || isJSString(right)) return false;
-      return expr.operator === "==" ? left == right : left === right;
+      if (isJSString(rawLeft) && isJSString(rawRight)) return jsStringEquals(rawLeft, rawRight);
+      if (isJSString(rawLeft) || isJSString(rawRight)) return false;
+      return expr.operator === "==" ? rawLeft == rawRight : rawLeft === rawRight;
     case "!=":
     case "!==":
-      if (isJSString(left) && isJSString(right)) return !jsStringEquals(left, right);
-      if (isJSString(left) || isJSString(right)) return true;
-      return expr.operator === "!=" ? left != right : left !== right;
+      if (isJSString(rawLeft) && isJSString(rawRight)) return !jsStringEquals(rawLeft, rawRight);
+      if (isJSString(rawLeft) || isJSString(rawRight)) return true;
+      return expr.operator === "!=" ? rawLeft != rawRight : rawLeft !== rawRight;
     case "in": {
-      const key = isJSString(left) ? jsStringToString(left) : String(left);
-      return key in (right as Record<string, unknown>);
+      const key = isJSString(rawLeft) ? jsStringToString(rawLeft) : String(rawLeft);
+      return key in (rawRight as Record<string, unknown>);
     }
     case "instanceof": {
       // ネイティブコンストラクタ (ReferenceError 等) はそのまま JS の instanceof に委譲
-      if (typeof right === "function") return left instanceof right;
-      if (!isJSFunction(right)) throw new TypeError("Right-hand side of instanceof is not callable");
+      if (typeof rawRight === "function") return rawLeft instanceof rawRight;
+      if (!isJSFunction(rawRight)) throw new TypeError("Right-hand side of instanceof is not callable");
       // プロトタイプチェーンを辿って right.prototype を探す
-      const proto = (right as JSFunction).prototype;
-      let current = (left as JSObject)?.[PROTO_KEY] as JSObject | null;
+      const proto = (rawRight as JSFunction).prototype;
+      let current = (rawLeft as JSObject)?.[PROTO_KEY] as JSObject | null;
       while (current !== null && current !== undefined) {
         if (current === proto) return true;
         current = (current as JSObject)?.[PROTO_KEY] as JSObject | null;
