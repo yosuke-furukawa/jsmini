@@ -386,7 +386,12 @@ export class VM {
         // グローバル変数
         case "LdaGlobal": {
           const name = constants[instr.operand!] as string;
-          this.push(this.globals.has(name) ? this.globals.get(name) : undefined);
+          if (!this.globals.has(name)) {
+            const err = new ReferenceError(`${name} is not defined`);
+            if (!this.unwindToHandler(err)) throw err;
+            break;
+          }
+          this.push(this.globals.get(name));
           break;
         }
         case "StaGlobal": {
@@ -546,15 +551,20 @@ export class VM {
         case "Instanceof": {
           const right = this.pop() as any;
           const left = this.pop() as any;
-          // 簡易: prototype チェーンを辿る
-          const proto = right?.prototype;
-          let current = left?.__proto__;
-          let found = false;
-          while (current) {
-            if (current === proto) { found = true; break; }
-            current = current.__proto__;
+          // ネイティブコンストラクタ (ReferenceError 等) はそのまま JS の instanceof に委譲
+          if (typeof right === "function") {
+            this.push(left instanceof right);
+          } else {
+            // jsmini 関数: prototype チェーンを辿る
+            const proto = right?.prototype;
+            let current = left?.__proto__;
+            let found = false;
+            while (current) {
+              if (current === proto) { found = true; break; }
+              current = current.__proto__;
+            }
+            this.push(found);
           }
-          this.push(found);
           break;
         }
 
@@ -564,6 +574,19 @@ export class VM {
           if (isJSString(val)) this.push(internString("string"));
           else if (val === null) this.push(internString("object"));
           else this.push(internString(typeof val));
+          break;
+        }
+
+        case "TypeOfGlobal": {
+          const name = constants[instr.operand!] as string;
+          if (!this.globals.has(name)) {
+            this.push(internString("undefined"));
+          } else {
+            const val = this.globals.get(name);
+            if (isJSString(val)) this.push(internString("string"));
+            else if (val === null) this.push(internString("object"));
+            else this.push(internString(typeof val));
+          }
           break;
         }
 

@@ -51,6 +51,10 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   env.defineReadOnly("undefined", undefined);
   env.defineReadOnly("NaN", NaN);
   env.defineReadOnly("Infinity", Infinity);
+  env.defineReadOnly("ReferenceError", ReferenceError);
+  env.defineReadOnly("TypeError", TypeError);
+  env.defineReadOnly("SyntaxError", SyntaxError);
+  env.defineReadOnly("RangeError", RangeError);
 
   // console オブジェクトを組み込み (JSString → JS string 変換付き)
   const userLog = options.console?.log ?? console.log;
@@ -816,6 +820,8 @@ function evalBinaryExpression(
       return key in (right as Record<string, unknown>);
     }
     case "instanceof": {
+      // ネイティブコンストラクタ (ReferenceError 等) はそのまま JS の instanceof に委譲
+      if (typeof right === "function") return left instanceof right;
       if (!isJSFunction(right)) throw new TypeError("Right-hand side of instanceof is not callable");
       // プロトタイプチェーンを辿って right.prototype を探す
       const proto = (right as JSFunction).prototype;

@@ -55,6 +55,7 @@ export type Opcode =
 
   // typeof / throw
   | "TypeOf"          // pop 1つ、typeof 文字列を push
+  | "TypeOfGlobal"    // operand=名前index, 未定義なら "undefined" を push (ReferenceError にしない)
   | "Throw"           // pop 1つ、例外を投げる
 
   // 更新

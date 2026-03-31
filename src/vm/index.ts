@@ -39,6 +39,10 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   vm.setGlobal("undefined", undefined);
   vm.setGlobal("NaN", NaN);
   vm.setGlobal("Infinity", Infinity);
+  vm.setGlobal("ReferenceError", ReferenceError);
+  vm.setGlobal("TypeError", TypeError);
+  vm.setGlobal("SyntaxError", SyntaxError);
+  vm.setGlobal("RangeError", RangeError);
 
   // console.log: JSString → JS string に変換してから出力
   const userLog = options.console?.log ?? console.log;

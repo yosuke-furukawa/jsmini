@@ -776,15 +776,34 @@ class BytecodeCompiler {
       }
 
       case "UnaryExpression": {
-        this.compileExpression(expr.argument);
-        if (expr.operator === "-") {
-          this.emit("Negate");
-        } else if (expr.operator === "!") {
-          this.emit("LogicalNot");
-        } else if (expr.operator === "typeof") {
-          this.emit("TypeOf");
+        if (expr.operator === "typeof" && expr.argument.type === "Identifier") {
+          // typeof 未定義変数は ReferenceError にせず "undefined" を返す
+          const name = expr.argument.name;
+          const local = this.resolveLocal(name);
+          if (local !== null) {
+            this.emit("LdaLocal", local);
+            this.emit("TypeOf");
+          } else {
+            const upvalue = this.resolveUpvalue(name);
+            if (upvalue >= 0) {
+              this.emit("LdaUpvalue", upvalue);
+              this.emit("TypeOf");
+            } else {
+              // グローバル: TypeOfGlobal で安全にアクセス
+              this.emit("TypeOfGlobal", this.addConstant(name));
+            }
+          }
         } else {
-          throw new Error(`Unsupported unary operator: ${expr.operator}`);
+          this.compileExpression(expr.argument);
+          if (expr.operator === "-") {
+            this.emit("Negate");
+          } else if (expr.operator === "!") {
+            this.emit("LogicalNot");
+          } else if (expr.operator === "typeof") {
+            this.emit("TypeOf");
+          } else {
+            throw new Error(`Unsupported unary operator: ${expr.operator}`);
+          }
         }
         break;
       }
