@@ -829,6 +829,17 @@ class BytecodeCompiler {
         break;
       }
 
+      case "SequenceExpression": {
+        // カンマ演算子: 各式を評価して最後の値を返す
+        for (let i = 0; i < expr.expressions.length; i++) {
+          this.compileExpression(expr.expressions[i]);
+          if (i < expr.expressions.length - 1) {
+            this.emit("Pop"); // 最後以外は捨てる
+          }
+        }
+        break;
+      }
+
       default: {
         // 未対応の式は AST を定数テーブルに入れて VM 側で tree-walking 実行
         const exprIndex = this.addConstant(expr);
