@@ -3296,6 +3296,7 @@ var jsmini = (() => {
   var WASM_OP = {
     local_get: 32,
     local_set: 33,
+    local_tee: 34,
     global_get: 35,
     global_set: 36,
     // i32
@@ -3610,11 +3611,16 @@ var jsmini = (() => {
       const arrayLocals = arrayLocalsByFunc.get(func.name) ?? /* @__PURE__ */ new Set();
       const objectPropOffsets = /* @__PURE__ */ new Map();
       let propCounter = 0;
-      for (const instr of func.bytecode) {
-        if ((instr.op === "GetProperty" || instr.op === "SetPropertyAssign") && instr.operand !== void 0) {
-          const name2 = func.constants[instr.operand];
-          if (name2 !== "length" && !objectPropOffsets.has(name2)) {
-            objectPropOffsets.set(name2, propCounter++);
+      const propsFromFuncs = [func, ...funcs.filter((f) => f !== func)];
+      for (const pf of propsFromFuncs) {
+        for (let ii = 0; ii < pf.bytecode.length; ii++) {
+          const instr = pf.bytecode[ii];
+          if ((instr.op === "GetProperty" || instr.op === "SetPropertyAssign") && instr.operand !== void 0) {
+            if (instr.op === "GetProperty" && ii + 1 < pf.bytecode.length && pf.bytecode[ii + 1].op === "CallMethod") continue;
+            const name2 = pf.constants[instr.operand];
+            if (name2 !== "length" && !objectPropOffsets.has(name2)) {
+              objectPropOffsets.set(name2, propCounter++);
+            }
           }
         }
       }
@@ -3651,8 +3657,13 @@ var jsmini = (() => {
           const argc = func.bytecode[i].operand;
           if (argc > maxInlineArgs) maxInlineArgs = argc;
         }
+        if (func.bytecode[i].op === "CallMethod" && i >= 2 && func.bytecode[i - 1].op === "GetProperty" && func.bytecode[i - 2].op === "Dup") {
+          const argc = func.bytecode[i].operand + 1;
+          if (argc > maxInlineArgs) maxInlineArgs = argc;
+        }
       }
       extraLocals += maxInlineArgs;
+      if (func.bytecode.some((i) => i.op === "Dup")) extraLocals = Math.max(extraLocals, 1);
       const body = translateBytecode(func, ctx);
       if (!body) return null;
       builder.addFunction(func.name, params, results, body, extraLocals > 0 ? extraLocals : 0);
@@ -4014,6 +4025,11 @@ var jsmini = (() => {
         }
         case "GetProperty": {
           const name2 = constants[instr.operand];
+          if (pc + 1 < bytecode.length && bytecode[pc + 1].op === "CallMethod" && pc > 0 && bytecode[pc - 1].op === "Dup") {
+            out.push(WASM_OP.drop);
+            out.push(WASM_OP.i32_const, 0);
+            break;
+          }
           if (name2 === "length" && ctx.hasMemory) {
             out.push(WASM_OP.i32_load, 2, 0);
             break;
@@ -4194,18 +4210,101 @@ var jsmini = (() => {
           }
           return false;
         }
+        // prototype メソッドのインライン展開
+        // パターン: Dup + GetProperty "method" + CallMethod N
+        // → Dup で this がスタックトップに複製されている
+        // → GetProperty の結果 (method ref) を drop して this を使ってインライン展開
+        case "CallMethod": {
+          const argc = instr.operand;
+          if (pc >= 2 && bytecode[pc - 1].op === "GetProperty" && bytecode[pc - 2].op === "Dup") {
+            const methodName = constants[bytecode[pc - 1].operand];
+            let inlineTarget = null;
+            for (const [name2, candidate] of ctx.inlineCandidates) {
+              if (candidate.name === methodName && candidate.paramCount === argc) {
+                const hasLoop = candidate.bytecode.some((i) => i.op === "Jump" || i.op === "JumpIfFalse");
+                if (!hasLoop) {
+                  inlineTarget = candidate;
+                  break;
+                }
+              }
+            }
+            if (inlineTarget && isI32 && ctx.hasMemory) {
+              out.push(WASM_OP.drop);
+              const extraBase = func.localCount + (func.bytecode.some((i) => i.op === "SetPropertyComputed") ? 1 : 0) + (func.bytecode.some((i) => i.op === "SetPropertyAssign") ? 2 : 0);
+              const thisLocal = extraBase + argc;
+              out.push(WASM_OP.local_set, thisLocal);
+              for (let i = argc - 1; i >= 0; i--) {
+                out.push(WASM_OP.local_set, extraBase + i);
+              }
+              const methodPropOffsets = /* @__PURE__ */ new Map();
+              let propIdx = 0;
+              for (const ii of inlineTarget.bytecode) {
+                if (ii.op === "GetProperty" && ii.operand !== void 0) {
+                  const pname = inlineTarget.constants[ii.operand];
+                  if (!methodPropOffsets.has(pname)) methodPropOffsets.set(pname, propIdx++);
+                }
+              }
+              for (let j = 0; j < inlineTarget.bytecode.length; j++) {
+                const ii = inlineTarget.bytecode[j];
+                if (ii.op === "LoadThis") {
+                  out.push(WASM_OP.local_get, thisLocal);
+                } else if (ii.op === "GetProperty") {
+                  const pname = inlineTarget.constants[ii.operand];
+                  const off = ctx.objectPropOffsets.get(pname);
+                  if (off !== void 0) {
+                    const byteOff = off * 4;
+                    if (byteOff > 0) {
+                      out.push(WASM_OP.i32_const, ...i32ToLEB128(byteOff));
+                      out.push(WASM_OP.i32_add);
+                    }
+                    out.push(WASM_OP.i32_load, 2, 0);
+                  } else {
+                    return false;
+                  }
+                } else if (ii.op === "LdaLocal") {
+                  out.push(WASM_OP.local_get, extraBase + ii.operand);
+                } else if (ii.op === "Return") {
+                  break;
+                } else {
+                  const saved = { ...ctx, inlineLocalOffset: extraBase };
+                  if (!translateRange(inlineTarget, j, j + 1, saved, out)) return false;
+                }
+              }
+              break;
+            }
+          }
+          return false;
+        }
         case "Construct": {
           if (ctx.heapPtrGlobal >= 0 && ctx.objectSize > 0 && isI32) {
             const argc = instr.operand;
-            out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
-            out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
-            out.push(WASM_OP.i32_const, ...i32ToLEB128(ctx.objectSize));
-            out.push(WASM_OP.i32_add);
-            out.push(WASM_OP.global_set, ctx.heapPtrGlobal);
-            if (pc > 0 && bytecode[pc - 1].op === "LdaGlobal") {
-              const name2 = constants[bytecode[pc - 1].operand];
-              const idx = funcIndex.get(name2);
+            let ctorName = null;
+            let needDrop = false;
+            if (pc > 0) {
+              const prev = bytecode[pc - 1];
+              if (prev.op === "LdaGlobal") {
+                ctorName = constants[prev.operand];
+                needDrop = !funcIndex.has(ctorName);
+              } else if (prev.op === "LdaLocal" || prev.op === "LdaUpvalue") {
+                if (prev.op === "LdaUpvalue" && func.upvalues?.[prev.operand]) {
+                  ctorName = func.upvalues[prev.operand].name;
+                } else {
+                  for (const c of constants) {
+                    if (c && typeof c === "object" && "bytecode" in c) ctorName = c.name;
+                  }
+                }
+                needDrop = true;
+              }
+            }
+            if (ctorName) {
+              const idx = funcIndex.get(ctorName);
               if (idx !== void 0) {
+                if (needDrop) out.push(WASM_OP.drop);
+                out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
+                out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
+                out.push(WASM_OP.i32_const, ...i32ToLEB128(ctx.objectSize));
+                out.push(WASM_OP.i32_add);
+                out.push(WASM_OP.global_set, ctx.heapPtrGlobal);
                 out.push(WASM_OP.call, idx);
                 out.push(WASM_OP.drop);
                 out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
@@ -4230,6 +4329,12 @@ var jsmini = (() => {
         case "Pop":
           out.push(WASM_OP.drop);
           break;
+        case "Dup": {
+          const tempLocal = func.localCount + (func.bytecode.some((i) => i.op === "SetPropertyComputed") ? 1 : 0) + (func.bytecode.some((i) => i.op === "SetPropertyAssign") ? 2 : 0);
+          out.push(WASM_OP.local_tee, tempLocal);
+          out.push(WASM_OP.local_get, tempLocal);
+          break;
+        }
         default:
           return false;
       }
@@ -4312,8 +4417,31 @@ var jsmini = (() => {
           seen.add(c.name);
         }
       }
+      for (const box of frame.upvalueBoxes) {
+        if (box.value && typeof box.value === "object" && "bytecode" in box.value && !seen.has(box.value.name)) {
+          relatedFuncs.push(box.value);
+          seen.add(box.value.name);
+        }
+      }
+      for (let i = 0; i < func.bytecode.length - 1; i++) {
+        if (func.bytecode[i].op === "GetProperty" && func.bytecode[i + 1].op === "CallMethod") {
+          const methodName = func.constants[func.bytecode[i].operand];
+          for (const [, gval] of this.globals) {
+            if (gval && typeof gval === "object" && "bytecode" in gval && gval.prototype && isJSObject(gval.prototype)) {
+              const method = getProperty2(gval.prototype, methodName);
+              if (method && typeof method === "object" && "bytecode" in method && !seen.has(method.name)) {
+                relatedFuncs.push(method);
+                seen.add(method.name);
+              }
+            }
+          }
+        }
+      }
       const result = compileMultiSync(relatedFuncs, "i32");
-      if (!result) return null;
+      if (!result) {
+        frame.__osrDone = true;
+        return null;
+      }
       const wasmFn = result.get(func.name);
       if (!wasmFn) return null;
       const args = [];
@@ -4324,7 +4452,9 @@ var jsmini = (() => {
       }
       for (const box of frame.upvalueBoxes) {
         if (typeof box.value === "number") args.push(box.value);
-        else return null;
+        else if (typeof box.value === "object" && box.value !== null && "bytecode" in box.value) {
+          args.push(0);
+        } else return null;
       }
       try {
         if (this.heap.traceGC) {
@@ -4958,6 +5088,14 @@ var jsmini = (() => {
             } else if (typeof method === "object" && method !== null && "__closure" in method) {
               const closure = method;
               const fn = closure.func;
+              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.jit) {
+                const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map((b) => b.value), thisObj);
+                if (jitResult !== null) {
+                  this.push(jitResult.result);
+                  break;
+                }
+              }
               const locals = new Array(fn.localCount).fill(void 0);
               for (let i = 0; i < fn.paramCount; i++) {
                 locals[i] = args[i] ?? void 0;
@@ -4965,6 +5103,14 @@ var jsmini = (() => {
               this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
             } else if (typeof method === "object" && method !== null && "bytecode" in method) {
               const fn = method;
+              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.jit) {
+                const jitResult = this.jit.tryCall(fn, args, [], thisObj);
+                if (jitResult !== null) {
+                  this.push(jitResult.result);
+                  break;
+                }
+              }
               const locals = new Array(fn.localCount).fill(void 0);
               for (let i = 0; i < fn.paramCount; i++) {
                 locals[i] = args[i] ?? void 0;
@@ -5201,7 +5347,7 @@ var jsmini = (() => {
       const count = callCount ?? this.feedback.get(func)?.callCount ?? 0;
       this.tierLog.push(`[TIER] ${func.name}: ${tier} (call #${count})`);
     }
-    tryCall(func, args, upvalueValues = []) {
+    tryCall(func, args, upvalueValues = [], thisObj) {
       const fb = this.feedback.get(func);
       const callCount = fb?.callCount ?? 0;
       if (this.deoptimized.has(func)) {
@@ -5214,7 +5360,7 @@ var jsmini = (() => {
           this.logTier(func, "Bytecode VM", callCount);
           return null;
         }
-        return this.executeWasm(func, cached, args, callCount, upvalueValues);
+        return this.executeWasm(func, cached, args, callCount, upvalueValues, thisObj);
       }
       if (!fb || callCount < this.threshold) {
         this.logTier(func, "Bytecode VM", callCount);
@@ -5238,8 +5384,8 @@ var jsmini = (() => {
         if (isArrayType(detailedTypes[i])) arrayArgIndices.push(i);
         if (detailedTypes[i] === "interned_string") stringArgIndices.push(i);
       }
-      const allSame = wasmArgTypes.every((t2) => t2 === wasmArgTypes[0]);
-      const spec = allSame && wasmArgTypes[0] === "i32" ? "i32" : "f64";
+      const allSame = wasmArgTypes.length === 0 || wasmArgTypes.every((t2) => t2 === wasmArgTypes[0]);
+      const spec = allSame && (wasmArgTypes.length === 0 || wasmArgTypes[0] === "i32") ? "i32" : "f64";
       let compiled = null;
       if (arrayArgIndices.length > 0) {
         compiled = this.compileWithRelatedFuncs(func, spec, arrayArgIndices);
@@ -5253,7 +5399,7 @@ var jsmini = (() => {
       this.wasmCache.set(func, compiled);
       if (compiled) {
         this.logTier(func, `\u2192 Wasm compiled (${spec}, arrays: [${arrayArgIndices}])`, callCount);
-        return this.executeWasm(func, compiled, args, callCount, upvalueValues);
+        return this.executeWasm(func, compiled, args, callCount, upvalueValues, thisObj);
       }
       this.logTier(func, "Bytecode VM", callCount);
       return null;
@@ -5297,7 +5443,7 @@ var jsmini = (() => {
       }
       return result;
     }
-    executeWasm(func, cached, args, callCount, upvalueValues = []) {
+    executeWasm(func, cached, args, callCount, upvalueValues = [], thisObj) {
       const { fn, memory, arrayArgIndices } = cached;
       if (arrayArgIndices.length > 0 && memory) {
         return this.executeWithArrayArgs(func, fn, memory, args, arrayArgIndices, callCount);
@@ -5343,6 +5489,22 @@ var jsmini = (() => {
         } else {
           return null;
         }
+      }
+      const hasThis = func.bytecode.some((i) => i.op === "LoadThis");
+      if (hasThis && thisObj !== void 0) {
+        if (!isJSObject(thisObj)) {
+          return null;
+        }
+        if (!memory) {
+          return null;
+        }
+        const slots = getSlots(thisObj);
+        const view = new Int32Array(memory.buffer);
+        const base2 = 0;
+        for (let i = 0; i < slots.length; i++) {
+          view[i] = slots[i];
+        }
+        wasmArgs.push(base2);
       }
       this.logTier(func, "Wasm", callCount);
       return { result: fn(...wasmArgs) };

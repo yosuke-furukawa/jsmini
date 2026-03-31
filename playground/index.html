@@ -263,6 +263,10 @@ main {
     <option value="map-reduce">Map / Reduce</option>
     <option value="class">Class</option>
     <option value="demo">Full Demo</option>
+    <option value="proto-jit">Prototype + JIT</option>
+    <option value="array-methods">Array Methods</option>
+    <option value="string-methods">String Methods</option>
+    <option value="closure">Closure</option>
   </select>
   <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
     <option value="tree-walking">Tree-Walking</option>
@@ -453,6 +457,175 @@ for (var i = 0; i < 10; i = i + 1) {
 }
 console.log(\`sum = (\${sum.x}, \${sum.y})\`);
 console.log(\`dot(1,1) = \${sum.dot(new Vec(1, 1))}\`);`,
+
+  "proto-jit": `// Prototype + JIT — HC + IC + prototype + OSR inline
+// Wasm JIT モードで実行すると、ループ全体が Wasm に変換される:
+//   new Point() → bump allocator
+//   p.dist()    → インライン展開 (i32.load + 算術)
+//   JS↔Wasm ブリッジ: ゼロ
+
+function Point(x, y) {
+  this.x = x;
+  this.y = y;
+}
+
+Point.prototype.dist = function dist() {
+  return this.x * this.x + this.y * this.y;
+};
+
+// ループを関数に包む (OSR の対象になる)
+function run(n) {
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    var p = new Point(i, i + 1);
+    sum = sum + p.dist();
+  }
+  return sum;
+}
+
+// 500 回: i32 の範囲内
+var result = run(500);
+console.log("sum of dist: " + result);
+
+// prototype メソッドの共有を確認
+var p1 = new Point(3, 4);
+var p2 = new Point(5, 12);
+console.log("p1.dist() = " + p1.dist());
+console.log("p2.dist() = " + p2.dist());
+console.log("same method: " + (p1.dist === p2.dist));`,
+
+  "array-methods": `// Array.prototype methods
+var nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+// map: 各要素を2倍
+var doubled = nums.map(function(x) { return x * 2; });
+console.log("map: " + doubled[0] + "," + doubled[1] + ",...," + doubled[9]);
+
+// filter: 偶数だけ
+var evens = nums.filter(function(x) { return x % 2 === 0; });
+console.log("filter: " + evens.length + " items");
+
+// reduce: 合計
+var sum = nums.reduce(function(acc, x) { return acc + x; }, 0);
+console.log("reduce: sum = " + sum);
+
+// forEach
+var count = 0;
+nums.forEach(function(x) {
+  if (x > 5) { count = count + 1; }
+});
+console.log("forEach: " + count + " items > 5");
+
+// find
+var found = nums.find(function(x) { return x > 7; });
+console.log("find(>7): " + found);
+
+// some / every
+console.log("some(>5): " + nums.some(function(x) { return x > 5; }));
+console.log("every(>0): " + nums.every(function(x) { return x > 0; }));
+
+// メソッドチェーン風
+var result = nums
+  .filter(function(x) { return x % 2 === 0; })
+  .map(function(x) { return x * x; })
+  .reduce(function(a, b) { return a + b; }, 0);
+console.log("even squares sum: " + result);`,
+
+  "string-methods": `// String.prototype methods
+var s = "Hello, World!";
+
+console.log("charAt(0): " + s.charAt(0));
+console.log("indexOf('World'): " + s.indexOf("World"));
+console.log("includes('World'): " + s.includes("World"));
+console.log("slice(0,5): " + s.slice(0, 5));
+console.log("toUpperCase: " + s.toUpperCase());
+console.log("toLowerCase: " + s.toLowerCase());
+
+// trim
+var padded = "  hello  ";
+console.log("trim: '" + padded.trim() + "'");
+
+// split
+var csv = "apple,banana,cherry";
+var fruits = csv.split(",");
+console.log("split: " + fruits.length + " items");
+console.log("  [0]=" + fruits[0] + " [1]=" + fruits[1] + " [2]=" + fruits[2]);
+
+// replace
+console.log("replace: " + s.replace("World", "jsmini"));
+
+// repeat + padStart
+var n = 42;
+console.log("padStart: " + "42".padStart(6, "0"));
+console.log("repeat: " + "ab".repeat(3));
+
+// startsWith / endsWith
+console.log("startsWith('Hello'): " + s.startsWith("Hello"));
+console.log("endsWith('!'): " + s.endsWith("!"));`,
+
+  "closure": `// Closure patterns
+
+// 1. makeAdder — 基本のクロージャ
+function makeAdder(n) {
+  return function(x) { return x + n; };
+}
+var add5 = makeAdder(5);
+var add10 = makeAdder(10);
+console.log("add5(3) = " + add5(3));
+console.log("add10(3) = " + add10(3));
+
+// 2. counter — ミュータブルキャプチャ
+function counter(start) {
+  var count = start;
+  return function() {
+    count = count + 1;
+    return count;
+  };
+}
+var inc = counter(0);
+console.log("counter: " + inc() + ", " + inc() + ", " + inc());
+
+// 3. forEach + 外部変数キャプチャ
+function forEach(arr, fn) {
+  for (var i = 0; i < arr.length; i = i + 1) {
+    fn(arr[i]);
+  }
+}
+function test() {
+  var sum = 0;
+  forEach([10, 20, 30], function(n) { sum = sum + n; });
+  return sum;
+}
+console.log("forEach sum: " + test());
+
+// 4. 2段クロージャ
+function outer(x) {
+  return function mid(y) {
+    return function inner(z) {
+      return x + y + z;
+    };
+  };
+}
+console.log("outer(1)(2)(3) = " + outer(1)(2)(3));
+
+// 5. private state パターン
+function createStack() {
+  var items = [];
+  var size = 0;
+  return {
+    push: function(v) { items[size] = v; size = size + 1; },
+    pop: function() { size = size - 1; return items[size]; },
+    peek: function() { return items[size - 1]; },
+    length: function() { return size; },
+  };
+}
+var stack = createStack();
+stack.push(1);
+stack.push(2);
+stack.push(3);
+console.log("stack.peek() = " + stack.peek());
+console.log("stack.pop() = " + stack.pop());
+console.log("stack.length() = " + stack.length());`,
 };
 
 // ========== CodeMirror setup ==========
