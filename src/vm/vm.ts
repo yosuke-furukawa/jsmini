@@ -203,29 +203,39 @@ export class VM {
     if (typeof value !== "object") return value;
     if (isJSString(value)) return value;
     if (Array.isArray(value)) return value;
-    if (!isJSObject(value)) return value;
+
+    const obj = value as Record<string, unknown>;
+    let methodFound = false;
     for (const name of ["valueOf", "toString"]) {
-      const method = jsObjGet(value as any, name);
+      // JSObject (Hidden Class) の場合は jsObjGet、それ以外は普通のプロパティアクセス
+      const method = isJSObject(value) ? jsObjGet(value, name) : obj[name];
       if (method && typeof method === "object" && "bytecode" in (method as any)) {
-        // BytecodeFunction
+        methodFound = true;
         const result = this.callInternal(method as BytecodeFunction, value, []);
+        if (result === THROWN_SENTINEL) return THROWN_SENTINEL;
         if (result === null || result === undefined || typeof result !== "object" || isJSString(result)) {
           return result;
         }
       } else if (method && typeof method === "object" && "__closure" in (method as any)) {
-        // クロージャオブジェクト
+        methodFound = true;
         const fn = (method as any).__bytecode as BytecodeFunction;
         if (fn) {
           const result = this.callInternal(fn, value, []);
+          if (result === THROWN_SENTINEL) return THROWN_SENTINEL;
           if (result === null || result === undefined || typeof result !== "object" || isJSString(result)) {
             return result;
           }
         }
       }
     }
-    const err = new TypeError("Cannot convert object to primitive value");
-    if (this.unwindToHandler(err, this._runBaseFrameCount)) return THROWN_SENTINEL;
-    throw err;
+    if (methodFound) {
+      // valueOf/toString があったが両方オブジェクトを返した → TypeError
+      const err = new TypeError("Cannot convert object to primitive value");
+      if (this.unwindToHandler(err, this._runBaseFrameCount)) return THROWN_SENTINEL;
+      throw err;
+    }
+    // メソッドが見つからなかった → デフォルトの toString
+    return internString("[object Object]");
   }
 
   execute(func: BytecodeFunction): unknown {
