@@ -14,6 +14,9 @@ function isTruthy(value: unknown): boolean {
   return !!value;
 }
 
+// toPrimitive/callInternal 内で例外が unwindToHandler で処理された場合の sentinel
+const THROWN_SENTINEL = Symbol("thrown");
+
 // Upvalue ボックス: ミュータブルキャプチャ用の参照ラッパー
 type UpvalueBox = { value: unknown };
 
@@ -171,7 +174,6 @@ export class VM {
     for (let i = 0; i < args.length && i < func.paramCount; i++) {
       locals[i] = args[i];
     }
-    // スタックポインタを保存してフレームを追加実行
     const savedSp = this.sp;
     const baseFrameCount = this.frames.length;
     this.frames.push({
@@ -179,8 +181,14 @@ export class VM {
       icSlots: this.createICSlots(func),
       upvalueBoxes: [],
     });
-    this.run(baseFrameCount);
-    // Return で push された結果を取得し、sp を復元
+    try {
+      this.run(baseFrameCount);
+    } catch (e: any) {
+      this.sp = savedSp;
+      const throwValue = e?.__thrown ? e.value : e;
+      if (this.unwindToHandler(throwValue)) return THROWN_SENTINEL;
+      throw e;
+    }
     const hasResult = this.sp > savedSp;
     const result = hasResult ? this.stack[this.sp] : undefined;
     this.sp = savedSp;
@@ -213,7 +221,9 @@ export class VM {
         }
       }
     }
-    throw new TypeError("Cannot convert object to primitive value");
+    const err = new TypeError("Cannot convert object to primitive value");
+    if (this.unwindToHandler(err)) return THROWN_SENTINEL;
+    throw err;
   }
 
   execute(func: BytecodeFunction): unknown {
@@ -311,9 +321,10 @@ export class VM {
           const rawRight = this.pop();
           const rawLeft = this.pop();
           const left = this.toPrimitive(rawLeft);
+          if (left === THROWN_SENTINEL) continue;
           const right = this.toPrimitive(rawRight);
+          if (right === THROWN_SENTINEL) continue;
           if (isJSString(left) || isJSString(right)) {
-            // 一方または両方が JSString → 文字列連結
             const l = isJSString(left) ? left : createSeqString(String(left));
             const r = isJSString(right) ? right : createSeqString(String(right));
             this.push(jsStringConcat(l, r));
@@ -323,32 +334,33 @@ export class VM {
           break;
         }
         case "Sub": {
-          const right = this.toPrimitive(this.pop()) as number;
-          const left = this.toPrimitive(this.pop()) as number;
-          this.push(left - right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) - (r as number));
           break;
         }
         case "Mul": {
-          const right = this.toPrimitive(this.pop()) as number;
-          const left = this.toPrimitive(this.pop()) as number;
-          this.push(left * right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) * (r as number));
           break;
         }
         case "Div": {
-          const right = this.toPrimitive(this.pop()) as number;
-          const left = this.toPrimitive(this.pop()) as number;
-          this.push(left / right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) / (r as number));
           break;
         }
         case "Mod": {
-          const right = this.toPrimitive(this.pop()) as number;
-          const left = this.toPrimitive(this.pop()) as number;
-          this.push(left % right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) % (r as number));
           break;
         }
         case "Negate": {
-          const val = this.toPrimitive(this.pop()) as number;
-          this.push(-val);
+          const val = this.toPrimitive(this.pop());
+          if (val === THROWN_SENTINEL) continue;
+          this.push(-(val as number));
           break;
         }
 
@@ -380,27 +392,27 @@ export class VM {
           break;
         }
         case "LessThan": {
-          const right = this.toPrimitive(this.pop()) as number;
-          const left = this.toPrimitive(this.pop()) as number;
-          this.push(left < right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) < (r as number));
           break;
         }
         case "GreaterThan": {
-          const right = this.toPrimitive(this.pop()) as number;
-          const left = this.toPrimitive(this.pop()) as number;
-          this.push(left > right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) > (r as number));
           break;
         }
         case "LessEqual": {
-          const right = this.toPrimitive(this.pop()) as number;
-          const left = this.toPrimitive(this.pop()) as number;
-          this.push(left <= right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) <= (r as number));
           break;
         }
         case "GreaterEqual": {
-          const right = this.toPrimitive(this.pop()) as number;
-          const left = this.toPrimitive(this.pop()) as number;
-          this.push(left >= right);
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) >= (r as number));
           break;
         }
 
