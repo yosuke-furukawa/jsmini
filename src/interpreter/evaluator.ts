@@ -10,6 +10,12 @@ import {
 } from "./values.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "../vm/js-string.js";
 
+// JSString 対応の truthiness 判定 (空文字列は falsy)
+function isTruthy(value: unknown): boolean {
+  if (isJSString(value)) return value.length > 0;
+  return !!value;
+}
+
 // MemberExpression のキーを解決する共通ヘルパー
 function resolveMemberKey(expr: MemberExpression, env: Environment): string {
   if (expr.computed) {
@@ -43,6 +49,8 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   const ast = parse(source);
   const env = new Environment(null, true); // グローバルは関数スコープ扱い
   env.defineReadOnly("undefined", undefined);
+  env.defineReadOnly("NaN", NaN);
+  env.defineReadOnly("Infinity", Infinity);
 
   // console オブジェクトを組み込み (JSString → JS string 変換付き)
   const userLog = options.console?.log ?? console.log;
@@ -311,7 +319,7 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
     }
     case "IfStatement": {
       const test = evalExpression(stmt.test, env);
-      if (test) {
+      if (isTruthy(test)) {
         return evalStatement(stmt.consequent, env);
       } else if (stmt.alternate) {
         return evalStatement(stmt.alternate, env);
@@ -319,7 +327,7 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
       return undefined;
     }
     case "WhileStatement": {
-      outer_while: while (evalExpression(stmt.test, env)) {
+      outer_while: while (isTruthy(evalExpression(stmt.test, env))) {
         try {
           evalStatement(stmt.body, env);
         } catch (e) {
@@ -341,7 +349,7 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
           evalExpression(stmt.init, forEnv);
         }
       }
-      outer_for: while (!stmt.test || evalExpression(stmt.test, forEnv)) {
+      outer_for: while (!stmt.test || isTruthy(evalExpression(stmt.test, forEnv))) {
         try {
           evalStatement(stmt.body, forEnv);
         } catch (e) {
@@ -738,7 +746,7 @@ function evalUnaryExpression(
           throw e;
         }
         // 未定義変数は "undefined" を返す（ReferenceError にしない）
-        return "undefined";
+        return internString("undefined");
       }
     } else {
       value = evalExpression(expr.argument, env);
@@ -751,7 +759,7 @@ function evalUnaryExpression(
 
   const argument = evalExpression(expr.argument, env);
   switch (expr.operator) {
-    case "!": return !argument;
+    case "!": return !isTruthy(argument);
     case "-": return -(argument as number);
     default:
       throw new Error(`Unknown unary operator: ${expr.operator}`);
@@ -764,8 +772,8 @@ function evalLogicalExpression(
 ): unknown {
   const left = evalExpression(expr.left, env);
   switch (expr.operator) {
-    case "&&": return left ? evalExpression(expr.right, env) : left;
-    case "||": return left ? left : evalExpression(expr.right, env);
+    case "&&": return isTruthy(left) ? evalExpression(expr.right, env) : left;
+    case "||": return isTruthy(left) ? left : evalExpression(expr.right, env);
     default:
       throw new Error(`Unknown logical operator: ${expr.operator}`);
   }

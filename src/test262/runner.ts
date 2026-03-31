@@ -4,7 +4,9 @@ import { evaluate } from "../interpreter/evaluator.js";
 import { vmEvaluate } from "../vm/index.js";
 
 const useVM = process.argv.includes("--vm");
-const run = useVM ? (s: string) => vmEvaluate(s) : (s: string) => evaluate(s);
+const run = useVM
+  ? (s: string, opts?: Record<string, unknown>) => vmEvaluate(s, opts)
+  : (s: string, opts?: Record<string, unknown>) => evaluate(s, opts);
 
 const TEST262_ROOT = path.resolve(import.meta.dirname, "../../test262");
 
@@ -135,10 +137,16 @@ function runTest(filePath: string): TestResult {
   const testCode = preprocessTestSource(source);
   const fullSource = harness + "\n" + testCode;
 
+  // 無限ループ防止: ステップ数上限
+  let steps = 0;
+  const opts = useVM
+    ? { maxSteps: 100_000 }
+    : { onStep: () => { if (++steps > 100_000) throw new Error("timeout: exceeded 100k steps"); } };
+
   if (meta.negative) {
     // negative test: エラーが投げられることを期待する
     try {
-      run(fullSource);
+      run(fullSource, opts);
       return { file: relPath, status: "fail", error: "Expected error but none was thrown" };
     } catch {
       return { file: relPath, status: "pass" };
@@ -146,7 +154,7 @@ function runTest(filePath: string): TestResult {
   }
 
   try {
-    evaluate(fullSource);
+    run(fullSource, opts);
     return { file: relPath, status: "pass" };
   } catch (e: any) {
     return { file: relPath, status: "fail", error: e.message ?? String(e) };

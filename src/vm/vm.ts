@@ -8,6 +8,12 @@ import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js
 import { Heap } from "./heap.js";
 import { compileMultiSync } from "../jit/wasm-compiler.js";
 
+// JSString 対応の truthiness 判定 (空文字列は falsy)
+function isTruthy(value: unknown): boolean {
+  if (isJSString(value)) return value.length > 0;
+  return !!value;
+}
+
 // Upvalue ボックス: ミュータブルキャプチャ用の参照ラッパー
 type UpvalueBox = { value: unknown };
 
@@ -29,6 +35,8 @@ export class VM {
   feedback: FeedbackCollector | null = null;
   jit: JitManager | null = null;
   heap: Heap = new Heap();
+  maxSteps = 0;
+  private stepCount = 0;
 
   private push(value: unknown): void {
     this.stack[++this.sp] = value;
@@ -139,6 +147,24 @@ export class VM {
     return Array.from({ length: func.icSlotCount || 0 }, createICSlot);
   }
 
+  // 例外をフレームスタックをアンワインドしてハンドラを探す
+  private unwindToHandler(throwValue: unknown): boolean {
+    while (this.frames.length > 0) {
+      const frame = this.frames[this.frames.length - 1];
+      const handler = frame.func.handlers?.find(
+        h => frame.pc - 1 >= h.tryStart && frame.pc - 1 < h.tryEnd && h.catchStart >= 0
+      );
+      if (handler) {
+        this.push(throwValue);
+        frame.pc = handler.catchStart;
+        return true;
+      }
+      // このフレームにハンドラがない: フレームを pop して呼び出し元に戻る
+      this.frames.pop();
+    }
+    return false;
+  }
+
   execute(func: BytecodeFunction): unknown {
     // トップレベルをフレームとして実行
     this.frames.push({
@@ -168,6 +194,10 @@ export class VM {
       }
 
       const instr: Instruction = bytecode[frame.pc++];
+
+      if (this.maxSteps > 0 && ++this.stepCount > this.maxSteps) {
+        throw new Error("timeout: exceeded max steps");
+      }
 
       switch (instr.op) {
         // 定数ロード
@@ -325,7 +355,7 @@ export class VM {
         // 論理
         case "LogicalNot": {
           const val = this.pop();
-          this.push(!val);
+          this.push(!isTruthy(val));
           break;
         }
 
@@ -398,12 +428,12 @@ export class VM {
         }
         case "JumpIfFalse": {
           const val = this.pop();
-          if (!val) frame.pc = instr.operand!;
+          if (!isTruthy(val)) frame.pc = instr.operand!;
           break;
         }
         case "JumpIfTrue": {
           const val = this.pop();
-          if (val) frame.pc = instr.operand!;
+          if (isTruthy(val)) frame.pc = instr.operand!;
           break;
         }
 
@@ -548,16 +578,8 @@ export class VM {
         // throw
         case "Throw": {
           const throwValue = this.pop();
-          // 例外ハンドラテーブルからハンドラを探す
-          const handler = frame.func.handlers?.find(
-            h => frame.pc - 1 >= h.tryStart && frame.pc - 1 < h.tryEnd && h.catchStart >= 0
-          );
-          if (handler) {
-            // catch ブロックにジャンプ、例外値をスタックに push
-            this.push(throwValue);
-            frame.pc = handler.catchStart;
-          } else {
-            // ハンドラがない: 上位にプロパゲート
+          if (!this.unwindToHandler(throwValue)) {
+            // どのフレームにもハンドラがない: JS 例外として脱出
             throw { __thrown: true, value: throwValue };
           }
           break;
