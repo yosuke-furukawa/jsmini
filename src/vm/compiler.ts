@@ -154,6 +154,23 @@ class BytecodeCompiler {
   }
 
   // 変数バインディング: スタックトップの値を変数に格納して Pop
+  // let/const のバインディングパターンから変数名を抽出して事前に declareLocal する
+  private preDeclareBindingNames(id: any): void {
+    if (id.type === "Identifier") {
+      if (this.resolveLocal(id.name) === null) {
+        this.declareLocal(id.name);
+      }
+    } else if (id.type === "ObjectPattern") {
+      for (const prop of id.properties) {
+        this.preDeclareBindingNames(prop.value);
+      }
+    } else if (id.type === "ArrayPattern") {
+      for (const elem of id.elements) {
+        if (elem) this.preDeclareBindingNames(elem);
+      }
+    }
+  }
+
   compileBindingTarget(id: any): void {
     if (id.type === "Identifier") {
       if (this.isFunction || this.resolveLocal(id.name) !== null) {
@@ -229,12 +246,7 @@ class BytecodeCompiler {
         // let/const はトップレベルでもローカルスロットを使う (ブロックスコープ)
         if (!this.isFunction && stmt.kind !== "var") {
           for (const decl of stmt.declarations) {
-            if (decl.id.type === "Identifier") {
-              // ローカルスロットを事前に確保
-              if (this.resolveLocal(decl.id.name) === null) {
-                this.declareLocal(decl.id.name);
-              }
-            }
+            this.preDeclareBindingNames(decl.id);
           }
         }
         for (const decl of stmt.declarations) {
