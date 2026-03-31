@@ -4,6 +4,7 @@ import { compileToWasmSync, compileMultiSync } from "./wasm-compiler.js";
 import type { WasmNumericType } from "./feedback.js";
 import { getElementKind, isTrackedArray } from "../vm/js-array.js";
 import { isJSString, getInternId, getStringById } from "../vm/js-string.js";
+import { isJSObject, getSlots } from "../vm/js-object.js";
 
 export type JitOptions = {
   threshold: number;
@@ -48,7 +49,7 @@ export class JitManager {
     this.tierLog.push(`[TIER] ${func.name}: ${tier} (call #${count})`);
   }
 
-  tryCall(func: BytecodeFunction, args: unknown[], upvalueValues: unknown[] = []): { result: unknown } | null {
+  tryCall(func: BytecodeFunction, args: unknown[], upvalueValues: unknown[] = [], thisObj?: unknown): { result: unknown } | null {
     const fb = this.feedback.get(func);
     const callCount = fb?.callCount ?? 0;
 
@@ -65,7 +66,7 @@ export class JitManager {
         this.logTier(func, "Bytecode VM", callCount);
         return null;
       }
-      return this.executeWasm(func, cached, args, callCount, upvalueValues);
+      return this.executeWasm(func, cached, args, callCount, upvalueValues, thisObj);
     }
 
     // しきい値チェック
@@ -97,9 +98,9 @@ export class JitManager {
       if (detailedTypes[i] === "interned_string") stringArgIndices.push(i);
     }
 
-    // 型特殊化
-    const allSame = wasmArgTypes.every(t => t === wasmArgTypes[0]);
-    const spec: WasmNumericType = allSame && wasmArgTypes[0] === "i32" ? "i32" : "f64";
+    // 型特殊化 (引数なしの場合はデフォルト i32)
+    const allSame = wasmArgTypes.length === 0 || wasmArgTypes.every(t => t === wasmArgTypes[0]);
+    const spec: WasmNumericType = allSame && (wasmArgTypes.length === 0 || wasmArgTypes[0] === "i32") ? "i32" : "f64";
 
     // 配列引数がある場合: 関連関数をまとめてコンパイル
     let compiled: CachedWasm | null = null;
@@ -117,7 +118,7 @@ export class JitManager {
 
     if (compiled) {
       this.logTier(func, `→ Wasm compiled (${spec}, arrays: [${arrayArgIndices}])`, callCount);
-      return this.executeWasm(func, compiled, args, callCount, upvalueValues);
+      return this.executeWasm(func, compiled, args, callCount, upvalueValues, thisObj);
     }
 
     this.logTier(func, "Bytecode VM", callCount);
@@ -185,6 +186,7 @@ export class JitManager {
     args: unknown[],
     callCount: number,
     upvalueValues: unknown[] = [],
+    thisObj?: unknown,
   ): { result: unknown } | null {
     const { fn, memory, arrayArgIndices } = cached;
 
@@ -231,6 +233,28 @@ export class JitManager {
         // upvalue が数値/文字列でない → JIT 不可
         return null;
       }
+    }
+
+    // this パラメータ: LoadThis がある関数で thisObj が JSObject の場合
+    // slots をメモリにコピーしてベースアドレスを渡す
+    const hasThis = func.bytecode.some(i => i.op === "LoadThis");
+    if (hasThis && thisObj !== undefined) {
+      if (!isJSObject(thisObj)) {
+        // thisObj が JSObject でない → JIT 不可
+        return null;
+      }
+      if (!memory) {
+        // メモリがない → JIT 不可
+        return null;
+      }
+      const slots = getSlots(thisObj);
+      const view = new Int32Array(memory.buffer);
+      // slots をメモリの先頭にコピー
+      const base = 0;
+      for (let i = 0; i < slots.length; i++) {
+        view[i] = slots[i] as number;
+      }
+      wasmArgs.push(base);
     }
 
     this.logTier(func, "Wasm", callCount);

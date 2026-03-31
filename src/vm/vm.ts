@@ -812,6 +812,12 @@ export class VM {
             // クロージャオブジェクト
             const closure = method as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
             const fn = closure.func;
+            if (this.feedback) this.feedback.recordCall(fn, args);
+            // JIT: thisObj を追加引数として渡す
+            if (this.jit) {
+              const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
+              if (jitResult !== null) { this.push(jitResult.result); break; }
+            }
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
@@ -819,6 +825,12 @@ export class VM {
             this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
           } else if (typeof method === "object" && method !== null && "bytecode" in method) {
             const fn = method as BytecodeFunction;
+            if (this.feedback) this.feedback.recordCall(fn, args);
+            // JIT: thisObj を追加引数として渡す
+            if (this.jit) {
+              const jitResult = this.jit.tryCall(fn, args, [], thisObj);
+              if (jitResult !== null) { this.push(jitResult.result); break; }
+            }
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = args[i] ?? undefined;
