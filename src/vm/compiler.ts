@@ -106,12 +106,12 @@ class BytecodeCompiler {
 
   // 変数のロード: ローカル → upvalue → グローバル の優先順で解決
   emitLoad(name: string): void {
+    const slot = this.resolveLocal(name);
+    if (slot !== null) {
+      this.emit("LdaLocal", slot);
+      return;
+    }
     if (this.isFunction) {
-      const slot = this.resolveLocal(name);
-      if (slot !== null) {
-        this.emit("LdaLocal", slot);
-        return;
-      }
       const upIdx = this.resolveUpvalue(name);
       if (upIdx >= 0) {
         this.emit("LdaUpvalue", upIdx);
@@ -124,12 +124,12 @@ class BytecodeCompiler {
 
   // 変数のストア
   emitStore(name: string): void {
+    const slot = this.resolveLocal(name);
+    if (slot !== null) {
+      this.emit("StaLocal", slot);
+      return;
+    }
     if (this.isFunction) {
-      const slot = this.resolveLocal(name);
-      if (slot !== null) {
-        this.emit("StaLocal", slot);
-        return;
-      }
       const upIdx = this.resolveUpvalue(name);
       if (upIdx >= 0) {
         this.emit("StaUpvalue", upIdx);
@@ -156,10 +156,11 @@ class BytecodeCompiler {
   // 変数バインディング: スタックトップの値を変数に格納して Pop
   compileBindingTarget(id: any): void {
     if (id.type === "Identifier") {
-      if (this.isFunction) {
+      if (this.isFunction || this.resolveLocal(id.name) !== null) {
         const slot = this.resolveLocal(id.name) ?? this.declareLocal(id.name);
         this.emit("StaLocal", slot);
       } else {
+        // トップレベル var: グローバルに格納
         const nameIdx = this.addConstant(id.name);
         this.emit("StaGlobal", nameIdx);
       }
@@ -225,6 +226,17 @@ class BytecodeCompiler {
         break;
 
       case "VariableDeclaration": {
+        // let/const はトップレベルでもローカルスロットを使う (ブロックスコープ)
+        if (!this.isFunction && stmt.kind !== "var") {
+          for (const decl of stmt.declarations) {
+            if (decl.id.type === "Identifier") {
+              // ローカルスロットを事前に確保
+              if (this.resolveLocal(decl.id.name) === null) {
+                this.declareLocal(decl.id.name);
+              }
+            }
+          }
+        }
         for (const decl of stmt.declarations) {
           if (decl.init) {
             this.compileExpression(decl.init);
@@ -242,10 +254,11 @@ class BytecodeCompiler {
         const fnBytecode = fnCompiler.finish(stmt.id.name);
         const fnIndex = this.addConstant(fnBytecode);
         this.emit("LdaConst", fnIndex);
-        if (this.isFunction) {
-          const slot = this.resolveLocal(stmt.id.name) ?? this.declareLocal(stmt.id.name);
-          this.emit("StaLocal", slot);
-        } else {
+        const fnSlot = this.resolveLocal(stmt.id.name) ?? this.declareLocal(stmt.id.name);
+        this.emit("StaLocal", fnSlot);
+        // トップレベル関数はグローバルにも登録 (再帰呼び出し + JIT 用)
+        if (!this.isFunction) {
+          this.emit("Dup");
           const nameIdx = this.addConstant(stmt.id.name);
           this.emit("StaGlobal", nameIdx);
         }
@@ -339,6 +352,11 @@ class BytecodeCompiler {
       }
 
       case "ForStatement": {
+        // for (let/const ...) のブロックスコープ
+        const forHasBlockScoped = stmt.init?.type === "VariableDeclaration" && stmt.init.kind !== "var";
+        if (forHasBlockScoped) {
+          this.scopeStack.push(new Map(this.locals));
+        }
         if (stmt.init) {
           if (stmt.init.type === "VariableDeclaration") {
             this.compileStatement(stmt.init);
@@ -370,11 +388,14 @@ class BytecodeCompiler {
         }
         const loop = this.loopStack.pop()!;
         for (const bp of loop.breakPatches) this.patch(bp, this.currentOffset());
+        if (forHasBlockScoped) {
+          this.locals = this.scopeStack.pop()!;
+        }
         break;
       }
 
       case "BlockStatement": {
-        const hasBlockScoped = this.isFunction && stmt.body.some(
+        const hasBlockScoped = stmt.body.some(
           (s: any) => s.type === "VariableDeclaration" && s.kind !== "var"
         );
         if (hasBlockScoped) {
