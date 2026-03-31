@@ -267,6 +267,7 @@ main {
     <option value="array-methods">Array Methods</option>
     <option value="string-methods">String Methods</option>
     <option value="closure">Closure</option>
+    <option value="json">JSON</option>
   </select>
   <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
     <option value="tree-walking">Tree-Walking</option>
@@ -626,6 +627,39 @@ stack.push(3);
 console.log("stack.peek() = " + stack.peek());
 console.log("stack.pop() = " + stack.pop());
 console.log("stack.length() = " + stack.length());`,
+
+  "json": `// JSON — stringify / parse + Math
+
+// オブジェクトを JSON 文字列に変換
+var user = { name: "Alice", age: 30 };
+var json = JSON.stringify(user);
+console.log("stringify: " + json);
+
+// JSON 文字列をオブジェクトに復元
+var parsed = JSON.parse(json);
+console.log("parse: name=" + parsed.name + " age=" + parsed.age);
+
+// 配列の JSON
+var nums = [1, 2, 3, 4, 5];
+console.log("array: " + JSON.stringify(nums));
+
+// round-trip: stringify → parse → stringify
+var original = { x: 10, y: 20 };
+var copy = JSON.parse(JSON.stringify(original));
+console.log("round-trip: x=" + copy.x + " y=" + copy.y);
+
+// Math と組み合わせ
+console.log("Math.PI: " + Math.PI);
+console.log("Math.sqrt(9): " + Math.sqrt(9));
+console.log("Math.floor(3.7): " + Math.floor(3.7));
+console.log("Math.max(1,2,3): " + Math.max(1, 2, 3));
+console.log("Math.abs(-5): " + Math.abs(-5));
+
+// グローバル関数
+console.log("parseInt('42'): " + parseInt("42"));
+console.log("parseFloat('3.14'): " + parseFloat("3.14"));
+console.log("isNaN(NaN): " + isNaN(NaN));
+console.log("isFinite(42): " + isFinite(42));`,
 };
 
 // ========== CodeMirror setup ==========
