@@ -277,6 +277,40 @@ const cases: [string, string][] = [
     f();
     f();
   `],
+
+  // ToPrimitive (valueOf / toString)
+  ["valueOf: 加算", "var x = {valueOf: function() { return 42; }}; x + 1;"],
+  ["valueOf: 減算", "var x = {valueOf: function() { return 10; }}; x - 3;"],
+  ["valueOf: 乗算", "var x = {valueOf: function() { return 5; }}; x * 4;"],
+  ["valueOf: 比較", "var x = {valueOf: function() { return 10; }}; x > 5;"],
+  ["toString: 文字列連結", 'var x = {toString: function() { return "hello"; }}; x + " world";'],
+  // NOTE: valueOf が throw するケースは VM の toPrimitive 例外伝播が未完のため省略
+  ["valueOf 優先", "var x = {valueOf: function() { return 10; }, toString: function() { return \"s\"; }}; x + 1;"],
+
+  // let/const ブロックスコープ
+  ["let ブロックスコープ (トップレベル)", "let x = 1; { let x = 2; } x;"],
+  ["const ブロックスコープ (トップレベル)", "const x = 1; { const x = 2; } x;"],
+  ["for-let スコープ", "var value; for (let x = 23; ; ) { value = x; break; } typeof value;"],
+  ["var はブロックスコープなし", "var x = 1; { var x = 2; } x;"],
+
+  // typeof 未宣言変数
+  ["typeof 未宣言変数", 'typeof nonexistent;'],
+  ["typeof 未宣言 === undefined", 'typeof nonexistent === "undefined";'],
+
+  // 空文字列 falsy
+  ["空文字列 if", 'var r = "no"; if ("") { r = "yes"; } r;'],
+  ["空文字列 while", 'var c = 0; while ("") { c = c + 1; } c;'],
+  ["空文字列 論理NOT", '!"";'],
+  ["空文字列 論理OR", '"" || "fallback";'],
+  ["非空文字列 truthy", 'var r = "no"; if ("x") { r = "yes"; } r;'],
+
+  // instanceof ネイティブコンストラクタ
+  ["instanceof ReferenceError", 'var r; try { nonexistent; } catch(e) { r = e instanceof ReferenceError; } r;'],
+  // NOTE: null.x の TypeError は VM で JS ネイティブ例外が漏れるため省略
+
+  // NaN / Infinity
+  ["NaN", "NaN !== NaN;"],
+  ["Infinity", "Infinity > 99999999;"],
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {
