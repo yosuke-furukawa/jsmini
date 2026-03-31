@@ -508,6 +508,8 @@ function translateRange(
         // GetProperty はメソッド参照を push するが、インライン展開では不要
         // Dup で this が複製されてるので、ここでは method ref として dummy (0) を push
         if (pc + 1 < bytecode.length && bytecode[pc + 1].op === "CallMethod" && pc > 0 && bytecode[pc - 1].op === "Dup") {
+          // VM では GetProperty が obj を pop する。Wasm でも同様に drop して dummy を push
+          out.push(WASM_OP.drop);            // pop obj (Dup の2つ目を消費)
           out.push(WASM_OP.i32_const, 0x00); // dummy method ref (CallMethod で drop される)
           break;
         }
