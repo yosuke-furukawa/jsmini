@@ -111,8 +111,15 @@ export function compileMultiSync(
         const argc = func.bytecode[i].operand!;
         if (argc > maxInlineArgs) maxInlineArgs = argc;
       }
+      // CallMethod のインライン用: args + this (1個)
+      if (func.bytecode[i].op === "CallMethod" && i >= 2 && func.bytecode[i - 1].op === "GetProperty" && func.bytecode[i - 2].op === "Dup") {
+        const argc = func.bytecode[i].operand! + 1; // +1 for this
+        if (argc > maxInlineArgs) maxInlineArgs = argc;
+      }
     }
     extraLocals += maxInlineArgs;
+    // Dup 用 temp local (+1)
+    if (func.bytecode.some(i => i.op === "Dup")) extraLocals = Math.max(extraLocals, 1);
     const body = translateBytecode(func, ctx);
     if (!body) return null;
     builder.addFunction(func.name, params, results, body, extraLocals > 0 ? extraLocals : 0);
@@ -728,6 +735,84 @@ function translateRange(
         return false;
       }
 
+      // prototype メソッドのインライン展開
+      // パターン: Dup + GetProperty "method" + CallMethod N
+      // → Dup で this がスタックトップに複製されている
+      // → GetProperty の結果 (method ref) を drop して this を使ってインライン展開
+      case "CallMethod": {
+        const argc = instr.operand!;
+        // 直前が GetProperty であること (method 取得)
+        if (pc >= 2 && bytecode[pc - 1].op === "GetProperty" && bytecode[pc - 2].op === "Dup") {
+          const methodName = constants[bytecode[pc - 1].operand!] as string;
+          // inlineCandidates からメソッドを探す
+          let inlineTarget: BytecodeFunction | null = null;
+          for (const [name, candidate] of ctx.inlineCandidates) {
+            if (candidate.name === methodName && candidate.paramCount === argc) {
+              const hasLoop = candidate.bytecode.some(i => i.op === "Jump" || i.op === "JumpIfFalse");
+              if (!hasLoop) { inlineTarget = candidate; break; }
+            }
+          }
+          if (inlineTarget && isI32 && ctx.hasMemory) {
+            // スタック: [..., args..., thisObj(Dup), methodRef(GetProperty)]
+            // methodRef を drop
+            out.push(WASM_OP.drop);
+
+            // thisObj を extra local に退避
+            const extraBase = func.localCount + (func.bytecode.some(i => i.op === "SetPropertyComputed") ? 1 : 0) + (func.bytecode.some(i => i.op === "SetPropertyAssign") ? 2 : 0);
+            const thisLocal = extraBase + argc; // 引数の後に this
+            // 引数を退避 (引数が this より先にスタックにあるので先に this を退避)
+            out.push(WASM_OP.local_set, thisLocal);
+            for (let i = argc - 1; i >= 0; i--) {
+              out.push(WASM_OP.local_set, extraBase + i);
+            }
+
+            // dist の本体を展開
+            // プロパティオフセットを dist の constants から構築
+            const methodPropOffsets = new Map<string, number>();
+            let propIdx = 0;
+            for (const ii of inlineTarget.bytecode) {
+              if (ii.op === "GetProperty" && ii.operand !== undefined) {
+                const pname = inlineTarget.constants[ii.operand] as string;
+                if (!methodPropOffsets.has(pname)) methodPropOffsets.set(pname, propIdx++);
+              }
+            }
+
+            for (let j = 0; j < inlineTarget.bytecode.length; j++) {
+              const ii = inlineTarget.bytecode[j];
+              if (ii.op === "LoadThis") {
+                // this → extra local から取得
+                out.push(WASM_OP.local_get, thisLocal);
+              } else if (ii.op === "GetProperty") {
+                // this.x → i32.load(thisBase + propOffset * 4)
+                const pname = inlineTarget.constants[ii.operand!] as string;
+                // propOffset は caller (外側の関数) の objectPropOffsets を使う
+                const off = ctx.objectPropOffsets.get(pname);
+                if (off !== undefined) {
+                  const byteOff = off * 4;
+                  if (byteOff > 0) {
+                    out.push(WASM_OP.i32_const, ...i32ToLEB128(byteOff));
+                    out.push(WASM_OP.i32_add);
+                  }
+                  out.push(WASM_OP.i32_load, 0x02, 0x00);
+                } else {
+                  return false;
+                }
+              } else if (ii.op === "LdaLocal") {
+                out.push(WASM_OP.local_get, extraBase + ii.operand!);
+              } else if (ii.op === "Return") {
+                break;
+              } else {
+                // 通常の命令はそのまま変換
+                const saved = { ...ctx, inlineLocalOffset: extraBase };
+                if (!translateRange(inlineTarget, j, j + 1, saved, out)) return false;
+              }
+            }
+            break;
+          }
+        }
+        return false;
+      }
+
       case "Construct": {
         // new Vec(arg0, arg1): スタック [arg0, arg1, ctorRef]
         // ctorRef は LdaGlobal で push された — skip 済み (LdaGlobal ハンドラで)
@@ -749,16 +834,37 @@ function translateRange(
           // スタック: [arg0, arg1, ..., base]
           // constructor expects: (arg0, arg1, ..., this_base)
           // → そのまま call $ctor
-          if (pc > 0 && bytecode[pc - 1].op === "LdaGlobal") {
-            const name = constants[bytecode[pc - 1].operand!] as string;
-            const idx = funcIndex.get(name);
+          // constructor を funcIndex から探す
+          let ctorName: string | null = null;
+          let needDrop = false; // LdaLocal/LdaUpvalue の場合は ctorRef を drop する必要がある
+          if (pc > 0) {
+            const prev = bytecode[pc - 1];
+            if (prev.op === "LdaGlobal") {
+              ctorName = constants[prev.operand!] as string;
+              // LdaGlobal のハンドラで funcIndex にある場合はスキップされるので drop 不要
+              needDrop = !funcIndex.has(ctorName);
+            } else if (prev.op === "LdaLocal" || prev.op === "LdaUpvalue") {
+              // constants から名前付き BytecodeFunction を探す
+              for (const c of constants) {
+                if (c && typeof c === "object" && "bytecode" in (c as any)) ctorName = (c as any).name;
+              }
+              needDrop = true; // LdaLocal/LdaUpvalue は常にスタックに push する
+            }
+          }
+          if (ctorName) {
+            const idx = funcIndex.get(ctorName);
             if (idx !== undefined) {
+              if (needDrop) {
+                // ctorRef をスタックから除去 (args の下にあるので一旦退避が必要)
+                // 実際は Construct の直前に [arg0, arg1, ctorRef] の順でスタックに乗ってる
+                // drop して args を call に渡す
+                out.push(WASM_OP.drop);
+              }
               out.push(WASM_OP.call, idx);
-              out.push(WASM_OP.drop); // constructor の return value (undefined) を捨てる
-              // base address をスタックに残す (Construct の結果)
+              out.push(WASM_OP.drop);
               out.push(WASM_OP.global_get, ctx.heapPtrGlobal);
               out.push(WASM_OP.i32_const, ...i32ToLEB128(ctx.objectSize));
-              out.push(WASM_OP.i32_sub); // heapPtr - objectSize = 直前の base
+              out.push(WASM_OP.i32_sub);
               break;
             }
           }
@@ -776,6 +882,15 @@ function translateRange(
       case "Pop":
         out.push(WASM_OP.drop);
         break;
+      case "Dup": {
+        // Wasm に dup 命令はない → temp local に保存して2回 get
+        // Dup + GetProperty + CallMethod パターンの場合は後続で処理される
+        // 汎用的に: extra local の最後を temp として使う
+        const tempLocal = func.localCount + (func.bytecode.some(i => i.op === "SetPropertyComputed") ? 1 : 0) + (func.bytecode.some(i => i.op === "SetPropertyAssign") ? 2 : 0);
+        out.push(WASM_OP.local_tee, tempLocal);
+        out.push(WASM_OP.local_get, tempLocal);
+        break;
+      }
       default:
         return false;
     }

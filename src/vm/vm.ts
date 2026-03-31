@@ -111,6 +111,22 @@ export class VM {
         seen.add((c as BytecodeFunction).name);
       }
     }
+    // CallMethod の対象: GetProperty + CallMethod パターンで prototype メソッドを探す
+    for (let i = 0; i < func.bytecode.length - 1; i++) {
+      if (func.bytecode[i].op === "GetProperty" && func.bytecode[i + 1].op === "CallMethod") {
+        const methodName = func.constants[func.bytecode[i].operand!] as string;
+        // globals から constructor を探し、prototype からメソッドを取得
+        for (const [, gval] of this.globals) {
+          if (gval && typeof gval === "object" && "bytecode" in (gval as any) && (gval as any).prototype) {
+            const method = jsObjGet((gval as any).prototype, methodName);
+            if (method && typeof method === "object" && "bytecode" in (method as any) && !seen.has((method as any).name)) {
+              relatedFuncs.push(method as BytecodeFunction);
+              seen.add((method as any).name);
+            }
+          }
+        }
+      }
+    }
 
     // Wasm にコンパイル (upvalue 付きクロージャも含む)
     const result = compileMultiSync(relatedFuncs, "i32");
