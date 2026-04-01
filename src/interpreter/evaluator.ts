@@ -595,7 +595,8 @@ function evalExpression(expr: Expression, env: Environment): unknown {
         result = jsStringConcat(result, internString(expr.quasis[i].value.cooked));
         if (i < expr.expressions.length) {
           const val = evalExpression(expr.expressions[i], env);
-          const s = isJSString(val) ? val : createSeqString(String(val));
+          const prim = toPrimitive(val, "string");
+          const s = isJSString(prim) ? prim : createSeqString(String(prim));
           result = jsStringConcat(result, s);
         }
       }
@@ -1006,15 +1007,21 @@ function evalBinaryExpression(
     case "<=": return (left as number) <= (right as number);
     case ">=": return (left as number) >= (right as number);
     case "==":
+      if (isJSString(left) && isJSString(right)) return jsStringEquals(left, right);
+      if (isJSString(left) || isJSString(right)) return false;
+      return left == right;
     case "===":
       if (isJSString(rawLeft) && isJSString(rawRight)) return jsStringEquals(rawLeft, rawRight);
       if (isJSString(rawLeft) || isJSString(rawRight)) return false;
-      return expr.operator === "==" ? rawLeft == rawRight : rawLeft === rawRight;
+      return rawLeft === rawRight;
     case "!=":
+      if (isJSString(left) && isJSString(right)) return !jsStringEquals(left, right);
+      if (isJSString(left) || isJSString(right)) return true;
+      return left != right;
     case "!==":
       if (isJSString(rawLeft) && isJSString(rawRight)) return !jsStringEquals(rawLeft, rawRight);
       if (isJSString(rawLeft) || isJSString(rawRight)) return true;
-      return expr.operator === "!=" ? rawLeft != rawRight : rawLeft !== rawRight;
+      return rawLeft !== rawRight;
     case "in": {
       const key = isJSString(rawLeft) ? jsStringToString(rawLeft) : String(rawLeft);
       return key in (rawRight as Record<string, unknown>);
