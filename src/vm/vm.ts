@@ -736,6 +736,7 @@ export class VM {
           const val = this.pop();
           if (isJSString(val)) this.push(internString("string"));
           else if (val === null) this.push(internString("object"));
+          else if (typeof val === "object" && val !== null && ("bytecode" in val && "paramCount" in val || "__closure" in val)) this.push(internString("function"));
           else this.push(internString(typeof val));
           break;
         }
@@ -748,6 +749,7 @@ export class VM {
             const val = this.globals.get(name);
             if (isJSString(val)) this.push(internString("string"));
             else if (val === null) this.push(internString("object"));
+            else if (typeof val === "object" && val !== null && ("bytecode" in val && "paramCount" in val || "__closure" in val)) this.push(internString("function"));
             else this.push(internString(typeof val));
           }
           break;
