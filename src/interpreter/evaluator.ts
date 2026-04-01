@@ -115,29 +115,29 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
 
   // Object
   const strArg = (v: unknown) => isJSString(v) ? jsStringToString(v) : String(v);
-  env.defineReadOnly("Object", {
-    keys: (obj: unknown) => {
-      if (typeof obj === "object" && obj !== null) {
-        return Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol("));
-      }
-      return [];
-    },
-    values: (obj: unknown) => {
-      if (typeof obj === "object" && obj !== null) {
-        return Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map(k => (obj as any)[k]);
-      }
-      return [];
-    },
-    entries: (obj: unknown) => {
-      if (typeof obj === "object" && obj !== null) {
-        return Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map(k => [k, (obj as any)[k]]);
-      }
-      return [];
-    },
-    assign: Object.assign,
-    create: Object.create,
-    freeze: (obj: unknown) => obj,
-  });
+  const twObjectWrapper: any = function(...args: unknown[]) { return new Object(...args); };
+  twObjectWrapper.keys = (obj: unknown) => {
+    if (typeof obj === "object" && obj !== null) {
+      return Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol("));
+    }
+    return [];
+  };
+  twObjectWrapper.values = (obj: unknown) => {
+    if (typeof obj === "object" && obj !== null) {
+      return Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map(k => (obj as any)[k]);
+    }
+    return [];
+  };
+  twObjectWrapper.entries = (obj: unknown) => {
+    if (typeof obj === "object" && obj !== null) {
+      return Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map(k => [k, (obj as any)[k]]);
+    }
+    return [];
+  };
+  twObjectWrapper.assign = Object.assign;
+  twObjectWrapper.create = Object.create;
+  twObjectWrapper.freeze = (obj: unknown) => obj;
+  env.defineReadOnly("Object", twObjectWrapper);
 
   // JSON
   env.defineReadOnly("JSON", {
@@ -742,6 +742,11 @@ function evalNewExpression(
       return { message: args[0] ?? "" };
     }
     throw new Error(`Unknown native constructor: ${ctor.name}`);
+  }
+
+  // ネイティブコンストラクタ (Object, Boolean, Number, String, Array, etc.)
+  if (typeof constructor === "function") {
+    return new (constructor as any)(...args);
   }
 
   if (!isJSFunction(constructor)) {
