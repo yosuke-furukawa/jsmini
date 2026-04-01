@@ -187,6 +187,13 @@ const TEST_DIRS = [
   "test/language/statements/if",
   "test/language/statements/while",
   "test/language/statements/for",
+  "test/language/types/boolean",
+  "test/language/types/null",
+  "test/language/types/number",
+  "test/language/types/object",
+  "test/language/types/reference",
+  "test/language/types/string",
+  "test/language/types/undefined",
 ];
 
 const allTests: string[] = [];
