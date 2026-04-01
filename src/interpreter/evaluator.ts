@@ -456,6 +456,18 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
       }
       return result;
     }
+    case "DoWhileStatement": {
+      outer_dowhile: do {
+        try {
+          evalStatement(stmt.body, env);
+        } catch (e) {
+          if (e instanceof BreakSignal) break outer_dowhile;
+          if (e instanceof ContinueSignal) continue outer_dowhile;
+          throw e;
+        }
+      } while (isTruthy(evalExpression(stmt.test, env)));
+      return undefined;
+    }
     case "WhileStatement": {
       outer_while: while (isTruthy(evalExpression(stmt.test, env))) {
         try {

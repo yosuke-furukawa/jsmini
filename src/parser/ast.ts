@@ -20,6 +20,7 @@ export type Statement =
   | WhileStatement
   | ForStatement
   | ForOfStatement
+  | DoWhileStatement
   | SwitchStatement
   | BlockStatement;
 
@@ -128,6 +129,12 @@ export type ContinueStatement = {
 
 export type WhileStatement = {
   type: "WhileStatement";
+  test: Expression;
+  body: Statement;
+};
+
+export type DoWhileStatement = {
+  type: "DoWhileStatement";
   test: Expression;
   body: Statement;
 };

@@ -71,6 +71,7 @@ export function parse(source: string): Program {
     if (current().type === "Continue") { eat("Continue"); if (current().type === "Semicolon") eat("Semicolon"); return { type: "ContinueStatement", label: null }; }
     if (current().type === "If") return parseIfStatement();
     if (current().type === "While") return parseWhileStatement();
+    if (current().type === "Do") return parseDoWhileStatement();
     if (current().type === "For") return parseForStatement();
     if (current().type === "Switch") return parseSwitchStatement();
     if (current().type === "LeftBrace") return parseBlockStatement();
@@ -256,6 +257,17 @@ export function parse(source: string): Program {
     eat("RightParen");
     const body = parseStatement();
     return { type: "WhileStatement", test, body };
+  }
+
+  function parseDoWhileStatement(): Statement {
+    eat("Do");
+    const body = parseStatement();
+    eat("While");
+    eat("LeftParen");
+    const test = parseExpression();
+    eat("RightParen");
+    if (current().type === "Semicolon") eat("Semicolon");
+    return { type: "DoWhileStatement", test, body };
   }
 
   // ForStatement or ForOfStatement

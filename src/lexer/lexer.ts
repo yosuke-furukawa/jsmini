@@ -29,6 +29,7 @@ Object.assign(KEYWORDS, {
   of: "Of",
   in: "In",
   instanceof: "Instanceof",
+  do: "Do",
   switch: "Switch",
   case: "Case",
   default: "Default",

@@ -429,6 +429,18 @@ class BytecodeCompiler {
         break;
       }
 
+      case "DoWhileStatement": {
+        // do { body } while (test);
+        const loopStart = this.currentOffset();
+        this.loopStack.push({ breakPatches: [], continueTarget: loopStart });
+        this.compileStatement(stmt.body);
+        this.compileExpression(stmt.test);
+        this.emit("JumpIfTrue", loopStart);
+        const loop = this.loopStack.pop()!;
+        for (const bp of loop.breakPatches) this.patch(bp, this.currentOffset());
+        break;
+      }
+
       case "WhileStatement": {
         const loopStart = this.currentOffset();
         this.loopStack.push({ breakPatches: [], continueTarget: loopStart });

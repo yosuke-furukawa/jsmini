@@ -35,6 +35,7 @@ export type TokenType =
   | "Extends"          // extends
   | "Super"            // super
   | "Of"               // of
+  | "Do"               // do
   | "Switch"           // switch
   | "Case"             // case
   | "Default"          // default
