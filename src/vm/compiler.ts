@@ -722,6 +722,11 @@ class BytecodeCompiler {
         this.compileExpression(expr.right);
         if (expr.left.type === "Identifier") {
           this.emitStore(expr.left.name);
+        } else if (expr.left.type === "ObjectPattern" || expr.left.type === "ArrayPattern") {
+          // 分割代入: ({a, b} = obj) or [x, y] = arr
+          // compileBindingTarget は値を Pop するので、先に Dup して値を残す
+          this.emit("Dup");
+          this.compileBindingTarget(expr.left);
         } else {
           throw new Error(`Unsupported assignment target: ${expr.left.type}`);
         }
