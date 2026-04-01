@@ -239,10 +239,22 @@ class BytecodeCompiler {
   compileFunctionBody(params: any[], body: Statement[]): void {
     // パラメータをローカルスロットに登録
     this.paramCount = params.length;
+    const destructureParams: { slot: number; pattern: any }[] = [];
     for (const param of params) {
       if (param.type === "Identifier") {
         this.declareLocal(param.name);
+      } else if (param.type === "RestElement") {
+        this.declareLocal(param.argument.name);
+      } else if (param.type === "ArrayPattern" || param.type === "ObjectPattern") {
+        // 一旦ダミースロットを確保、後で展開
+        const slot = this.localCount++;
+        destructureParams.push({ slot, pattern: param });
       }
+    }
+    // 分割代入パラメータを展開
+    for (const { slot, pattern } of destructureParams) {
+      this.emit("LdaLocal", slot);
+      this.compileBindingTarget(pattern);
     }
     // 本体をコンパイル
     for (const stmt of body) {
