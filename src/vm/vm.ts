@@ -644,6 +644,12 @@ export class VM {
         }
         case "GetProperty": {
           const obj = this.pop();
+          if (obj === null || obj === undefined) {
+            const name = constants[instr.operand!] as string;
+            const err = new TypeError(`Cannot read properties of ${obj} (reading '${name}')`);
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
           if (instr.icSlot !== undefined && isJSObject(obj)) {
             const ic = frame.icSlots[instr.icSlot];
             const hc = getHiddenClass(obj);
@@ -838,7 +844,7 @@ export class VM {
             }
             this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
           } else {
-            throw new Error("Not a function");
+            throw new TypeError("Not a function");
           }
           break;
         }
@@ -886,7 +892,7 @@ export class VM {
             }
             this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: [] });
           } else {
-            throw new Error("Not a function");
+            throw new TypeError("Not a function");
           }
           break;
         }
@@ -945,7 +951,7 @@ export class VM {
             const result = new ctor(...args);
             this.push(result);
           } else {
-            throw new Error("Not a constructor");
+            throw new TypeError("Not a constructor");
           }
           break;
         }
