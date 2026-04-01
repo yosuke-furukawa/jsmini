@@ -452,8 +452,14 @@ export class VM {
             this.push(jsStringEquals(left, right));
           } else if (isJSString(left) || isJSString(right)) {
             this.push(false);
+          } else if (instr.op === "Equal") {
+            // == は ToPrimitive で型変換してから比較
+            const l = this.toPrimitive(left); if (l === THROWN_SENTINEL) { continue; }
+            const r = this.toPrimitive(right); if (r === THROWN_SENTINEL) { continue; }
+            if (isJSString(l) && isJSString(r)) this.push(jsStringEquals(l, r));
+            else this.push(l == r);
           } else {
-            this.push(instr.op === "Equal" ? left == right : left === right);
+            this.push(left === right);
           }
           break;
         }
@@ -465,8 +471,13 @@ export class VM {
             this.push(!jsStringEquals(left, right));
           } else if (isJSString(left) || isJSString(right)) {
             this.push(true);
+          } else if (instr.op === "NotEqual") {
+            const l = this.toPrimitive(left); if (l === THROWN_SENTINEL) { continue; }
+            const r = this.toPrimitive(right); if (r === THROWN_SENTINEL) { continue; }
+            if (isJSString(l) && isJSString(r)) this.push(!jsStringEquals(l, r));
+            else this.push(l != r);
           } else {
-            this.push(instr.op === "NotEqual" ? left != right : left !== right);
+            this.push(left !== right);
           }
           break;
         }

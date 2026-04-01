@@ -21,7 +21,7 @@ class BytecodeCompiler {
   private parent: BytecodeCompiler | null;
   private isFunction: boolean;
   // ループスタック: break/continue のジャンプ先パッチ用
-  private loopStack: { breakPatches: number[]; continueTarget: number }[] = [];
+  private loopStack: { breakPatches: number[]; continuePatches: number[]; continueTarget: number }[] = [];
   private icSlotCount = 0;
   private upvalues: { name: string; parentSlot: number }[] = [];
 
@@ -398,7 +398,7 @@ class BytecodeCompiler {
         this.emit("StaLocal", discSlot);
         this.emit("Pop");
 
-        this.loopStack.push({ breakPatches: [], continueTarget: -1 });
+        this.loopStack.push({ breakPatches: [], continuePatches: [], continueTarget: -1 });
 
         // Phase 1: 比較 → body へのジャンプ
         const jumpToBody: number[] = []; // 一致時のジャンプ (パッチ対象)
@@ -450,7 +450,7 @@ class BytecodeCompiler {
       case "DoWhileStatement": {
         // do { body } while (test);
         const loopStart = this.currentOffset();
-        this.loopStack.push({ breakPatches: [], continueTarget: loopStart });
+        this.loopStack.push({ breakPatches: [], continuePatches: [], continueTarget: loopStart });
         this.compileStatement(stmt.body);
         this.compileExpression(stmt.test);
         this.emit("JumpIfTrue", loopStart);
@@ -461,7 +461,7 @@ class BytecodeCompiler {
 
       case "WhileStatement": {
         const loopStart = this.currentOffset();
-        this.loopStack.push({ breakPatches: [], continueTarget: loopStart });
+        this.loopStack.push({ breakPatches: [], continuePatches: [], continueTarget: loopStart });
         this.compileExpression(stmt.test);
         const exitJump = this.emit("JumpIfFalse", 0);
         this.compileStatement(stmt.body);
@@ -489,7 +489,7 @@ class BytecodeCompiler {
         const loopStart = this.currentOffset();
         // continue は update を実行してからループ先頭に戻る
         // → continue のジャンプ先は update の先頭
-        this.loopStack.push({ breakPatches: [], continueTarget: -1 }); // 後でパッチ
+        this.loopStack.push({ breakPatches: [], continuePatches: [], continueTarget: -1 }); // 後でパッチ
         let exitJump = -1;
         if (stmt.test) {
           this.compileExpression(stmt.test);
@@ -499,6 +499,10 @@ class BytecodeCompiler {
         // continue はここにジャンプ
         const continueTarget = this.currentOffset();
         this.loopStack[this.loopStack.length - 1].continueTarget = continueTarget;
+        // continue パッチ: body 内の continue が update の先頭にジャンプするように
+        for (const cp of this.loopStack[this.loopStack.length - 1].continuePatches) {
+          this.patch(cp, continueTarget);
+        }
         if (stmt.update) {
           this.compileExpression(stmt.update);
           this.emit("Pop");
@@ -605,9 +609,8 @@ class BytecodeCompiler {
           if (loop.continueTarget >= 0) {
             this.emit("Jump", loop.continueTarget);
           } else {
-            // continueTarget がまだ確定していない場合（for の update 前）
-            // → loopStart にジャンプ（while の場合はこれで正しい）
-            this.emit("Jump", 0); // パッチが必要だが簡易的に
+            // continueTarget がまだ確定していない場合 → 後でパッチ
+            loop.continuePatches.push(this.emit("Jump", 0));
           }
         }
         break;
