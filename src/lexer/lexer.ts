@@ -29,6 +29,9 @@ Object.assign(KEYWORDS, {
   of: "Of",
   in: "In",
   instanceof: "Instanceof",
+  switch: "Switch",
+  case: "Case",
+  default: "Default",
   // undefined は予約語ではないのでキーワードに含めない
 });
 

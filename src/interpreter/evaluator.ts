@@ -428,6 +428,34 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
       }
       return undefined;
     }
+    case "SwitchStatement": {
+      const disc = evalExpression(stmt.discriminant, env);
+      let matched = false;
+      let result: unknown = undefined;
+      for (const c of stmt.cases) {
+        if (!matched && c.test !== null) {
+          const testVal = evalExpression(c.test, env);
+          // JSString 対応の === 比較
+          if (isJSString(disc) && isJSString(testVal)) {
+            matched = jsStringEquals(disc, testVal);
+          } else {
+            matched = disc === testVal;
+          }
+        }
+        if (!matched && c.test === null) matched = true; // default
+        if (matched) {
+          for (const s of c.consequent) {
+            try {
+              result = evalStatement(s, env);
+            } catch (e) {
+              if (e instanceof BreakSignal) return result;
+              throw e;
+            }
+          }
+        }
+      }
+      return result;
+    }
     case "WhileStatement": {
       outer_while: while (isTruthy(evalExpression(stmt.test, env))) {
         try {

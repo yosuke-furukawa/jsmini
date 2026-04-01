@@ -72,6 +72,7 @@ export function parse(source: string): Program {
     if (current().type === "If") return parseIfStatement();
     if (current().type === "While") return parseWhileStatement();
     if (current().type === "For") return parseForStatement();
+    if (current().type === "Switch") return parseSwitchStatement();
     if (current().type === "LeftBrace") return parseBlockStatement();
 
     const expression = parseExpression();
@@ -350,6 +351,32 @@ export function parse(source: string): Program {
     }
     eat("RightBrace");
     return { type: "BlockStatement", body };
+  }
+
+  function parseSwitchStatement(): Statement {
+    eat("Switch");
+    eat("LeftParen");
+    const discriminant = parseExpression();
+    eat("RightParen");
+    eat("LeftBrace");
+    const cases: any[] = [];
+    while (current().type !== "RightBrace") {
+      let test: any = null;
+      if (current().type === "Case") {
+        eat("Case");
+        test = parseExpression();
+      } else {
+        eat("Default");
+      }
+      eat("Colon");
+      const consequent: any[] = [];
+      while (current().type !== "Case" && current().type !== "Default" && current().type !== "RightBrace") {
+        consequent.push(parseStatementOrDeclaration());
+      }
+      cases.push({ type: "SwitchCase", test, consequent });
+    }
+    eat("RightBrace");
+    return { type: "SwitchStatement", discriminant, cases };
   }
 
   // パラメータ1つをパース（...rest 対応）

@@ -350,6 +350,73 @@ class BytecodeCompiler {
         break;
       }
 
+      case "SwitchStatement": {
+        // Phase 1: 比較フェーズ — 各 case の test と discriminant を比較
+        // Phase 2: body フェーズ — fall-through で連続配置
+        //
+        // 比較: disc === case0.test → JumpIfTrue body0
+        //       disc === case1.test → JumpIfTrue body1
+        //       ...
+        //       Jump default_body (or end)
+        // body0: ... (fall-through to body1)
+        // body1: ...
+        // default_body: ...
+        // end:
+
+        this.compileExpression(stmt.discriminant);
+        const discSlot = this.declareLocal("__switch_disc__");
+        this.emit("StaLocal", discSlot);
+        this.emit("Pop");
+
+        this.loopStack.push({ breakPatches: [], continueTarget: -1 });
+
+        // Phase 1: 比較 → body へのジャンプ
+        const jumpToBody: number[] = []; // 一致時のジャンプ (パッチ対象)
+        let defaultJumpIdx = -1;
+        for (let i = 0; i < stmt.cases.length; i++) {
+          const c = stmt.cases[i];
+          if (c.test === null) {
+            defaultJumpIdx = i;
+            jumpToBody.push(-1); // placeholder
+            continue;
+          }
+          this.emit("LdaLocal", discSlot);
+          this.compileExpression(c.test);
+          this.emit("StrictEqual");
+          jumpToBody.push(this.emit("JumpIfTrue", 0));
+        }
+        // 全不一致 → default or end
+        const jumpToDefaultOrEnd = this.emit("Jump", 0);
+
+        // Phase 2: body (fall-through で連続配置)
+        const bodyOffsets: number[] = [];
+        for (let i = 0; i < stmt.cases.length; i++) {
+          bodyOffsets.push(this.currentOffset());
+          for (const s of stmt.cases[i].consequent) {
+            this.compileStatement(s);
+          }
+        }
+        const switchEnd = this.currentOffset();
+
+        // パッチ: 一致時ジャンプ → body 開始位置
+        for (let i = 0; i < stmt.cases.length; i++) {
+          if (jumpToBody[i] >= 0) {
+            this.patch(jumpToBody[i], bodyOffsets[i]);
+          }
+        }
+        // default or end
+        if (defaultJumpIdx >= 0) {
+          this.patch(jumpToDefaultOrEnd, bodyOffsets[defaultJumpIdx]);
+        } else {
+          this.patch(jumpToDefaultOrEnd, switchEnd);
+        }
+
+        // break パッチ
+        const loop = this.loopStack.pop()!;
+        for (const bp of loop.breakPatches) this.patch(bp, switchEnd);
+        break;
+      }
+
       case "WhileStatement": {
         const loopStart = this.currentOffset();
         this.loopStack.push({ breakPatches: [], continueTarget: loopStart });

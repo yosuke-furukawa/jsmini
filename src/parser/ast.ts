@@ -20,6 +20,7 @@ export type Statement =
   | WhileStatement
   | ForStatement
   | ForOfStatement
+  | SwitchStatement
   | BlockStatement;
 
 export type ExpressionStatement = {
@@ -149,6 +150,18 @@ export type ForOfStatement = {
 export type BlockStatement = {
   type: "BlockStatement";
   body: Statement[];
+};
+
+export type SwitchStatement = {
+  type: "SwitchStatement";
+  discriminant: Expression;
+  cases: SwitchCase[];
+};
+
+export type SwitchCase = {
+  type: "SwitchCase";
+  test: Expression | null; // null = default
+  consequent: Statement[];
 };
 
 export type Expression =

@@ -35,6 +35,9 @@ export type TokenType =
   | "Extends"          // extends
   | "Super"            // super
   | "Of"               // of
+  | "Switch"           // switch
+  | "Case"             // case
+  | "Default"          // default
   // undefined は予約語ではないのでキーワードに含めない
   // Operators
   | "Plus"             // +
