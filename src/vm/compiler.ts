@@ -206,6 +206,18 @@ class BytecodeCompiler {
   }
 
   compileProgram(program: Program): void {
+    // var hoisting: var 宣言を事前に undefined でグローバルに登録
+    for (const stmt of program.body) {
+      if (stmt.type === "VariableDeclaration" && (stmt as any).kind === "var") {
+        for (const decl of (stmt as any).declarations) {
+          if (decl.id.type === "Identifier") {
+            this.emit("LdaUndefined");
+            this.emit("StaGlobal", this.addConstant(decl.id.name));
+            this.emit("Pop");
+          }
+        }
+      }
+    }
     for (let i = 0; i < program.body.length; i++) {
       const stmt = program.body[i];
       const isLast = i === program.body.length - 1;
