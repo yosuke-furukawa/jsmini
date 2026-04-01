@@ -92,6 +92,11 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   env.defineReadOnly("TypeError", TypeError);
   env.defineReadOnly("SyntaxError", SyntaxError);
   env.defineReadOnly("RangeError", RangeError);
+  env.defineReadOnly("Boolean", Boolean);
+  env.defineReadOnly("Number", Number);
+  env.defineReadOnly("String", String);
+  env.defineReadOnly("Array", Array);
+  env.defineReadOnly("Function", Function);
 
   // グローバル関数
   env.defineReadOnly("isNaN", (v: unknown) => Number.isNaN(Number(v)));

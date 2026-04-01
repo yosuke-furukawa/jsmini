@@ -756,12 +756,18 @@ export class VM {
         }
 
         // 更新
-        case "Increment":
-          this.push((this.pop() as number) + 1);
+        case "Increment": {
+          const v = this.toPrimitive(this.pop());
+          if (v === THROWN_SENTINEL) continue;
+          this.push((v as number) + 1);
           break;
-        case "Decrement":
-          this.push((this.pop() as number) - 1);
+        }
+        case "Decrement": {
+          const v = this.toPrimitive(this.pop());
+          if (v === THROWN_SENTINEL) continue;
+          this.push((v as number) - 1);
           break;
+        }
 
         // throw
         case "Throw": {
@@ -913,6 +919,20 @@ export class VM {
             }
             this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor), upvalueBoxes: [] });
             (frame as any).__pendingNewObj = newObj;
+          } else if (ctor.__closure) {
+            // クロージャ
+            const closure = ctor as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
+            const fn = closure.func;
+            const locals = new Array(fn.localCount).fill(undefined);
+            for (let i = 0; i < fn.paramCount; i++) {
+              locals[i] = args[i] ?? undefined;
+            }
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
+            (frame as any).__pendingNewObj = newObj;
+          } else if (typeof ctor === "function") {
+            // ネイティブコンストラクタ (Object, Boolean, Number, etc.)
+            const result = new ctor(...args);
+            this.push(result);
           } else {
             throw new Error("Not a constructor");
           }

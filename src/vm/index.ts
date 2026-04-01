@@ -138,6 +138,11 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   vm.setGlobal("TypeError", TypeError);
   vm.setGlobal("SyntaxError", SyntaxError);
   vm.setGlobal("RangeError", RangeError);
+  vm.setGlobal("Boolean", Boolean);
+  vm.setGlobal("Number", Number);
+  vm.setGlobal("String", String);
+  vm.setGlobal("Array", Array);
+  vm.setGlobal("Function", Function);
 
   // グローバル関数
   vm.setGlobal("isNaN", (v: unknown) => Number.isNaN(Number(v)));
@@ -154,31 +159,20 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return Object.keys(obj as Record<string, unknown>);
   };
 
-  // Object
-  vm.setGlobal("Object", {
-    keys: (obj: unknown) => jsObjKeys(obj).map(k => internString(k)),
-    values: (obj: unknown) => jsObjKeys(obj).map(k => jsObjGet(obj as any, k)),
-    entries: (obj: unknown) => jsObjKeys(obj).map(k => [internString(k), jsObjGet(obj as any, k)]),
-    assign: (target: unknown, ...sources: unknown[]) => {
-      for (const src of sources) {
-        for (const k of jsObjKeys(src)) {
-          if (isJSObject(target)) {
-            jsObjSet(target, k, jsObjGet(src as any, k));
-          } else {
-            (target as Record<string, unknown>)[k] = jsObjGet(src as any, k);
-          }
-        }
-      }
-      return target;
-    },
-    create: (proto: unknown) => {
-      const obj = vm.heap.allocate(createJSObject());
-      if (proto !== null) jsObjSet(obj, "__proto__", proto);
-      return obj;
-    },
-    freeze: (obj: unknown) => obj, // 最小限: freeze は no-op
-    prototype: vm.objectPrototype,
-  });
+  // Object: ネイティブ Object をラップ (new Object() + 静的メソッド)
+  const ObjectWrapper: any = function(...args: unknown[]) { return new Object(...args); };
+  ObjectWrapper.keys = (obj: unknown) => jsObjKeys(obj).map(k => internString(k));
+  ObjectWrapper.values = (obj: unknown) => jsObjKeys(obj).map(k => jsObjGet(obj as any, k));
+  ObjectWrapper.entries = (obj: unknown) => jsObjKeys(obj).map(k => [internString(k), jsObjGet(obj as any, k)]);
+  ObjectWrapper.assign = Object.assign;
+  ObjectWrapper.create = (proto: unknown) => {
+    const obj = vm.heap.allocate(createJSObject());
+    if (proto !== null) jsObjSet(obj, "__proto__", proto);
+    return obj;
+  };
+  ObjectWrapper.freeze = (obj: unknown) => obj;
+  ObjectWrapper.prototype = vm.objectPrototype;
+  vm.setGlobal("Object", ObjectWrapper);
 
   // Math
   vm.setGlobal("Math", {
