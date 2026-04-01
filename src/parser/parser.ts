@@ -606,13 +606,40 @@ export function parse(source: string): Program {
     return left;
   }
 
-  // LogicalAnd = Equality ('&&' Equality)*
+  // LogicalAnd = BitwiseOr ('&&' BitwiseOr)*
   function parseLogicalAnd(): Expression {
-    let left = parseEquality();
+    let left = parseBitwiseOr();
     while (current().type === "AmpersandAmpersand") {
       const operator = eat("AmpersandAmpersand").value;
-      const right = parseEquality();
+      const right = parseBitwiseOr();
       left = { type: "LogicalExpression", operator, left, right };
+    }
+    return left;
+  }
+
+  function parseBitwiseOr(): Expression {
+    let left = parseBitwiseXor();
+    while (current().type === "Pipe") {
+      eat("Pipe"); const right = parseBitwiseXor();
+      left = { type: "BinaryExpression", operator: "|", left, right };
+    }
+    return left;
+  }
+
+  function parseBitwiseXor(): Expression {
+    let left = parseBitwiseAnd();
+    while (current().type === "Caret") {
+      eat("Caret"); const right = parseBitwiseAnd();
+      left = { type: "BinaryExpression", operator: "^", left, right };
+    }
+    return left;
+  }
+
+  function parseBitwiseAnd(): Expression {
+    let left = parseEquality();
+    while (current().type === "Ampersand") {
+      eat("Ampersand"); const right = parseEquality();
+      left = { type: "BinaryExpression", operator: "&", left, right };
     }
     return left;
   }
@@ -633,9 +660,9 @@ export function parse(source: string): Program {
     return left;
   }
 
-  // Comparison = Additive (('<' | '>' | '<=' | '>=') Additive)*
+  // Comparison = Shift (('<' | '>' | '<=' | '>=') Shift)*
   function parseComparison(): Expression {
-    let left = parseAdditive();
+    let left = parseShift();
     while (
       current().type === "Less" ||
       current().type === "Greater" ||
@@ -644,6 +671,17 @@ export function parse(source: string): Program {
       current().type === "In" ||
       current().type === "Instanceof"
     ) {
+      const operator = eat(current().type).value;
+      const right = parseShift();
+      left = { type: "BinaryExpression", operator, left, right };
+    }
+    return left;
+  }
+
+  // Shift = Additive (('<<' | '>>' | '>>>') Additive)*
+  function parseShift(): Expression {
+    let left = parseAdditive();
+    while (current().type === "ShiftLeft" || current().type === "ShiftRight" || current().type === "UnsignedShiftRight") {
       const operator = eat(current().type).value;
       const right = parseAdditive();
       left = { type: "BinaryExpression", operator, left, right };
@@ -662,25 +700,36 @@ export function parse(source: string): Program {
     return left;
   }
 
-  // Multiplicative = Unary (('*' | '/' | '%') Unary)*
+  // Multiplicative = Exponent (('*' | '/' | '%') Exponent)*
   function parseMultiplicative(): Expression {
-    let left = parseUnary();
+    let left = parseExponent();
     while (
       current().type === "Star" ||
       current().type === "Slash" ||
       current().type === "Percent"
     ) {
       const operator = eat(current().type).value;
-      const right = parseUnary();
+      const right = parseExponent();
       left = { type: "BinaryExpression", operator, left, right };
+    }
+    return left;
+  }
+
+  // Exponent = Unary ('**' Exponent)?  (right-associative)
+  function parseExponent(): Expression {
+    const left = parseUnary();
+    if (current().type === "StarStar") {
+      eat("StarStar");
+      const right = parseExponent(); // right-associative
+      return { type: "BinaryExpression", operator: "**", left, right };
     }
     return left;
   }
 
   // Unary / Update
   function parseUnary(): Expression {
-    if (current().type === "Bang") {
-      const operator = eat("Bang").value;
+    if (current().type === "Bang" || current().type === "Tilde") {
+      const operator = eat(current().type).value;
       const argument = parseUnary();
       return { type: "UnaryExpression", operator, prefix: true, argument };
     }

@@ -963,6 +963,7 @@ function evalUnaryExpression(
   switch (expr.operator) {
     case "!": return !isTruthy(argument);
     case "-": return -(argument as number);
+    case "~": return ~(argument as number);
     default:
       throw new Error(`Unknown unary operator: ${expr.operator}`);
   }
@@ -1002,6 +1003,13 @@ function evalBinaryExpression(
     case "*": return (left as number) * (right as number);
     case "/": return (left as number) / (right as number);
     case "%": return (left as number) % (right as number);
+    case "**": return (left as number) ** (right as number);
+    case "&": return (left as number) & (right as number);
+    case "|": return (left as number) | (right as number);
+    case "^": return (left as number) ^ (right as number);
+    case "<<": return (left as number) << (right as number);
+    case ">>": return (left as number) >> (right as number);
+    case ">>>": return (left as number) >>> (right as number);
     case "<": return (left as number) < (right as number);
     case ">": return (left as number) > (right as number);
     case "<=": return (left as number) <= (right as number);

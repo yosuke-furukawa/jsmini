@@ -837,7 +837,9 @@ class BytecodeCompiler {
         this.compileExpression(expr.left);
         this.compileExpression(expr.right);
         const opMap: Record<string, Opcode> = {
-          "+": "Add", "-": "Sub", "*": "Mul", "/": "Div", "%": "Mod",
+          "+": "Add", "-": "Sub", "*": "Mul", "/": "Div", "%": "Mod", "**": "Exp",
+          "&": "BitAnd", "|": "BitOr", "^": "BitXor",
+          "<<": "ShiftLeft", ">>": "ShiftRight", ">>>": "UShiftRight",
           "==": "Equal", "===": "StrictEqual",
           "!=": "NotEqual", "!==": "StrictNotEqual",
           "<": "LessThan", ">": "GreaterThan",
@@ -953,6 +955,8 @@ class BytecodeCompiler {
           this.compileExpression(expr.argument);
           if (expr.operator === "-") {
             this.emit("Negate");
+          } else if (expr.operator === "~") {
+            this.emit("BitNot");
           } else if (expr.operator === "!") {
             this.emit("LogicalNot");
           } else if (expr.operator === "typeof") {

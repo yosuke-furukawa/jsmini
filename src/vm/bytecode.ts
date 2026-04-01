@@ -15,6 +15,14 @@ export type Opcode =
   | "Mul"             // pop 2つ、乗算して push
   | "Div"             // pop 2つ、除算して push
   | "Mod"             // pop 2つ、剰余して push
+  | "Exp"             // pop 2つ、べき乗して push
+  | "BitAnd"          // pop 2つ、ビットAND
+  | "BitOr"           // pop 2つ、ビットOR
+  | "BitXor"          // pop 2つ、ビットXOR
+  | "BitNot"          // pop 1つ、ビットNOT
+  | "ShiftLeft"       // pop 2つ、左シフト
+  | "ShiftRight"      // pop 2つ、右シフト(符号あり)
+  | "UShiftRight"     // pop 2つ、右シフト(符号なし)
   | "Negate"          // pop 1つ、符号反転して push
 
   // 比較

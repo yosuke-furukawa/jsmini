@@ -68,6 +68,14 @@ export type TokenType =
   | "PercentEquals"    // %=
   | "AmpersandAmpersand" // &&
   | "PipePipe"         // ||
+  | "Ampersand"        // &
+  | "Pipe"             // |
+  | "Caret"            // ^
+  | "Tilde"            // ~
+  | "ShiftLeft"        // <<
+  | "ShiftRight"       // >>
+  | "UnsignedShiftRight" // >>>
+  | "StarStar"         // **
   // Delimiters
   | "LeftParen"        // (
   | "RightParen"       // )

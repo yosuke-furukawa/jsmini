@@ -436,6 +436,19 @@ export class VM {
           this.push((l as number) % (r as number));
           break;
         }
+        case "Exp": {
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) ** (r as number));
+          break;
+        }
+        case "BitAnd": { const r = this.pop(); const l = this.pop(); this.push((l as number) & (r as number)); break; }
+        case "BitOr": { const r = this.pop(); const l = this.pop(); this.push((l as number) | (r as number)); break; }
+        case "BitXor": { const r = this.pop(); const l = this.pop(); this.push((l as number) ^ (r as number)); break; }
+        case "BitNot": { this.push(~(this.pop() as number)); break; }
+        case "ShiftLeft": { const r = this.pop(); const l = this.pop(); this.push((l as number) << (r as number)); break; }
+        case "ShiftRight": { const r = this.pop(); const l = this.pop(); this.push((l as number) >> (r as number)); break; }
+        case "UShiftRight": { const r = this.pop(); const l = this.pop(); this.push((l as number) >>> (r as number)); break; }
         case "Negate": {
           const val = this.toPrimitive(this.pop());
           if (val === THROWN_SENTINEL) continue;

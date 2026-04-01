@@ -93,14 +93,25 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // 数値リテラル
+    // 数値リテラル (0x, 0b, 0o 対応)
     if (isDigit(ch)) {
       const start = pos;
       const startCol = column;
-      while (pos < source.length && isDigit(peek())) advance();
-      if (peek() === "." && isDigit(peek(1))) {
-        advance(); // '.'
+      if (ch === "0" && (peek(1) === "x" || peek(1) === "X")) {
+        advance(); advance(); // skip '0x'
+        while (pos < source.length && /[0-9a-fA-F]/.test(peek())) advance();
+      } else if (ch === "0" && (peek(1) === "b" || peek(1) === "B")) {
+        advance(); advance(); // skip '0b'
+        while (pos < source.length && (peek() === "0" || peek() === "1")) advance();
+      } else if (ch === "0" && (peek(1) === "o" || peek(1) === "O")) {
+        advance(); advance(); // skip '0o'
+        while (pos < source.length && /[0-7]/.test(peek())) advance();
+      } else {
         while (pos < source.length && isDigit(peek())) advance();
+        if (peek() === "." && isDigit(peek(1))) {
+          advance(); // '.'
+          while (pos < source.length && isDigit(peek())) advance();
+        }
       }
       pushToken("Number", source.slice(start, pos), startCol);
       continue;
@@ -219,6 +230,22 @@ export function tokenize(source: string): Token[] {
       pushToken("PipePipe", "||", startCol);
       pos += 2; column += 2; continue;
     }
+    if (ch === ">" && peek(1) === ">" && peek(2) === ">") {
+      pushToken("UnsignedShiftRight", ">>>", startCol);
+      pos += 3; column += 3; continue;
+    }
+    if (ch === "<" && peek(1) === "<") {
+      pushToken("ShiftLeft", "<<", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === ">" && peek(1) === ">") {
+      pushToken("ShiftRight", ">>", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "*" && peek(1) === "*") {
+      pushToken("StarStar", "**", startCol);
+      pos += 2; column += 2; continue;
+    }
     if (ch === "." && peek(1) === "." && peek(2) === ".") {
       pushToken("DotDotDot", "...", startCol);
       pos += 3; column += 3; continue;
@@ -248,6 +275,7 @@ export function tokenize(source: string): Token[] {
     const singleCharMap: Record<string, TokenType> = {
       "+": "Plus", "-": "Minus", "*": "Star", "/": "Slash", "%": "Percent",
       "=": "Equals", "!": "Bang", "<": "Less", ">": "Greater",
+      "&": "Ampersand", "|": "Pipe", "^": "Caret", "~": "Tilde",
       "(": "LeftParen", ")": "RightParen",
       "[": "LeftBracket", "]": "RightBracket",
       ":": "Colon", "?": "Question", ".": "Dot", ",": "Comma",
