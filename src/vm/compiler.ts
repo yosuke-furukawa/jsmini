@@ -206,6 +206,12 @@ class BytecodeCompiler {
   }
 
   compileProgram(program: Program): void {
+    // function hoisting: 関数宣言を先にコンパイルしてグローバルに登録
+    for (const stmt of program.body) {
+      if (stmt.type === "FunctionDeclaration") {
+        this.compileStatement(stmt);
+      }
+    }
     // var hoisting: var 宣言を事前に undefined でグローバルに登録
     for (const stmt of program.body) {
       if (stmt.type === "VariableDeclaration" && (stmt as any).kind === "var") {
@@ -623,17 +629,7 @@ class BytecodeCompiler {
         this.emit("LdaGlobal", iterIdx);
         this.emit("LdaGlobal", counterIdx);
         this.emit("GetPropertyComputed");
-        if (stmt.left.declarations[0].id.type === "Identifier") {
-          const varName = stmt.left.declarations[0].id.name;
-          if (this.isFunction) {
-            const slot = this.resolveLocal(varName) ?? this.declareLocal(varName);
-            this.emit("StaLocal", slot);
-          } else {
-            const nameIdx = this.addConstant(varName);
-            this.emit("StaGlobal", nameIdx);
-          }
-          this.emit("Pop");
-        }
+        this.compileBindingTarget(stmt.left.declarations[0].id);
         // body
         this.compileStatement(stmt.body);
         // i++
