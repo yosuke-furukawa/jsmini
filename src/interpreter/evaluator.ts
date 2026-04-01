@@ -676,6 +676,10 @@ function evalExpression(expr: Expression, env: Environment): unknown {
       return evalLogicalExpression(expr, env);
     case "BinaryExpression":
       return evalBinaryExpression(expr, env);
+    case "ConditionalExpression":
+      return isTruthy(evalExpression(expr.test, env))
+        ? evalExpression(expr.consequent, env)
+        : evalExpression(expr.alternate, env);
   }
 }
 

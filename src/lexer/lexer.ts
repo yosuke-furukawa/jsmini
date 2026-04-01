@@ -246,7 +246,7 @@ export function tokenize(source: string): Token[] {
       "=": "Equals", "!": "Bang", "<": "Less", ">": "Greater",
       "(": "LeftParen", ")": "RightParen",
       "[": "LeftBracket", "]": "RightBracket",
-      ":": "Colon", ".": "Dot", ",": "Comma",
+      ":": "Colon", "?": "Question", ".": "Dot", ",": "Comma",
       ";": "Semicolon",
     };
 

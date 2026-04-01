@@ -444,7 +444,16 @@ export function parse(source: string): Program {
       return parseArrowBody(params);
     }
 
-    const left = parseLogicalOr();
+    let left = parseLogicalOr();
+
+    // 三項演算子: test ? consequent : alternate
+    if (current().type === "Question") {
+      eat("Question");
+      const consequent = parseAssignment();
+      eat("Colon");
+      const alternate = parseAssignment();
+      left = { type: "ConditionalExpression", test: left, consequent, alternate };
+    }
 
     // 代入演算子
     const assignOps = ["Equals", "PlusEquals", "MinusEquals", "StarEquals", "SlashEquals", "PercentEquals"];

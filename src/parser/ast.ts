@@ -168,7 +168,15 @@ export type Expression =
   | LogicalExpression
   | UnaryExpression
   | UpdateExpression
-  | AssignmentExpression;
+  | AssignmentExpression
+  | ConditionalExpression;
+
+export type ConditionalExpression = {
+  type: "ConditionalExpression";
+  test: Expression;
+  consequent: Expression;
+  alternate: Expression;
+};
 
 export type UpdateExpression = {
   type: "UpdateExpression";

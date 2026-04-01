@@ -761,6 +761,18 @@ class BytecodeCompiler {
         break;
       }
 
+      case "ConditionalExpression": {
+        // test ? consequent : alternate
+        this.compileExpression(expr.test);
+        const jumpToAlternate = this.emit("JumpIfFalse", 0);
+        this.compileExpression(expr.consequent);
+        const jumpToEnd = this.emit("Jump", 0);
+        this.patch(jumpToAlternate, this.currentOffset());
+        this.compileExpression(expr.alternate);
+        this.patch(jumpToEnd, this.currentOffset());
+        break;
+      }
+
       case "ArrowFunctionExpression": {
         const fnCompiler = new BytecodeCompiler(this);
         if (expr.expression) {

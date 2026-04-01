@@ -73,6 +73,7 @@ export type TokenType =
   | "RightBracket"     // ]
   | "DotDotDot"        // ...
   | "Colon"            // :
+  | "Question"         // ?
   | "Dot"              // .
   | "Comma"            // ,
   | "Semicolon"        // ;
