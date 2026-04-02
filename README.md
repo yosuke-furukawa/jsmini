@@ -49,11 +49,19 @@ Source Code
 - アロー関数 (`=>`)、レキシカル `this`
 - テンプレートリテラル (`` `${expr}` ``、ネスト対応)
 - プロトタイプチェーン (`Ctor.prototype`、`instanceof`)
-- クラス (`class` / `extends` / `super`)
-- 分割代入 (`var { x } = obj`、`var [a, b] = arr`、代入式でのカバー文法)
+- クラス (`class` / `extends` / `super`、class fields、private fields `#x`、computed `[expr]`)
+- 分割代入 (`var { x } = obj`、`var [a, b] = arr`、rest `...rest`、default `a = 1`、カバー文法)
 - スプレッド / レスト (`...`)
-- `for...of`、`++` / `--`、複合代入 (`+=` 等)
-- `break` / `continue`、`in` 演算子、カンマ演算子
+- `for...of` (Iterator Protocol: `Symbol.iterator` / `next()` / `done`)
+- `++` / `--`、複合代入 (`+=` 等)
+- `break` / `continue` (labeled)、`in` 演算子、カンマ演算子
+- getter/setter (`get x() {}` / `set x(v) {}`)
+- optional chaining (`?.`)、nullish coalescing (`??`)
+- `switch` / `case` / `default`、`do-while`、`for-in`
+- ビット演算 (`&` `|` `^` `~` `<<` `>>` `>>>`)、べき乗 (`**`)
+- `0x` / `0b` / `0o` リテラル、unicode escape (`\uXXXX`)
+- `Symbol` (自前実装、well-known symbols)
+- `function*` / `yield` (Generator)
 
 ### Phase 4 — Bytecode VM
 
@@ -61,6 +69,8 @@ Source Code
 - AST → バイトコードコンパイラ（パッチバック、ローカルスロット割り当て）
 - `--print-bytecode` でバイトコードダンプ
 - 例外ハンドラテーブルによる try/catch
+- Iterator Protocol 専用命令 (`GetIterator` / `IteratorNext` / `IteratorComplete` / `IteratorValue`)
+- Generator: `Yield` opcode でフレーム保存・復元
 - Phase 1〜3 の全構文に対応
 
 ### Phase 5 — Wasm JIT
@@ -70,6 +80,41 @@ Source Code
 - 型特殊化: int32 → `i32.add`, float → `f64.add`
 - 脱最適化: 型推測が外れたら Bytecode VM にフォールバック
 - 多層実行の可視化 (`--trace-tier`)
+
+### Phase 6-8 — Hidden Class + Inline Cache
+
+- Hidden Class (V8 の Map に相当) によるプロパティアクセス最適化
+- Inline Cache: monomorphic → polymorphic → megamorphic
+- JSObject: `__hc__` + `__slots__` 構造
+- AccessorDescriptor (getter/setter のスロット格納)
+
+### Phase 9 — カスタム文字列
+
+- Rope String (連結を遅延)、Interned String (文字列テーブル)
+- JSString 型で V8 ネイティブ文字列と独立
+
+### Phase 10 — GC
+
+- Mark-and-Sweep ガベージコレクション
+- Heap 管理、オブジェクト追跡
+
+### Phase 11 — クロージャ
+
+- Upvalue (Lua スタイル) によるクロージャ変数キャプチャ
+- UpvalueBox (ミュータブル参照)
+- OSR (On-Stack Replacement): ホットループの Wasm 再コンパイル
+
+### Phase 12 — プロトタイプチェーン
+
+- JSObject ベースのプロトタイプチェーン
+- Array.prototype / String.prototype ビルトインメソッド
+
+### Phase 13 — 構文拡大 + Generator
+
+- 大量の構文拡張 (上記 Phase 3 参照)
+- Generator: VM (フレーム保存) + TW (engine262 スタイル host generator)
+- Symbol: 自前 wrapper オブジェクト実装
+- test262: 29.6% → 44.3%
 
 ## パフォーマンス比較
 
@@ -93,10 +138,10 @@ V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run 
 
 | エンジン | Pass | Fail | Skip | Total | Pass Rate |
 |----------|------|------|------|-------|-----------|
-| Tree-Walking | 225 | 591 | 25 | 841 | **27.6%** |
-| Bytecode VM | 225 | 591 | 25 | 841 | **27.6%** |
+| Tree-Walking | 3,680 | 5,267 | 1,750 | 10,697 | **41.1%** |
+| Bytecode VM | 3,964 | 4,983 | 1,750 | 10,697 | **44.3%** |
 
-*両エンジンで同一の結果。Skip は noStrict (非厳格モード限定テスト) のみ。*
+*Skip は module/async/noStrict。test262/test/language/ 配下 69 ディレクトリ (10,697 テスト) で実行。*
 
 ## セットアップ
 
@@ -155,7 +200,7 @@ npm start -- --trace-tier 'function add(a,b){return a+b;} for(var i=0;i<110;i=i+
 ### テストを実行
 
 ```bash
-# ユニットテスト (420 tests)
+# ユニットテスト (584 tests)
 npm test
 
 # ベンチマーク
@@ -192,10 +237,20 @@ src/
   vm/
     bytecode.ts         # Opcode 定義、命令型、disassembler
     compiler.ts         # AST → バイトコードコンパイラ
-    vm.ts               # スタックベース VM
+    vm.ts               # スタックベース VM (Generator: Yield opcode)
+    js-object.ts        # Hidden Class 付き JSObject
+    js-string.ts        # Rope/Interned String
+    js-symbol.ts        # 自前 Symbol 実装
+    inline-cache.ts     # Inline Cache
+    hidden-class.ts     # Hidden Class 遷移
+    heap.ts             # Mark-and-Sweep GC
     vm.test.ts          # VM テスト
-    compat.test.ts      # Tree-Walking と VM の互換テスト
+    compat.test.ts      # Tree-Walking と VM の互換テスト (584 tests)
     index.ts            # vmEvaluate() エントリポイント
+  jit/
+    wasm-compiler.ts    # バイトコード → Wasm コンパイラ
+    jit.ts              # JIT マネージャ
+    feedback.ts         # 型フィードバック収集
   test262/
     runner.ts           # Test262 テストランナー (--vm 対応)
   bench.ts              # ベンチマーク
@@ -209,6 +264,12 @@ src/
 - [x] **Phase 3** — アロー関数、テンプレートリテラル、クラス、分割代入、スプレッド/レスト、for...of
 - [x] **Phase 4** — Bytecode VM (スタックベース、`--print-bytecode`)
 - [x] **Phase 5** — Wasm JIT (型フィードバック → 型特殊化 → 脱最適化)
+- [x] **Phase 6-8** — Hidden Class + Inline Cache
+- [x] **Phase 9** — カスタム文字列 (Rope / Interned)
+- [x] **Phase 10** — Mark-and-Sweep GC
+- [x] **Phase 11** — クロージャ (Upvalue) + OSR
+- [x] **Phase 12** — プロトタイプチェーン
+- [x] **Phase 13** — 構文拡大 + Generator (test262: 44.3%)
 
 詳細は [PLAN.md](./PLAN.md) を参照。
 
@@ -216,6 +277,7 @@ src/
 
 - [LEARN-VM.md](./LEARN-VM.md) — TW vs Bytecode VM: 関数呼び出しのコスト差、dispatch オーバーヘッド
 - [LEARN-JIT.md](./LEARN-JIT.md) — JIT: 再帰の Wasm 内完結で 1309x、per-call JIT の限界
+- [LEARN-syntax-expansion.md](./LEARN-syntax-expansion.md) — 構文拡大: Generator の TW/VM 対比、Iterator Protocol、Symbol 自前実装
 - [BENCHMARK.md](./BENCHMARK.md) — 全ベンチマーク結果
 - [RESEARCH-WHY-BYTECODE-IS-SLOW.md](./RESEARCH-WHY-BYTECODE-IS-SLOW.md) — なぜ Object VM は TW より遅いのか
 
