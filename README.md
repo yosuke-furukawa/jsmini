@@ -230,10 +230,10 @@ src/
   interpreter/
     values.ts           # JS値の型定義、シグナル、プロトタイプヘルパー
     environment.ts      # スコープ / 環境レコード
-    evaluator.ts        # Tree-Walking 評価器
-    evaluator.test.ts   # Phase 1 テスト
-    core.test.ts        # Phase 2 テスト
-    features.test.ts    # Phase 3 テスト
+    evaluator.ts        # Tree-Walking 評価器 (全関数が function* — Generator 対応)
+    evaluator.test.ts   # Phase 1 テスト (数値、変数、関数、ループ等)
+    core.test.ts        # Phase 2 テスト (オブジェクト、配列、let/const、try/catch等)
+    features.test.ts    # Phase 3+ テスト (アロー関数、クラス、分割代入、JIT脱最適化等)
   vm/
     bytecode.ts         # Opcode 定義、命令型、disassembler
     compiler.ts         # AST → バイトコードコンパイラ
@@ -245,7 +245,7 @@ src/
     hidden-class.ts     # Hidden Class 遷移
     heap.ts             # Mark-and-Sweep GC
     vm.test.ts          # VM テスト
-    compat.test.ts      # Tree-Walking と VM の互換テスト (584 tests)
+    compat.test.ts      # TW vs VM 互換テスト + VM 固有テスト
     index.ts            # vmEvaluate() エントリポイント
   jit/
     wasm-compiler.ts    # バイトコード → Wasm コンパイラ
