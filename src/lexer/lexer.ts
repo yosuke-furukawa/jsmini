@@ -153,12 +153,32 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // 識別子・キーワード
-    if (isAlpha(ch)) {
-      const start = pos;
+    // 識別子・キーワード (unicode escape 対応)
+    if (isAlpha(ch) || (ch === "\\" && peek(1) === "u")) {
       const startCol = column;
-      while (pos < source.length && isAlphaNumeric(peek())) advance();
-      const word = source.slice(start, pos);
+      let word = "";
+      while (pos < source.length) {
+        if (peek() === "\\" && peek(1) === "u") {
+          advance(); advance(); // skip \u
+          if (peek() === "{") {
+            // \u{XXXX} 形式
+            advance(); // skip {
+            let hex = "";
+            while (pos < source.length && peek() !== "}") hex += advance();
+            if (pos < source.length) advance(); // skip }
+            word += String.fromCodePoint(parseInt(hex, 16));
+          } else {
+            // \uXXXX 形式
+            let hex = "";
+            for (let j = 0; j < 4 && pos < source.length; j++) hex += advance();
+            word += String.fromCharCode(parseInt(hex, 16));
+          }
+        } else if (isAlphaNumeric(peek())) {
+          word += advance();
+        } else {
+          break;
+        }
+      }
       pushToken(KEYWORDS[word] ?? "Identifier", word, startCol);
       continue;
     }
