@@ -4,6 +4,7 @@ import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
 import { isJSString, jsStringToString, internString, createSeqString } from "./js-string.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass } from "./js-object.js";
+import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
 import { Heap } from "./heap.js";
 export { disassemble } from "./bytecode.js";
 
@@ -212,16 +213,15 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   };
   vm.setGlobal("console", consoleObj);
   vm.setGlobal("Error", { __nativeConstructor: true, name: "Error" });
-  // Symbol: 自前実装 (一意な文字列ベース)
-  let symbolCounter = 0;
+  // Symbol: 自前実装 (wrapper オブジェクト)
   const SymbolFn: any = (desc?: unknown) => {
     const d = desc !== undefined ? (isJSString(desc) ? jsStringToString(desc) : String(desc)) : "";
-    return internString(`@@symbol_${symbolCounter++}_${d}`);
+    return createSymbol(d);
   };
-  SymbolFn.iterator = internString("@@iterator");
-  SymbolFn.toPrimitive = internString("@@toPrimitive");
-  SymbolFn.hasInstance = internString("@@hasInstance");
-  SymbolFn.toStringTag = internString("@@toStringTag");
+  SymbolFn.iterator = SYMBOL_ITERATOR;
+  SymbolFn.toPrimitive = SYMBOL_TO_PRIMITIVE;
+  SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
+  SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
   vm.setGlobal("Symbol", SymbolFn);
 
   // フィードバック収集 (JIT 有効時は自動で有効)

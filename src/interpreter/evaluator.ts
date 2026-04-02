@@ -9,6 +9,7 @@ import {
   collectBoundNames, bindPattern, assignPattern,
 } from "./values.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "../vm/js-string.js";
+import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
 
 // JSString 対応の truthiness 判定 (空文字列は falsy)
 function isTruthy(value: unknown): boolean {
@@ -57,7 +58,7 @@ function toPrimitive(value: unknown, hint: "number" | "string" = "number"): unkn
 function resolveMemberKey(expr: MemberExpression, env: Environment): string {
   if (expr.computed) {
     const key = evalExpression(expr.property, env);
-    return isJSString(key) ? jsStringToString(key) : String(key);
+    return isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
   }
   return (expr.property as Identifier).name;
 }
@@ -169,16 +170,15 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
 
   // 組み込みコンストラクタ
   env.defineReadOnly("Error", { __nativeConstructor: true, name: "Error" });
-  // Symbol: 自前実装 (一意な文字列ベース)
-  let symbolCounter = 0;
+  // Symbol: 自前実装 (wrapper オブジェクト)
   const SymbolFn: any = (desc?: unknown) => {
     const d = desc !== undefined ? (isJSString(desc) ? jsStringToString(desc) : String(desc)) : "";
-    return internString(`@@symbol_${symbolCounter++}_${d}`);
+    return createSymbol(d);
   };
-  SymbolFn.iterator = internString("@@iterator");
-  SymbolFn.toPrimitive = internString("@@toPrimitive");
-  SymbolFn.hasInstance = internString("@@hasInstance");
-  SymbolFn.toStringTag = internString("@@toStringTag");
+  SymbolFn.iterator = SYMBOL_ITERATOR;
+  SymbolFn.toPrimitive = SYMBOL_TO_PRIMITIVE;
+  SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
+  SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
   env.defineReadOnly("Symbol", SymbolFn);
 
   _currentOnStep = onStep;
@@ -1167,10 +1167,8 @@ function evalUnaryExpression(
     } else {
       value = evalExpression(expr.argument, env);
     }
-    if (isJSString(value)) {
-      if (jsStringToString(value).startsWith("@@symbol_")) return internString("symbol");
-      return internString("string");
-    }
+    if (isJSSymbol(value)) return internString("symbol");
+    if (isJSString(value)) return internString("string");
     if (value === null) return internString("object");
     if (isJSFunction(value)) return internString("function");
     return internString(typeof value);

@@ -4,6 +4,7 @@ import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots, isAccessorDescriptor, createAccessorDescriptor } from "./js-object.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "./js-string.js";
+import { isJSSymbol } from "./js-symbol.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 import { Heap } from "./heap.js";
 import { compileMultiSync } from "../jit/wasm-compiler.js";
@@ -16,10 +17,8 @@ function isTruthy(value: unknown): boolean {
 
 // jsmini の typeof: Symbol は "@@symbol_" プレフィックスの文字列
 function jsminiTypeof(val: unknown): string {
-  if (isJSString(val)) {
-    if (jsStringToString(val).startsWith("@@symbol_")) return "symbol";
-    return "string";
-  }
+  if (isJSSymbol(val)) return "symbol";
+  if (isJSString(val)) return "string";
   if (val === null) return "object";
   if (typeof val === "object" && val !== null && ("bytecode" in val && "paramCount" in val || "__closure" in val)) return "function";
   return typeof val;
@@ -792,7 +791,7 @@ export class VM {
         case "GetPropertyComputed": {
           const key = this.pop();
           const obj = this.pop() as Record<string, unknown>;
-          const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
+          const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
           this.push(obj[keyStr]);
           break;
         }
@@ -803,7 +802,7 @@ export class VM {
           if (Array.isArray(obj) && typeof key === "number") {
             setElement(obj, key, value);
           } else {
-            const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
+            const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
             if (isJSObject(obj)) {
               jsObjSet(obj, keyStr, value);
             } else {
