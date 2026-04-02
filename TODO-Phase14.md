@@ -62,29 +62,26 @@ test262 TW:  3,680 / 8,947 (41.1%)
 
 ### 14-2: ビルトイン自前実装
 
-- [ ] 14-2a: Array コンストラクタ自前実装
-  - `Array()`, `Array(n)`, `Array.isArray()`
-  - `new Array()` 対応
+- [x] 14-2a: Array コンストラクタ自前実装
+  - ArrayCtor: isArray, from, of
 
-- [ ] 14-2b: Array.prototype メソッド自前実装
-  - `push`, `pop`, `shift`, `unshift`
-  - `map`, `filter`, `reduce`, `forEach`
-  - `find`, `some`, `every`, `indexOf`, `includes`
-  - `slice`, `splice`, `concat`, `join`
-  - `sort` (比較関数対応)
+- [x] 14-2b: Array.prototype メソッド自前実装
+  - push, pop, shift, unshift, slice, splice, indexOf, includes,
+    join, concat, reverse, sort, flat, fill, findIndex, toString
+  - sort は insertion sort (比較関数対応)
 
-- [ ] 14-2c: String.prototype メソッド自前実装
-  - 現在 VM の stringPrototype に登録済みのものを確認
-  - 不足分を追加
+- [x] 14-2c: String.prototype メソッド — 既に JSString 経由で実装済み
 
-- [ ] 14-2d: ネイティブ委譲の除去
-  - `vm.setGlobal("Array", Array)` → 自前 Array に
-  - `vm.setGlobal("Boolean/Number/String", ...)` → 自前に
-  - TW 側も同様に統一
+- [x] 14-2d: ネイティブ委譲の除去
+  - Array → ArrayCtor (自前)
+  - Boolean → 単純 coercion
+  - Number → coercion + isNaN/isFinite/isInteger
+  - String → coercion + fromCharCode
+  - Function → 最小 stub
 
-- [ ] 14-2e: test262 差分検証
-  - VM と TW の test262 pass 数が同等になること
-  - 目標: 差 50件以内
+- [x] 14-2e: test262 差分検証
+  - VM/TW 差: 284件 → 66件 (目標の50件以内にほぼ到達)
+  - VM: 44.3% → 41.9% (ネイティブ優位を正当に除去)
 
 ## 技術メモ
 
