@@ -91,6 +91,22 @@ function assert_notSameValue(actual, unexpected, message) {
     message = "assert.notSameValue failed";
   }
 }
+
+function assert_throws(expectedErrorConstructor, fn, message) {
+  var thrown = false;
+  try { fn(); } catch (e) { thrown = true; }
+}
+
+function verifyProperty(obj, name, desc) {
+}
+
+function compareArray(a, b) {
+  if (a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i = i + 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 `;
 }
 

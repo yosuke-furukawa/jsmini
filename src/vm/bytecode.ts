@@ -46,6 +46,8 @@ export type Opcode =
   | "StaLocal"        // StaLocal <slot> — スタックトップをローカル変数に格納 (pop しない)
   | "LdaUpvalue"      // LdaUpvalue <index> — キャプチャされた外部変数を push
   | "StaUpvalue"      // StaUpvalue <index> — スタックトップをキャプチャ変数に格納 (pop しない)
+  | "DefineGetter"    // DefineGetter <nameIndex> — pop getter func, peek obj, define getter
+  | "DefineSetter"    // DefineSetter <nameIndex> — pop setter func, peek obj, define setter
 
   // オブジェクト / 配列
   | "CreateObject"    // 空オブジェクトを push

@@ -163,6 +163,16 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
+    // Private identifier: #name
+    if (ch === "#" && isAlpha(peek(1))) {
+      const startCol = column;
+      advance(); // skip #
+      const start = pos;
+      while (pos < source.length && isAlphaNumeric(peek())) advance();
+      pushToken("PrivateIdentifier", "#" + source.slice(start, pos), startCol);
+      continue;
+    }
+
     // 複数文字演算子
     const startCol = column;
 

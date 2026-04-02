@@ -2,7 +2,7 @@ import type { BytecodeFunction, Instruction } from "./bytecode.js";
 import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
-import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots } from "./js-object.js";
+import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots, isAccessorDescriptor, createAccessorDescriptor } from "./js-object.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "./js-string.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 import { Heap } from "./heap.js";
@@ -182,6 +182,23 @@ export class VM {
 
   private createICSlots(func: BytecodeFunction): ICSlot[] {
     return Array.from({ length: func.icSlotCount || 0 }, createICSlot);
+  }
+
+  // getter/setter 関数を呼び出すヘルパー
+  callGetterSetter(fn: unknown, thisValue: unknown, arg: unknown): unknown {
+    const isClosure = typeof fn === "object" && fn !== null && (fn as any).__closure;
+    const func = isClosure ? (fn as any).func as BytecodeFunction : fn as BytecodeFunction;
+    const boxes: UpvalueBox[] = isClosure ? (fn as any).capturedBoxes : [];
+    const vm = new VM();
+    vm.globals = this.globals;
+    vm.heap = this.heap;
+    vm.objectPrototype = this.objectPrototype;
+    vm.arrayPrototype = this.arrayPrototype;
+    vm.stringPrototype = this.stringPrototype;
+    const locals = new Array(func.localCount).fill(undefined);
+    if (arg !== undefined) locals[0] = arg; // setter の引数
+    vm.frames.push({ func, pc: 0, locals, thisValue, icSlots: vm.createICSlots(func), upvalueBoxes: boxes });
+    return vm.run();
   }
 
   // 例外をフレームスタックをアンワインドしてハンドラを探す
@@ -646,14 +663,59 @@ export class VM {
           }
           break;
         }
+        case "DefineGetter":
+        case "DefineSetter": {
+          const fn = this.pop(); // getter/setter 関数 (BytecodeFunction or closure)
+          const obj = this.peek();
+          const name = constants[instr.operand!] as string;
+          if (isJSObject(obj)) {
+            // JSObject: AccessorDescriptor をスロットに格納
+            const existing = jsObjGet(obj, name);
+            const desc = isAccessorDescriptor(existing) ? existing : createAccessorDescriptor();
+            if (instr.op === "DefineGetter") {
+              desc.get = fn;
+            } else {
+              desc.set = fn;
+            }
+            jsObjSet(obj, name, desc);
+          } else {
+            // plain object: Object.defineProperty を使用
+            const target = obj as Record<string, unknown>;
+            const existingDesc = Object.getOwnPropertyDescriptor(target, name) ?? {};
+            const descriptor: PropertyDescriptor = {
+              get: existingDesc.get,
+              set: existingDesc.set,
+              configurable: true,
+              enumerable: true,
+            };
+            const self = this;
+            if (instr.op === "DefineGetter") {
+              descriptor.get = function(this: unknown) {
+                return self.callGetterSetter(fn, this, undefined);
+              };
+            } else {
+              descriptor.set = function(this: unknown, v: unknown) {
+                self.callGetterSetter(fn, this, v);
+              };
+            }
+            Object.defineProperty(target, name, descriptor);
+          }
+          break;
+        }
+
         case "SetPropertyAssign": {
           const obj = this.pop();
           const value = this.pop();
           const name = constants[instr.operand!] as string;
           if (isJSObject(obj)) {
-            jsObjSet(obj, name, value);
-            const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
-            if (ic) icUpdate(ic, getHiddenClass(obj), name);
+            const existing = jsObjGet(obj, name);
+            if (isAccessorDescriptor(existing) && existing.set) {
+              this.callGetterSetter(existing.set, obj, value);
+            } else {
+              jsObjSet(obj, name, value);
+              const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
+              if (ic) icUpdate(ic, getHiddenClass(obj), name);
+            }
           } else {
             (obj as Record<string, unknown>)[name] = value;
           }
@@ -672,18 +734,31 @@ export class VM {
             const ic = frame.icSlots[instr.icSlot];
             const hc = getHiddenClass(obj);
             if (ic.cachedHC === hc && ic.cachedOffset >= 0) {
-              // IC ヒット: slots[offset] を直接アクセス (関数呼び出しなし)
-              this.push(getSlots(obj)[ic.cachedOffset]);
+              const val = getSlots(obj)[ic.cachedOffset];
+              if (isAccessorDescriptor(val)) {
+                this.push(val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined);
+              } else {
+                this.push(val);
+              }
               break;
             }
-            // IC ミス or prototype 参照 → フルパス + IC 更新
             const name = constants[instr.operand!] as string;
             if (ic.state !== "polymorphic") icUpdate(ic, hc, name);
-            this.push(jsObjGet(obj, name));
+            const val = jsObjGet(obj, name);
+            if (isAccessorDescriptor(val)) {
+              this.push(val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined);
+            } else {
+              this.push(val);
+            }
           } else {
             const name = constants[instr.operand!] as string;
             if (isJSObject(obj)) {
-              this.push(jsObjGet(obj, name));
+              const val = jsObjGet(obj, name);
+              if (isAccessorDescriptor(val)) {
+                this.push(val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined);
+              } else {
+                this.push(val);
+              }
             } else {
               // BytecodeFunction の prototype を遅延作成
               if (name === "prototype" && typeof obj === "object" && obj !== null && "bytecode" in obj && !(obj as any).prototype) {
@@ -718,7 +793,11 @@ export class VM {
             setElement(obj, key, value);
           } else {
             const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
-            obj[keyStr] = value;
+            if (isJSObject(obj)) {
+              jsObjSet(obj, keyStr, value);
+            } else {
+              obj[keyStr] = value;
+            }
           }
           this.push(value);
           break;
@@ -947,6 +1026,30 @@ export class VM {
               throw new Error(`Unknown native constructor: ${ctor.name}`);
             }
           } else if (ctor.bytecode) {
+            // インスタンスフィールドの初期化
+            if (ctor.__instanceFields) {
+              for (const field of ctor.__instanceFields as any[]) {
+                const name = field.key.name as string;
+                let value: unknown = undefined;
+                if (field.value) {
+                  if (field.value.type === "Literal") {
+                    value = field.value.value;
+                  } else {
+                    // 複雑な式は ExecExpr で評価
+                    const idx = ctor.constants?.indexOf(field.value) ?? -1;
+                    if (idx < 0) {
+                      // constants に追加して ExecExpr で評価
+                      // 簡易実装: undefined のまま
+                    }
+                  }
+                }
+                if (isJSObject(newObj)) {
+                  jsObjSet(newObj, name, value);
+                } else {
+                  (newObj as Record<string, unknown>)[name] = value;
+                }
+              }
+            }
             // BytecodeFunction
             const locals = new Array(ctor.localCount).fill(undefined);
             for (let i = 0; i < ctor.paramCount; i++) {

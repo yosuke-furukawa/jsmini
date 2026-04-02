@@ -67,14 +67,32 @@ export function parse(source: string): Program {
     if (current().type === "Return") return parseReturnStatement();
     if (current().type === "Throw") return parseThrowStatement();
     if (current().type === "Try") return parseTryStatement();
-    if (current().type === "Break") { eat("Break"); if (current().type === "Semicolon") eat("Semicolon"); return { type: "BreakStatement", label: null }; }
-    if (current().type === "Continue") { eat("Continue"); if (current().type === "Semicolon") eat("Semicolon"); return { type: "ContinueStatement", label: null }; }
+    if (current().type === "Break") {
+      eat("Break");
+      const label = (current().type === "Identifier") ? eat("Identifier").value : null;
+      if (current().type === "Semicolon") eat("Semicolon");
+      return { type: "BreakStatement", label };
+    }
+    if (current().type === "Continue") {
+      eat("Continue");
+      const label = (current().type === "Identifier") ? eat("Identifier").value : null;
+      if (current().type === "Semicolon") eat("Semicolon");
+      return { type: "ContinueStatement", label };
+    }
     if (current().type === "If") return parseIfStatement();
     if (current().type === "While") return parseWhileStatement();
     if (current().type === "Do") return parseDoWhileStatement();
     if (current().type === "For") return parseForStatement();
     if (current().type === "Switch") return parseSwitchStatement();
     if (current().type === "LeftBrace") return parseBlockStatement();
+
+    // ラベル付き文: Identifier ':' Statement
+    if (current().type === "Identifier" && tokens[pos + 1]?.type === "Colon") {
+      const label = eat("Identifier").value;
+      eat("Colon");
+      const body = parseStatement();
+      return { type: "LabeledStatement", label, body };
+    }
 
     const expression = parseExpression();
     eat("Semicolon");
@@ -141,7 +159,7 @@ export function parse(source: string): Program {
     return { type: "FunctionDeclaration", id, params, body };
   }
 
-  // ClassDeclaration = 'class' Identifier ('extends' Expression)? '{' MethodDefinition* '}'
+  // ClassDeclaration = 'class' Identifier ('extends' Expression)? '{' ClassElement* '}'
   function parseClassDeclaration(): Statement {
     eat("Class");
     const id = parseIdentifier();
@@ -153,29 +171,113 @@ export function parse(source: string): Program {
     }
 
     eat("LeftBrace");
-    const methods: any[] = [];
+    const body: any[] = [];
     while (current().type !== "RightBrace") {
-      const key = parseIdentifier();
-      eat("LeftParen");
-      resetParamState();
-      const params: any[] = [];
-      if (current().type !== "RightParen") {
-        params.push(parseParam());
-        while (current().type === "Comma") {
-          eat("Comma");
-          params.push(parseParam());
-        }
-      }
-      eat("RightParen");
-      const body = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
+      // セミコロンをスキップ（空文）
+      if (current().type === "Semicolon") { eat("Semicolon"); continue; }
 
-      const kind = key.name === "constructor" ? "constructor" : "method";
-      methods.push({
-        type: "MethodDefinition",
+      // static キーワード
+      let isStatic = false;
+      if (current().type === "Identifier" && current().value === "static" &&
+          tokens[pos + 1]?.type !== "LeftParen") {
+        isStatic = true;
+        eat("Identifier"); // consume 'static'
+      }
+
+      // キー: Identifier, PrivateIdentifier, String, Number, or [expr]
+      let key: any;
+      let computed = false;
+      if (current().type === "LeftBracket") {
+        eat("LeftBracket");
+        key = parseAssignment();
+        eat("RightBracket");
+        computed = true;
+      } else if (current().type === "PrivateIdentifier") {
+        const tok = eat("PrivateIdentifier");
+        key = { type: "PrivateIdentifier", name: tok.value };
+      } else if (current().type === "String") {
+        key = { type: "Literal", value: eat("String").value };
+      } else if (current().type === "Number") {
+        key = { type: "Literal", value: Number(eat("Number").value) };
+      } else {
+        key = parseIdentifier();
+      }
+
+      // getter/setter: get name() {} / set name(v) {}
+      if ((key.name === "get" || key.name === "set") && !computed &&
+          (current().type === "Identifier" || current().type === "PrivateIdentifier" ||
+           current().type === "LeftBracket" || current().type === "String" || current().type === "Number") &&
+          key.type !== "PrivateIdentifier") {
+        const kind = key.name as "get" | "set";
+        computed = false;
+        if (current().type === "LeftBracket") {
+          eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
+        } else if (current().type === "PrivateIdentifier") {
+          const tok = eat("PrivateIdentifier");
+          key = { type: "PrivateIdentifier", name: tok.value };
+        } else if (current().type === "String") {
+          key = { type: "Literal", value: eat("String").value };
+        } else if (current().type === "Number") {
+          key = { type: "Literal", value: Number(eat("Number").value) };
+        } else {
+          key = parseIdentifier();
+        }
+        eat("LeftParen");
+        resetParamState();
+        const params: any[] = [];
+        if (current().type !== "RightParen") {
+          params.push(parseParam());
+          while (current().type === "Comma") { eat("Comma"); params.push(parseParam()); }
+        }
+        eat("RightParen");
+        const mbody = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
+        body.push({
+          type: "MethodDefinition",
+          key,
+          value: { type: "FunctionExpression", id: null, params, body: mbody },
+          kind,
+          computed,
+          static: isStatic,
+        });
+        continue;
+      }
+
+      // メソッド: name(...) { ... }
+      if (current().type === "LeftParen") {
+        const kind = !computed && key.type !== "PrivateIdentifier" && key.name === "constructor" ? "constructor" : "method";
+        eat("LeftParen");
+        resetParamState();
+        const params: any[] = [];
+        if (current().type !== "RightParen") {
+          params.push(parseParam());
+          while (current().type === "Comma") { eat("Comma"); params.push(parseParam()); }
+        }
+        eat("RightParen");
+        const mbody = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
+        body.push({
+          type: "MethodDefinition",
+          key,
+          value: { type: "FunctionExpression", id: null, params, body: mbody },
+          kind,
+          computed,
+          static: isStatic,
+        });
+        continue;
+      }
+
+      // フィールド宣言: name = expr; or name;
+      let fieldValue: Expression | null = null;
+      if (current().type === "Equals") {
+        eat("Equals");
+        fieldValue = parseAssignment();
+      }
+      if (current().type === "Semicolon") eat("Semicolon");
+      body.push({
+        type: "PropertyDefinition",
         key,
-        value: { type: "FunctionExpression", id: null, params, body },
-        kind,
-        static: false,
+        value: fieldValue,
+        computed,
+        static: isStatic,
       });
     }
     eat("RightBrace");
@@ -184,7 +286,7 @@ export function parse(source: string): Program {
       type: "ClassDeclaration",
       id,
       superClass,
-      body: { type: "ClassBody", body: methods },
+      body: { type: "ClassBody", body },
     };
   }
 
@@ -822,7 +924,13 @@ export function parse(source: string): Program {
       } else if (current().type === "Dot" || current().type === "QuestionDot") {
         const optional = current().type === "QuestionDot";
         eat(current().type);
-        const property = parseIdentifier();
+        let property: any;
+        if (current().type === "PrivateIdentifier") {
+          const tok = eat("PrivateIdentifier");
+          property = { type: "PrivateIdentifier", name: tok.value };
+        } else {
+          property = parseIdentifier();
+        }
         expr = { type: "MemberExpression", object: expr, property, computed: false, optional } as any;
       } else if (current().type === "LeftBracket") {
         eat("LeftBracket");
@@ -952,23 +1060,69 @@ export function parse(source: string): Program {
         if (current().type === "Comma") eat("Comma");
         continue;
       }
-      let key: { type: "Identifier"; name: string } | { type: "Literal"; value: string | number };
-      if (current().type === "Identifier") {
+      let key: any;
+      let propKind: "init" | "get" | "set" = "init";
+      let computed = false;
+
+      // computed property: [expr]
+      if (current().type === "LeftBracket") {
+        eat("LeftBracket");
+        key = parseAssignment();
+        eat("RightBracket");
+        computed = true;
+      } else if (current().type === "Identifier") {
         const t = eat("Identifier");
+        // getter/setter: get name() {} / set name(v) {}
+        if ((t.value === "get" || t.value === "set") &&
+            (current().type === "Identifier" || current().type === "LeftBracket" || current().type === "String" || current().type === "Number")) {
+          propKind = t.value as "get" | "set";
+          if (current().type === "LeftBracket") {
+            eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
+          } else if (current().type === "String") {
+            key = { type: "Literal", value: eat("String").value };
+          } else if (current().type === "Number") {
+            key = { type: "Literal", value: Number(eat("Number").value) };
+          } else {
+            key = { type: "Identifier", name: eat("Identifier").value };
+          }
+          eat("LeftParen");
+          resetParamState();
+          const params: any[] = [];
+          if (current().type !== "RightParen") {
+            params.push(parseParam());
+            while (current().type === "Comma") { eat("Comma"); params.push(parseParam()); }
+          }
+          eat("RightParen");
+          const body = parseBlockStatement();
+          const value: Expression = { type: "FunctionExpression", id: null, params, body } as any;
+          properties.push({ type: "Property", key, value, kind: propKind, computed });
+          if (current().type === "Comma") eat("Comma");
+          continue;
+        }
         key = { type: "Identifier", name: t.value };
       } else if (current().type === "String") {
-        const t = eat("String");
-        key = { type: "Literal", value: t.value };
+        key = { type: "Literal", value: eat("String").value };
       } else if (current().type === "Number") {
-        const t = eat("Number");
-        key = { type: "Literal", value: Number(t.value) };
+        key = { type: "Literal", value: Number(eat("Number").value) };
       } else {
         throw new SyntaxError(
           `Unexpected token ${current().type} as object key at line ${current().line}, column ${current().column}`
         );
       }
       let value: Expression;
-      if (current().type === "Colon") {
+      if (current().type === "LeftParen") {
+        // メソッド省略記法: { foo() {} }
+        eat("LeftParen");
+        resetParamState();
+        const params: any[] = [];
+        if (current().type !== "RightParen") {
+          params.push(parseParam());
+          while (current().type === "Comma") { eat("Comma"); params.push(parseParam()); }
+        }
+        eat("RightParen");
+        const body = parseBlockStatement();
+        value = { type: "FunctionExpression", id: null, params, body } as any;
+      } else if (current().type === "Colon") {
         eat("Colon");
         value = parseAssignment();
       } else {
@@ -978,7 +1132,7 @@ export function parse(source: string): Program {
         }
         value = { type: "Identifier", name: key.name };
       }
-      properties.push({ type: "Property", key, value, kind: "init" });
+      properties.push({ type: "Property", key, value, kind: propKind, computed });
       if (current().type === "Comma") {
         eat("Comma");
       }

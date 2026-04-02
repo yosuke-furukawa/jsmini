@@ -254,11 +254,35 @@ function hoistFunctionDeclarations(stmts: Statement[], env: Environment): void {
   }
 }
 
+// getter/setter の本体を実行するヘルパー
+function evalBlock(body: Statement[], env: Environment): unknown {
+  try {
+    let result: unknown = undefined;
+    for (const s of body) result = evalStatement(s, env);
+    return result;
+  } catch (e) {
+    if (e instanceof ReturnSignal) return e.value;
+    throw e;
+  }
+}
+
+function classKeyName(key: any, computed?: boolean, env?: Environment): string {
+  if (computed && env) {
+    const val = evalExpression(key, env);
+    return isJSString(val) ? jsStringToString(val) : String(val);
+  }
+  if (key.type === "Literal") return String(key.value);
+  return key.name;
+}
+
 function evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, env: Environment): unknown {
   const superClass = stmt.superClass ? evalExpression(stmt.superClass, env) as JSFunction | null : null;
 
   // constructor メソッドを探す
-  const ctorMethod = stmt.body.body.find((m) => m.kind === "constructor");
+  const ctorMethod = stmt.body.body.find((m: any) => m.type === "MethodDefinition" && m.kind === "constructor");
+
+  // インスタンスフィールド定義を収集
+  const instanceFields = stmt.body.body.filter((m: any) => m.type === "PropertyDefinition" && !m.static);
 
   // コンストラクタ関数を作成
   let ctorFn: JSFunction;
@@ -291,31 +315,84 @@ function evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, en
     };
   }
 
-  // メソッドを prototype に登録
-  for (const method of stmt.body.body) {
-    if (method.kind === "method") {
+  // インスタンスフィールドを __instanceFields に保存 (new 時に初期化)
+  if (instanceFields.length > 0) {
+    (ctorFn as any).__instanceFields = instanceFields;
+  }
+
+  // メソッド/getter/setter を prototype (or class 自体 for static) に登録
+  for (const member of stmt.body.body) {
+    if (member.type === "PropertyDefinition") continue; // フィールドは後で処理
+    const target = member.static ? ctorFn : ctorFn.prototype;
+    const name = classKeyName(member.key, member.computed, env);
+
+    if (member.kind === "method" || member.kind === "constructor") {
+      if (member.kind === "constructor") continue; // constructor は ctorFn 自体
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
-        params: method.value.params,
-        body: method.value.body,
+        params: member.value.params,
+        body: member.value.body,
         closure: env,
         prototype: {},
       };
-      ctorFn.prototype[method.key.name] = fn;
+      (target as any)[name] = fn;
+    } else if (member.kind === "get" || member.kind === "set") {
+      const fn: JSFunction = {
+        [JS_FUNCTION_BRAND]: true,
+        params: member.value.params,
+        body: member.value.body,
+        closure: env,
+        prototype: {},
+      };
+      const descriptor: PropertyDescriptor = Object.getOwnPropertyDescriptor(target, name) ?? {};
+      if (member.kind === "get") {
+        const getterFn = fn;
+        descriptor.get = function() {
+          const callEnv = new Environment(getterFn.closure, true);
+          callEnv.setThis(this);
+          hoistVarDeclarations(getterFn.body.body, callEnv);
+          return evalBlock(getterFn.body.body, callEnv);
+        };
+      }
+      if (member.kind === "set") {
+        const setterFn = fn;
+        descriptor.set = function(v: unknown) {
+          const callEnv = new Environment(setterFn.closure, true);
+          callEnv.setThis(this);
+          callEnv.define(setterFn.params[0].name, v);
+          hoistVarDeclarations(setterFn.body.body, callEnv);
+          evalBlock(setterFn.body.body, callEnv);
+        };
+      }
+      descriptor.configurable = true;
+      descriptor.enumerable = false;
+      Object.defineProperty(target, name, descriptor);
+    }
+  }
+
+  // static フィールドを初期化
+  for (const member of stmt.body.body) {
+    if (member.type === "PropertyDefinition" && member.static) {
+      const name = classKeyName(member.key, member.computed, env);
+      const value = member.value ? evalExpression(member.value, env) : undefined;
+      (ctorFn as any)[name] = value;
     }
   }
 
   // extends: プロトタイプチェーンを接続
   if (superClass) {
     ctorFn.prototype[PROTO_KEY] = superClass.prototype;
-    // super を呼べるように __super__ を closure に入れる
     const classEnv = new Environment(env);
     classEnv.define("__super__", superClass);
     ctorFn.closure = classEnv;
     // メソッドの closure も更新
-    for (const method of stmt.body.body) {
-      if (method.kind === "method") {
-        (ctorFn.prototype[method.key.name] as JSFunction).closure = classEnv;
+    for (const member of stmt.body.body) {
+      if (member.type === "MethodDefinition" && member.kind === "method") {
+        const target = member.static ? ctorFn : ctorFn.prototype;
+        const name = classKeyName(member.key, member.computed, env);
+        if ((target as any)[name] && isJSFunction((target as any)[name])) {
+          ((target as any)[name] as JSFunction).closure = classEnv;
+        }
       }
     }
   }
@@ -374,9 +451,9 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
       throw new ReturnSignal(value);
     }
     case "BreakStatement":
-      throw new BreakSignal();
+      throw new BreakSignal(stmt.label);
     case "ContinueStatement":
-      throw new ContinueSignal();
+      throw new ContinueSignal(stmt.label);
     case "ThrowStatement": {
       const value = evalExpression(stmt.argument, env);
       throw new ThrowSignal(value);
@@ -453,7 +530,7 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
             try {
               result = evalStatement(s, env);
             } catch (e) {
-              if (e instanceof BreakSignal) return result;
+              if (e instanceof BreakSignal && !e.label) return result;
               throw e;
             }
           }
@@ -462,6 +539,7 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
       return result;
     }
     case "ForInStatement": {
+      const lbl = (stmt as any).__label__ as string | undefined;
       const obj = evalExpression(stmt.right, env);
       if (obj === null || obj === undefined) return undefined;
       const keys = typeof obj === "object" ? Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")) : [];
@@ -475,38 +553,41 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
         try {
           evalStatement(stmt.body, env);
         } catch (e) {
-          if (e instanceof BreakSignal) break;
-          if (e instanceof ContinueSignal) continue;
+          if (e instanceof BreakSignal && (!e.label || e.label === lbl)) break;
+          if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) continue;
           throw e;
         }
       }
       return undefined;
     }
     case "DoWhileStatement": {
+      const lbl = (stmt as any).__label__ as string | undefined;
       outer_dowhile: do {
         try {
           evalStatement(stmt.body, env);
         } catch (e) {
-          if (e instanceof BreakSignal) break outer_dowhile;
-          if (e instanceof ContinueSignal) continue outer_dowhile;
+          if (e instanceof BreakSignal && (!e.label || e.label === lbl)) break outer_dowhile;
+          if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) continue outer_dowhile;
           throw e;
         }
       } while (isTruthy(evalExpression(stmt.test, env)));
       return undefined;
     }
     case "WhileStatement": {
+      const lbl = (stmt as any).__label__ as string | undefined;
       outer_while: while (isTruthy(evalExpression(stmt.test, env))) {
         try {
           evalStatement(stmt.body, env);
         } catch (e) {
-          if (e instanceof BreakSignal) break outer_while;
-          if (e instanceof ContinueSignal) continue outer_while;
+          if (e instanceof BreakSignal && (!e.label || e.label === lbl)) break outer_while;
+          if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) continue outer_while;
           throw e;
         }
       }
       return undefined;
     }
     case "ForStatement": {
+      const lbl = (stmt as any).__label__ as string | undefined;
       const isBlockScoped = stmt.init?.type === "VariableDeclaration" && stmt.init.kind !== "var";
       const forEnv = isBlockScoped ? new Environment(env) : env;
 
@@ -521,8 +602,8 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
         try {
           evalStatement(stmt.body, forEnv);
         } catch (e) {
-          if (e instanceof BreakSignal) break outer_for;
-          if (e instanceof ContinueSignal) { if (stmt.update) evalExpression(stmt.update, forEnv); continue outer_for; }
+          if (e instanceof BreakSignal && (!e.label || e.label === lbl)) break outer_for;
+          if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) { if (stmt.update) evalExpression(stmt.update, forEnv); continue outer_for; }
           throw e;
         }
         if (stmt.update) evalExpression(stmt.update, forEnv);
@@ -530,6 +611,7 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
       return undefined;
     }
     case "ForOfStatement": {
+      const lbl = (stmt as any).__label__ as string | undefined;
       const iterable = evalExpression(stmt.right, env) as unknown[];
       const kind = stmt.left.kind;
       const isBlockScoped = kind !== "var";
@@ -541,12 +623,23 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
         try {
           evalStatement(stmt.body, iterEnv);
         } catch (e) {
-          if (e instanceof BreakSignal) break;
-          if (e instanceof ContinueSignal) continue;
+          if (e instanceof BreakSignal && (!e.label || e.label === lbl)) break;
+          if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) continue;
           throw e;
         }
       }
       return undefined;
+    }
+    case "LabeledStatement": {
+      // ラベルをループの body に伝播
+      (stmt.body as any).__label__ = stmt.label;
+      try {
+        return evalStatement(stmt.body, env);
+      } catch (e) {
+        // ラベル付き break がループ以外の文に使われた場合
+        if (e instanceof BreakSignal && e.label === stmt.label) return undefined;
+        throw e;
+      }
     }
     case "BlockStatement": {
       // ブロックスコープ: let/const が閉じるように子環境を作る
@@ -661,8 +754,47 @@ function evalExpression(expr: Expression, env: Environment): unknown {
           const source = evalExpression(prop.argument, env) as Record<string, unknown>;
           if (source) Object.assign(obj, source);
         } else {
-          const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
-          obj[key] = evalExpression(prop.value, env);
+          const rawKey = prop.computed ? evalExpression(prop.key, env) : undefined;
+          const key = prop.computed ? (isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey)) : (prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value));
+          if (prop.kind === "get" || prop.kind === "set") {
+            const fnValue = evalExpression(prop.value, env);
+            const descriptor: PropertyDescriptor = {};
+            const existing = Object.getOwnPropertyDescriptor(obj, key);
+            if (existing) {
+              descriptor.get = existing.get;
+              descriptor.set = existing.set;
+            }
+            if (prop.kind === "get") {
+              if (isJSFunction(fnValue)) {
+                const fn = fnValue;
+                descriptor.get = function() {
+                  const callEnv = new Environment(fn.closure, true);
+                  callEnv.setThis(this);
+                  return evalBlock(fn.body.body, callEnv);
+                };
+              } else {
+                descriptor.get = fnValue as () => unknown;
+              }
+            }
+            if (prop.kind === "set") {
+              if (isJSFunction(fnValue)) {
+                const fn = fnValue;
+                descriptor.set = function(v: unknown) {
+                  const callEnv = new Environment(fn.closure, true);
+                  callEnv.setThis(this);
+                  callEnv.define(fn.params[0].name, v);
+                  evalBlock(fn.body.body, callEnv);
+                };
+              } else {
+                descriptor.set = fnValue as (v: unknown) => void;
+              }
+            }
+            descriptor.configurable = true;
+            descriptor.enumerable = true;
+            Object.defineProperty(obj, key, descriptor);
+          } else {
+            obj[key] = evalExpression(prop.value, env);
+          }
         }
       }
       return obj;
@@ -795,6 +927,15 @@ function evalNewExpression(
       bindParam(param, args[i] ?? undefined, fnEnv, fnEnv);
     }
   }
+  // インスタンスフィールドを初期化
+  if ((constructor as any).__instanceFields) {
+    for (const field of (constructor as any).__instanceFields) {
+      const name = classKeyName(field.key, field.computed, fnEnv);
+      const value = field.value ? evalExpression(field.value, fnEnv) : undefined;
+      newObj[name] = value;
+    }
+  }
+
   hoistVarDeclarations(constructor.body.body, fnEnv);
   hoistFunctionDeclarations(constructor.body.body, fnEnv);
 

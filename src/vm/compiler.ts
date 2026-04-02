@@ -21,7 +21,7 @@ class BytecodeCompiler {
   private parent: BytecodeCompiler | null;
   private isFunction: boolean;
   // ループスタック: break/continue のジャンプ先パッチ用
-  private loopStack: { breakPatches: number[]; continuePatches: number[]; continueTarget: number }[] = [];
+  private loopStack: { label?: string; breakPatches: number[]; continuePatches: number[]; continueTarget: number }[] = [];
   private icSlotCount = 0;
   private upvalues: { name: string; parentSlot: number }[] = [];
 
@@ -50,6 +50,15 @@ class BytecodeCompiler {
 
   currentOffset(): number {
     return this.bytecode.length;
+  }
+
+  // ラベルに一致するループを探す (ラベルなしは最内ループ)
+  findLoop(label: string | null) {
+    if (!label) return this.loopStack.length > 0 ? this.loopStack[this.loopStack.length - 1] : null;
+    for (let i = this.loopStack.length - 1; i >= 0; i--) {
+      if (this.loopStack[i].label === label) return this.loopStack[i];
+    }
+    return null;
   }
 
   addConstant(value: unknown): number {
@@ -419,7 +428,7 @@ class BytecodeCompiler {
         this.emit("StaLocal", discSlot);
         this.emit("Pop");
 
-        this.loopStack.push({ breakPatches: [], continuePatches: [], continueTarget: -1 });
+        this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: -1 });
 
         // Phase 1: 比較 → body へのジャンプ
         const jumpToBody: number[] = []; // 一致時のジャンプ (パッチ対象)
@@ -471,7 +480,7 @@ class BytecodeCompiler {
       case "DoWhileStatement": {
         // do { body } while (test);
         const loopStart = this.currentOffset();
-        this.loopStack.push({ breakPatches: [], continuePatches: [], continueTarget: loopStart });
+        this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
         this.compileStatement(stmt.body);
         this.compileExpression(stmt.test);
         this.emit("JumpIfTrue", loopStart);
@@ -482,7 +491,7 @@ class BytecodeCompiler {
 
       case "WhileStatement": {
         const loopStart = this.currentOffset();
-        this.loopStack.push({ breakPatches: [], continuePatches: [], continueTarget: loopStart });
+        this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
         this.compileExpression(stmt.test);
         const exitJump = this.emit("JumpIfFalse", 0);
         this.compileStatement(stmt.body);
@@ -510,7 +519,7 @@ class BytecodeCompiler {
         const loopStart = this.currentOffset();
         // continue は update を実行してからループ先頭に戻る
         // → continue のジャンプ先は update の先頭
-        this.loopStack.push({ breakPatches: [], continuePatches: [], continueTarget: -1 }); // 後でパッチ
+        this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: -1 }); // 後でパッチ
         let exitJump = -1;
         if (stmt.test) {
           this.compileExpression(stmt.test);
@@ -569,14 +578,17 @@ class BytecodeCompiler {
       }
 
       case "ClassDeclaration": {
+        // インスタンスフィールドを収集
+        const instanceFields = stmt.body.body.filter((m: any) => m.type === "PropertyDefinition" && !m.static);
+
         // constructor を BytecodeFunction にコンパイル
-        const ctorMethod = stmt.body.body.find((m: any) => m.kind === "constructor");
+        const ctorMethod = stmt.body.body.find((m: any) => m.type === "MethodDefinition" && m.kind === "constructor");
         if (ctorMethod) {
           const fnCompiler = new BytecodeCompiler(this);
           fnCompiler.compileFunctionBody(ctorMethod.value.params, ctorMethod.value.body.body);
           const ctorFunc = fnCompiler.finish(stmt.id.name);
-          // prototype を事前に付与
           (ctorFunc as any).prototype = {};
+          if (instanceFields.length > 0) (ctorFunc as any).__instanceFields = instanceFields;
           const ctorIdx = this.addConstant(ctorFunc);
           this.emit("LdaConst", ctorIdx);
         } else {
@@ -584,24 +596,82 @@ class BytecodeCompiler {
           fnCompiler.compileFunctionBody([], []);
           const ctorFunc = fnCompiler.finish(stmt.id.name);
           (ctorFunc as any).prototype = {};
+          if (instanceFields.length > 0) (ctorFunc as any).__instanceFields = instanceFields;
           const ctorIdx = this.addConstant(ctorFunc);
           this.emit("LdaConst", ctorIdx);
         }
-        // メソッドを prototype に設定
-        for (const method of stmt.body.body) {
-          if (method.kind === "method") {
-            this.emit("Dup"); // ctorFunc を残す
-            const protoNameIdx = this.addConstant("prototype");
-            this.emitWithIC("GetProperty", protoNameIdx);
-            // prototype はオブジェクトなのでスタックに載る
+        // メソッド/getter/setter を prototype (or class for static) に設定
+        for (const member of stmt.body.body) {
+          if (member.type === "PropertyDefinition") continue;
+          if (member.kind === "constructor") continue;
+          const name = member.computed ? null : (member.key.type === "Literal" ? String(member.key.value) : member.key.name);
+
+          if (member.kind === "method") {
+            if (member.static) {
+              this.emit("Dup");
+            } else {
+              this.emit("Dup");
+              this.emitWithIC("GetProperty", this.addConstant("prototype"));
+            }
+            if (member.computed) {
+              // computed: target, key, value → SetPropertyComputed
+              this.compileExpression(member.key);
+              const fnCompiler = new BytecodeCompiler(this);
+              fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
+              this.emit("LdaConst", this.addConstant(fnCompiler.finish("<computed>")));
+              this.emit("SetPropertyComputed");
+            } else {
+              const fnCompiler = new BytecodeCompiler(this);
+              fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
+              this.emit("LdaConst", this.addConstant(fnCompiler.finish(name!)));
+              this.emitWithIC("SetProperty", this.addConstant(name!));
+            }
+            this.emit("Pop");
+          } else if (member.kind === "get" || member.kind === "set") {
+            if (member.static) {
+              this.emit("Dup");
+            } else {
+              this.emit("Dup");
+              this.emitWithIC("GetProperty", this.addConstant("prototype"));
+            }
             const fnCompiler = new BytecodeCompiler(this);
-            fnCompiler.compileFunctionBody(method.value.params, method.value.body.body);
-            const methodFunc = fnCompiler.finish(method.key.name);
-            const methodIdx = this.addConstant(methodFunc);
-            this.emit("LdaConst", methodIdx);
-            const methodNameIdx = this.addConstant(method.key.name);
-            this.emitWithIC("SetProperty", methodNameIdx);
-            this.emit("Pop"); // prototype を捨てる
+            fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
+            this.emit("LdaConst", this.addConstant(fnCompiler.finish((member.kind) + " " + (name ?? "<computed>"))));
+            if (member.computed) {
+              // computed getter/setter は未対応 → 通常のメソッドとして設定
+              this.compileExpression(member.key);
+              // swap key and func on stack... 複雑なので一旦 SetPropertyComputed
+              // TODO: computed getter/setter
+              this.emit("SetPropertyComputed");
+            } else {
+              const nameIdx = this.addConstant(name!);
+              this.emit(member.kind === "get" ? "DefineGetter" : "DefineSetter", nameIdx);
+            }
+            this.emit("Pop");
+          }
+        }
+        // static フィールドを初期化
+        for (const member of stmt.body.body) {
+          if (member.type === "PropertyDefinition" && member.static) {
+            const name = member.computed ? null : (member.key.type === "Literal" ? String(member.key.value) : member.key.name);
+            this.emit("Dup");
+            if (member.computed) {
+              this.compileExpression(member.key);
+              if (member.value) {
+                this.compileExpression(member.value);
+              } else {
+                this.emit("LdaUndefined");
+              }
+              this.emit("SetPropertyComputed");
+            } else {
+              if (member.value) {
+                this.compileExpression(member.value);
+              } else {
+                this.emit("LdaUndefined");
+              }
+              this.emitWithIC("SetProperty", this.addConstant(name!));
+            }
+            this.emit("Pop");
           }
         }
         // クラス名を登録
@@ -618,22 +688,27 @@ class BytecodeCompiler {
 
       case "BreakStatement": {
         const breakJump = this.emit("Jump", 0); // 後でパッチ
-        if (this.loopStack.length > 0) {
-          this.loopStack[this.loopStack.length - 1].breakPatches.push(breakJump);
-        }
+        const target = this.findLoop(stmt.label);
+        if (target) target.breakPatches.push(breakJump);
         break;
       }
 
       case "ContinueStatement": {
-        if (this.loopStack.length > 0) {
-          const loop = this.loopStack[this.loopStack.length - 1];
+        const loop = this.findLoop(stmt.label);
+        if (loop) {
           if (loop.continueTarget >= 0) {
             this.emit("Jump", loop.continueTarget);
           } else {
-            // continueTarget がまだ確定していない場合 → 後でパッチ
             loop.continuePatches.push(this.emit("Jump", 0));
           }
         }
+        break;
+      }
+
+      case "LabeledStatement": {
+        // ラベルを子のループに伝播するため、ループ文なら label を付けてコンパイル
+        (stmt.body as any).__label__ = stmt.label;
+        this.compileStatement(stmt.body);
         break;
       }
 
@@ -833,7 +908,7 @@ class BytecodeCompiler {
           this.emit("IsNullish");
           optionalJump = this.emit("JumpIfTrue", 0);
         }
-        if (!expr.computed && expr.property.type === "Identifier") {
+        if (!expr.computed && (expr.property.type === "Identifier" || expr.property.type === "PrivateIdentifier")) {
           const nameIdx = this.addConstant(expr.property.name);
           this.emitWithIC("GetProperty", nameIdx);
         } else {
@@ -861,11 +936,24 @@ class BytecodeCompiler {
           // SetProperty: pop value, peek obj → [obj, obj]
           // Pop: → [obj]  (次のプロパティ or 最終結果として obj を残す)
           this.emit("Dup");
-          this.compileExpression(prop.value);
-          const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
-          const nameIdx = this.addConstant(key);
-          this.emitWithIC("SetProperty", nameIdx);
-          this.emit("Pop"); // Dup のコピーを除去、元の obj はスタックに残る
+          if (prop.computed) {
+            // computed: { [expr]: value } → SetPropertyComputed
+            this.compileExpression(prop.key);
+            this.compileExpression(prop.value);
+            this.emit("SetPropertyComputed");
+          } else {
+            this.compileExpression(prop.value);
+            const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+            const nameIdx = this.addConstant(key);
+            if (prop.kind === "get") {
+              this.emit("DefineGetter", nameIdx);
+            } else if (prop.kind === "set") {
+              this.emit("DefineSetter", nameIdx);
+            } else {
+              this.emitWithIC("SetProperty", nameIdx);
+            }
+          }
+          this.emit("Pop");
         }
         break;
       }

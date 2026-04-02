@@ -16,8 +16,14 @@ export class ThrowSignal {
   }
 }
 
-export class BreakSignal {}
-export class ContinueSignal {}
+export class BreakSignal {
+  label: string | null;
+  constructor(label: string | null = null) { this.label = label; }
+}
+export class ContinueSignal {
+  label: string | null;
+  constructor(label: string | null = null) { this.label = label; }
+}
 
 // 関数オブジェクトの内部表現
 export const JS_FUNCTION_BRAND = Symbol("JSFunction");

@@ -321,6 +321,30 @@ const cases: [string, string][] = [
   ["Math.floor", "Math.floor(3.7);"],
   ["Math.max", "Math.max(1,2,3);"],
   ["Math.sqrt", "Math.sqrt(9);"],
+
+  // getter / setter
+  ["object getter", "var obj = { get x() { return 42; } }; obj.x;"],
+  ["object setter + getter", "var obj = { _v: 0, set v(x) { this._v = x; }, get v() { return this._v; } }; obj.v = 10; obj.v;"],
+  ["getter のみ (set なし)", "var obj = { get x() { return 99; } }; obj.x;"],
+
+  // labeled break / continue
+  ["labeled break", "outer: for (var i = 0; i < 3; i = i + 1) { for (var j = 0; j < 3; j = j + 1) { if (j === 1) break outer; } } i * 10 + j;"],
+  ["labeled continue", "var r = 0; outer: for (var i = 0; i < 3; i = i + 1) { for (var j = 0; j < 3; j = j + 1) { if (j === 1) continue outer; r = r + 1; } } r;"],
+  ["labeled break (while)", "var x = 0; outer: while (true) { while (true) { x = x + 1; if (x === 5) break outer; } } x;"],
+
+  // class fields
+  ["class instance field", "class Foo { x = 42; } var f = new Foo(); f.x;"],
+  ["class field + method", "class C { count = 0; inc() { this.count = this.count + 1; } } var c = new C(); c.inc(); c.inc(); c.count;"],
+  ["class static field", "class Config { static version = 3; } Config.version;"],
+
+  // private fields
+  ["private field", "class S { #value = 99; get() { return this.#value; } } var s = new S(); s.get();"],
+  ["private field set", "class B { #v = 0; set(x) { this.#v = x; } get() { return this.#v; } } var b = new B(); b.set(42); b.get();"],
+
+  // computed property
+  ["obj computed key", 'var k = "x"; var o = { [k]: 42 }; o.x;'],
+  ["obj computed expr", "var o = { [1+1]: 99 }; o[2];"],
+  ["class computed method", 'var m = "foo"; class C { [m]() { return 7; } } var c = new C(); c.foo();'],
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {
