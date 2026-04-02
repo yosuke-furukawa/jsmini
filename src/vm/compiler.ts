@@ -285,6 +285,7 @@ class BytecodeCompiler {
     }
     for (let i = 0; i < program.body.length; i++) {
       const stmt = program.body[i];
+      if (stmt.type === "FunctionDeclaration") continue; // hoisting で処理済み
       const isLast = i === program.body.length - 1;
       this.compileStatement(stmt);
       // 最後の式文の値をスタックに残す (プログラムの戻り値)
