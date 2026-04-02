@@ -16,6 +16,10 @@ type CachedWasm = {
   arrayArgIndices: number[];
   stringArgIndices: number[];  // 文字列引数の位置
   spec: WasmNumericType;       // i32 or f64
+  // WasmGC 配列ヘルパー関数
+  createArray: ((len: number) => unknown) | null;
+  getArray: ((arr: unknown, idx: number) => number) | null;
+  setArray: ((arr: unknown, idx: number, val: number) => void) | null;
 };
 
 export class JitManager {
@@ -110,7 +114,7 @@ export class JitManager {
     } else {
       const wasmFn = compileToWasmSync(func, spec);
       if (wasmFn) {
-        compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec };
+        compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
       }
     }
 
@@ -139,14 +143,27 @@ export class JitManager {
     if (!wasmFn) return null;
 
     const memory = (result as any).__memory as WebAssembly.Memory | undefined;
-    const cached: CachedWasm = { fn: wasmFn, memory: memory ?? null, arrayArgIndices, stringArgIndices: [], spec };
+    const createArray = (result as any).__create_array as ((len: number) => unknown) | undefined;
+    const getArray = (result as any).__get_array as ((arr: unknown, idx: number) => number) | undefined;
+    const setArray = (result as any).__set_array as ((arr: unknown, idx: number, val: number) => void) | undefined;
+    const cached: CachedWasm = {
+      fn: wasmFn, memory: memory ?? null, arrayArgIndices, stringArgIndices: [], spec,
+      createArray: createArray ?? null,
+      getArray: getArray ?? null,
+      setArray: setArray ?? null,
+    };
 
     // 関連関数もキャッシュに登録
     for (const f of funcsToCompile) {
       if (f !== func) {
         const relFn = result.get(f.name);
         if (relFn) {
-          this.wasmCache.set(f, { fn: relFn, memory: memory ?? null, arrayArgIndices: [], stringArgIndices: [], spec });
+          this.wasmCache.set(f, {
+            fn: relFn, memory: memory ?? null, arrayArgIndices: [], stringArgIndices: [], spec,
+            createArray: createArray ?? null,
+            getArray: getArray ?? null,
+            setArray: setArray ?? null,
+          });
         }
       }
     }
@@ -188,11 +205,11 @@ export class JitManager {
     upvalueValues: unknown[] = [],
     thisObj?: unknown,
   ): { result: unknown } | null {
-    const { fn, memory, arrayArgIndices } = cached;
+    const { fn, arrayArgIndices } = cached;
 
-    if (arrayArgIndices.length > 0 && memory) {
-      // 配列引数がある: in/out コピー
-      return this.executeWithArrayArgs(func, fn, memory, args, arrayArgIndices, callCount);
+    if (arrayArgIndices.length > 0 && cached.createArray) {
+      // 配列引数がある: WasmGC 配列で in/out コピー
+      return this.executeWithArrayArgs(func, cached, args, arrayArgIndices, callCount);
     }
 
     // 引数の型チェック + 変換
@@ -263,18 +280,18 @@ export class JitManager {
 
   private executeWithArrayArgs(
     func: BytecodeFunction,
-    fn: (...args: number[]) => number,
-    memory: WebAssembly.Memory,
+    cached: CachedWasm,
     args: unknown[],
     arrayArgIndices: number[],
     callCount: number,
   ): { result: unknown } | null {
-    const view = new Int32Array(memory.buffer);
-    const wasmArgs: number[] = [];
-    const arrayRefs: { jsArr: unknown[]; base: number; length: number }[] = [];
+    const { fn, createArray, getArray, setArray } = cached;
+    if (!createArray || !getArray || !setArray) return null;
 
-    // メモリにコピー: 各配列引数を linear memory に配置
-    let memOffset = 0;
+    const wasmArgs: unknown[] = [];
+    const arrayRefs: { jsArr: unknown[]; gcArr: unknown; length: number }[] = [];
+
+    // WasmGC 配列を作成して要素をコピー
     for (let i = 0; i < args.length; i++) {
       if (arrayArgIndices.includes(i)) {
         const arr = args[i];
@@ -287,15 +304,13 @@ export class JitManager {
           this.deoptimize(func, args);
           return null;
         }
-        // メモリレイアウト: [length][elem0][elem1]...
-        const base = memOffset * 4; // byte offset
-        view[memOffset] = arr.length;
+        // WasmGC 配列を作成
+        const gcArr = createArray(arr.length);
         for (let j = 0; j < arr.length; j++) {
-          view[memOffset + 1 + j] = arr[j] as number;
+          setArray(gcArr, j, arr[j] as number);
         }
-        arrayRefs.push({ jsArr: arr, base, length: arr.length });
-        wasmArgs.push(base);
-        memOffset += 1 + arr.length; // length header + elements
+        arrayRefs.push({ jsArr: arr, gcArr, length: arr.length });
+        wasmArgs.push(gcArr);
       } else {
         if (typeof args[i] !== "number") {
           this.deoptimize(func, args);
@@ -306,13 +321,12 @@ export class JitManager {
     }
 
     this.logTier(func, "Wasm (array)", callCount);
-    const result = fn(...wasmArgs);
+    const result = fn(...(wasmArgs as number[]));
 
-    // メモリから JS 配列に書き戻し
-    for (const { jsArr, base, length } of arrayRefs) {
-      const elemStart = base / 4 + 1; // skip length header
+    // WasmGC 配列から JS 配列に書き戻し
+    for (const { jsArr, gcArr, length } of arrayRefs) {
       for (let j = 0; j < length; j++) {
-        jsArr[j] = view[elemStart + j];
+        jsArr[j] = getArray(gcArr, j);
       }
     }
 

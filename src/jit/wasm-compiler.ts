@@ -1,5 +1,5 @@
 import type { BytecodeFunction } from "../vm/bytecode.js";
-import { WasmBuilder, WASM_OP, WASM_TYPE, f64ToBytes, i32ToLEB128 } from "./wasm-builder.js";
+import { WasmBuilder, WASM_OP, WASM_TYPE, WASM_GC_OP, refType, f64ToBytes, i32ToLEB128 } from "./wasm-builder.js";
 import { detectArrayLocals } from "./array-analysis.js";
 
 type SpecializationType = "i32" | "f64";
@@ -59,7 +59,15 @@ export function compileMultiSync(
   const anyConstruct = funcs.some(f => f.bytecode.some(i => i.op === "Construct" || (i.op === "CreateArray" && i.operand === 0)));
 
   const builder = new WasmBuilder();
-  if (anyArrayLocals || anyObjectProps || anyConstruct) builder.enableMemory(1);
+  // WasmGC 配列: linear memory の代わりに GC array を使用
+  let arrayTypeIdx = -1;
+  // ヘルパー関数の funcIndex オフセット (ユーザー関数の後に追加)
+  let helperFuncOffset = funcs.length;
+  if (anyArrayLocals) {
+    arrayTypeIdx = builder.addArray(WASM_TYPE.i32, true);
+  }
+  // オブジェクト/Construct は引き続き linear memory を使用
+  if (anyObjectProps || anyConstruct) builder.enableMemory(1);
   // heap pointer global (global index 0): bump allocator の次の空きアドレス
   let heapPtrGlobal = -1;
   if (anyConstruct) {
@@ -89,20 +97,35 @@ export function compileMultiSync(
     // インライン候補: funcIndex に含まれる全関数
     const inlineCandidates = new Map<string, BytecodeFunction>();
     for (const f of funcs) inlineCandidates.set(f.name, f);
+    const useGCArray = anyArrayLocals && arrayTypeIdx >= 0;
     const ctx: TranslateContext = {
       spec: t, isI32: t === "i32", wasmType, funcIndex,
-      arrayLocals, hasMemory: anyArrayLocals || anyObjectProps,
+      arrayLocals, hasMemory: anyObjectProps || anyConstruct,
       objectPropOffsets, hasThis,
       heapPtrGlobal,
       objectSize: objectPropOffsets.size * 4,
       inlineCandidates,
       inlineLocalOffset: 0,
       stringLocals: new Set(),
+      useGCArray,
+      arrayTypeIdx,
     };
     // hasThis な関数は this を追加パラメータ、upvalue も追加パラメータとして渡す
     const upvalueCount = func.upvalues?.length ?? 0;
     const paramCount = func.paramCount + (hasThis ? 1 : 0) + upvalueCount;
-    const params = new Array(paramCount).fill(wasmType);
+    // 配列パラメータは ref type に変換
+    const params: number[] = [];
+    for (let i = 0; i < func.paramCount; i++) {
+      if (useGCArray && arrayLocals.has(i)) {
+        params.push(...refType(arrayTypeIdx));
+      } else {
+        params.push(wasmType);
+      }
+    }
+    // this パラメータ
+    if (hasThis) params.push(wasmType);
+    // upvalue パラメータ
+    for (let i = 0; i < upvalueCount; i++) params.push(wasmType);
     const results = [wasmType];
     let extraLocals = func.localCount - func.paramCount;
     const needsTempLocal = func.bytecode.some(i => i.op === "SetPropertyComputed");
@@ -128,7 +151,59 @@ export function compileMultiSync(
     if (func.bytecode.some(i => i.op === "Dup")) extraLocals = Math.max(extraLocals, 1);
     const body = translateBytecode(func, ctx);
     if (!body) return null;
-    builder.addFunction(func.name, params, results, body, extraLocals > 0 ? extraLocals : 0);
+    // extra locals の型グループを指定 (GC array 使用時は params[0] が ref 型なのでデフォルトが壊れる)
+    const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: [wasmType] }] : undefined;
+    builder.addFunction(func.name, params, results, body, extraLocals > 0 ? extraLocals : 0, paramCount, 1, extraLocalGroups);
+  }
+
+  // WasmGC 配列ヘルパー関数を追加
+  if (anyArrayLocals && arrayTypeIdx >= 0) {
+    // __create_array(len: i32) -> (ref $i32_array)
+    // array.new expects: (init_value, length) -> (ref $i32_array)
+    const createBody: number[] = [];
+    createBody.push(WASM_OP.i32_const, ...i32ToLEB128(0)); // init value = 0
+    createBody.push(WASM_OP.local_get, 0);                  // length
+    createBody.push(0xfb, WASM_GC_OP.array_new, arrayTypeIdx);
+    createBody.push(WASM_OP.end);
+    builder.addFunction("__create_array",
+      [WASM_TYPE.i32],
+      refType(arrayTypeIdx),
+      createBody,
+      0,
+      1, // paramCount
+      1, // resultCount
+    );
+
+    // __get_array(arr: ref $i32_array, idx: i32) -> i32
+    const getBody: number[] = [];
+    getBody.push(WASM_OP.local_get, 0); // arr
+    getBody.push(WASM_OP.local_get, 1); // idx
+    getBody.push(0xfb, WASM_GC_OP.array_get, arrayTypeIdx);
+    getBody.push(WASM_OP.end);
+    builder.addFunction("__get_array",
+      [...refType(arrayTypeIdx), WASM_TYPE.i32],
+      [WASM_TYPE.i32],
+      getBody,
+      0,
+      2, // paramCount
+      1, // resultCount
+    );
+
+    // __set_array(arr: ref $i32_array, idx: i32, val: i32) -> void
+    const setBody: number[] = [];
+    setBody.push(WASM_OP.local_get, 0); // arr
+    setBody.push(WASM_OP.local_get, 1); // idx
+    setBody.push(WASM_OP.local_get, 2); // val
+    setBody.push(0xfb, WASM_GC_OP.array_set, arrayTypeIdx);
+    setBody.push(WASM_OP.end);
+    builder.addFunction("__set_array",
+      [...refType(arrayTypeIdx), WASM_TYPE.i32, WASM_TYPE.i32],
+      [],
+      setBody,
+      0,
+      3, // paramCount
+      0, // resultCount
+    );
   }
 
   try {
@@ -139,8 +214,14 @@ export function compileMultiSync(
     for (const func of funcs) {
       result.set(func.name, instance.exports[func.name] as (...args: number[]) => number);
     }
-    // memory を export に含める
-    if ((anyArrayLocals || anyObjectProps || anyConstruct) && instance.exports.memory) {
+    // WasmGC 配列ヘルパー関数を export に含める
+    if (anyArrayLocals && arrayTypeIdx >= 0) {
+      (result as any).__create_array = instance.exports.__create_array;
+      (result as any).__get_array = instance.exports.__get_array;
+      (result as any).__set_array = instance.exports.__set_array;
+    }
+    // memory を export に含める (オブジェクト/Construct 用)
+    if ((anyObjectProps || anyConstruct) && instance.exports.memory) {
       (result as any).__memory = instance.exports.memory;
     }
     if (anyConstruct && instance.exports.__global_0) {
@@ -185,7 +266,7 @@ export function disassembleToWat(func: BytecodeFunction, spec?: SpecializationTy
   if (needsHeap) hasMemory = true;
   const inlineCandidates = new Map<string, BytecodeFunction>();
   if (allFuncs) for (const f of allFuncs) inlineCandidates.set(f.name, f);
-  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: needsHeap ? 0 : -1, objectSize: objectPropOffsets.size * 4, inlineCandidates, inlineLocalOffset: 0, stringLocals: new Set() };
+  const ctx: TranslateContext = { spec: t, isI32: t === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: needsHeap ? 0 : -1, objectSize: objectPropOffsets.size * 4, inlineCandidates, inlineLocalOffset: 0, stringLocals: new Set(), useGCArray: false, arrayTypeIdx: -1 };
 
   const body = translateBytecode(func, ctx);
   if (!body) return null;
@@ -334,6 +415,8 @@ type TranslateContext = {
   inlineCandidates: Map<string, BytecodeFunction>;
   inlineLocalOffset: number;
   stringLocals: Set<number>;  // 文字列引数のローカル (offset, len のペアで 2 local 消費)
+  useGCArray: boolean;        // WasmGC 配列を使用するか
+  arrayTypeIdx: number;       // GC array type index (-1 if not used)
 };
 
 // jsmini バイトコード → Wasm 命令列に変換
@@ -438,11 +521,15 @@ function translateRange(
         else return false;
         break;
 
-      // 配列アクセス (linear memory 経由)
+      // 配列アクセス (WasmGC array)
       case "GetPropertyComputed": {
+        if (ctx.useGCArray && isI32) {
+          // スタック: [arr_ref, index] → array.get $i32_array
+          out.push(0xfb, WASM_GC_OP.array_get, ctx.arrayTypeIdx);
+          break;
+        }
         if (!ctx.hasMemory) return false;
-        // メモリレイアウト: [length: i32][elem0: i32][elem1: i32]...
-        // スタック: [base_addr, index] → i32.load(base + 4 + index * 4)
+        // フォールバック: linear memory (オブジェクト等)
         if (isI32) {
           out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
           out.push(WASM_OP.i32_mul);   // idx * 4
@@ -455,38 +542,26 @@ function translateRange(
       }
 
       case "SetPropertyComputed": {
+        if (ctx.useGCArray && isI32) {
+          // WasmGC array: スタック [arr_ref, idx, value]
+          // array.set expects: [arr_ref, idx, value]
+          // value を temp に退避して array.set 後に戻す
+          const tempLocal = func.localCount;
+          out.push(0x22, tempLocal);   // local.tee tempLocal (value)
+          out.push(WASM_OP.drop);      // drop value → [arr_ref, idx]
+          // array.set は [arr_ref, idx, value] を取る → value を再度 push
+          // しかし idx が top にある → idx も退避が必要
+          // 実際のスタック: [arr_ref, idx] → temp に value がある
+          // array.set expects: (arr_ref, idx, value) つまりそのまま + value を push
+          out.push(WASM_OP.local_get, tempLocal);
+          out.push(0xfb, WASM_GC_OP.array_set, ctx.arrayTypeIdx);
+          // SetPropertyComputed は value をスタックに残す
+          out.push(WASM_OP.local_get, tempLocal);
+          break;
+        }
         if (!ctx.hasMemory) return false;
-        // スタック: [base_addr, index, value]
-        // → i32.store(base + index * 4, value)
-        // Wasm の i32.store は [addr, value] を取る
-        // スタック上: base, idx, val → addr を計算してから store
-        // 一旦 value を temp local に退避する必要がある
-        // → 呼び出し側で temp local を確保済みと仮定
-        // 簡易実装: StaLocal で value を退避してから store
-        // ただし temp local が必要...
-        // 別アプローチ: コンパイラが SetPropertyComputed を見たとき
-        // 直前のスタック構造を追跡して変換する
-        //
-        // swap のバイトコード:
-        //   LdaLocal 0 (arr)    → base
-        //   LdaLocal 2 (j)      → idx
-        //   LdaLocal 3 (tmp)    → value
-        //   SetPropertyComputed
-        //
-        // 必要な Wasm: base + idx * 4 のアドレスを計算、value を store
-        // スタック: [base, idx, value]
-        // → [base, idx*4] → [base+idx*4] → [base+idx*4, value] → store
-        // しかし value は idx の上にある → 入れ替えが必要
-        //
-        // 回避策: value を取り出して、addr を計算して、store
-        // Wasm にはスタック操作がないので local.tee を使う
-        //
-        // extraLocal を 1 つ確保して一時退避に使う:
         if (isI32) {
-          // メモリレイアウト: [length: i32][elem0: i32][elem1: i32]...
-          // スタック: [base, idx, value]
-          // value を一時退避 (extraLocal の最後のスロット)
-          const tempLocal = func.localCount; // 追加の temp local
+          const tempLocal = func.localCount;
           out.push(0x22, tempLocal);   // local.tee tempLocal (value を保存 + スタックに残す)
           out.push(WASM_OP.drop);      // value を消す → [base, idx]
           out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
@@ -513,8 +588,13 @@ function translateRange(
           out.push(WASM_OP.i32_const, 0x00); // dummy method ref (CallMethod で drop される)
           break;
         }
+        if (name === "length" && ctx.useGCArray) {
+          // WasmGC 配列の length
+          out.push(0xfb, WASM_GC_OP.array_len);
+          break;
+        }
         if (name === "length" && ctx.hasMemory) {
-          // 配列の length
+          // linear memory 配列の length
           out.push(WASM_OP.i32_load, 0x02, 0x00);
           break;
         }

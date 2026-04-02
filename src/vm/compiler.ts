@@ -123,6 +123,12 @@ class BytecodeCompiler {
       return;
     }
     if (this.isFunction) {
+      // トップレベル変数は global を優先（JIT が LdaGlobal で関連関数を検出するため）
+      if (this.parent && !this.parent.isFunction && this.parent.resolveLocal(name) !== null) {
+        const nameIdx = this.addConstant(name);
+        this.emit("LdaGlobal", nameIdx);
+        return;
+      }
       const upIdx = this.resolveUpvalue(name);
       if (upIdx >= 0) {
         this.emit("LdaUpvalue", upIdx);

@@ -17,6 +17,7 @@ export const WASM_TYPE = {
   f64: 0x7c,
   func: 0x60,
   struct: 0x5f,
+  array: 0x5e,
   ref: 0x64,       // ref (non-null) + heap type
   ref_null: 0x63,  // ref null + heap type
 } as const;
@@ -79,6 +80,14 @@ export const WASM_GC_OP = {
   struct_get_s: 0x03,
   struct_get_u: 0x04,
   struct_set: 0x05,
+  array_new: 0x06,
+  array_new_default: 0x07,
+  array_new_fixed: 0x08,
+  array_get: 0x0b,
+  array_get_s: 0x0c,
+  array_get_u: 0x0d,
+  array_set: 0x0e,
+  array_len: 0x0f,
 } as const;
 
 // ref 型のバイト列を生成 (params/results で使用)
@@ -95,6 +104,16 @@ type StructDef = {
   fields: StructField[];
 };
 
+type ArrayDef = {
+  elementType: number;  // value type (e.g. WASM_TYPE.i32)
+  mutable: boolean;
+};
+
+type LocalGroup = {
+  count: number;
+  type: number[];  // type bytes (single byte for i32/f64, multi-byte for ref types)
+};
+
 type FuncDef = {
   name: string;
   paramCount: number;   // パラメータ数
@@ -103,22 +122,31 @@ type FuncDef = {
   results: number[];    // 結果型のエンコード済みバイト列
   body: number[];       // Wasm 命令列 (end 含む)
   extraLocals: number;  // params 以外のローカル変数の数
+  extraLocalGroups?: LocalGroup[];  // 複数型の extra locals (指定時は extraLocals を無視)
 };
 
 export class WasmBuilder {
   private functions: FuncDef[] = [];
   private structs: StructDef[] = [];
+  private arrays: ArrayDef[] = [];
   private memoryPages = 0;
   private globals: { type: number; mutable: boolean; initValue: number }[] = [];
 
-  // struct 型を追加。返り値は type index (struct は関数型より先に定義される)
+  // struct 型を追加。返り値は type index (struct → array → func の順)
   addStruct(fields: StructField[]): number {
     const idx = this.structs.length;
     this.structs.push({ fields });
     return idx;
   }
 
-  addFunction(name: string, params: number[], results: number[], body: number[], extraLocals = 0, paramCount?: number, resultCount?: number): void {
+  // array 型を追加。返り値は type index
+  addArray(elementType: number, mutable = true): number {
+    const idx = this.structs.length + this.arrays.length;
+    this.arrays.push({ elementType, mutable });
+    return idx;
+  }
+
+  addFunction(name: string, params: number[], results: number[], body: number[], extraLocals = 0, paramCount?: number, resultCount?: number, extraLocalGroups?: LocalGroup[]): void {
     this.functions.push({
       name,
       paramCount: paramCount ?? params.length,
@@ -127,6 +155,7 @@ export class WasmBuilder {
       results,
       body,
       extraLocals,
+      extraLocalGroups,
     });
   }
 
@@ -206,13 +235,16 @@ export class WasmBuilder {
     return buf;
   }
 
-  // struct の type index オフセット (struct が先、func が後)
+  // composite type のオフセット (struct → array → func の順)
   get structCount(): number { return this.structs.length; }
+  get arrayCount(): number { return this.arrays.length; }
+  // func の type index は structs + arrays の後
+  get funcTypeOffset(): number { return this.structs.length + this.arrays.length; }
 
   private buildTypeSection(): number[] {
     const buf: number[] = [];
-    // struct 型 + func 型の合計
-    writeLEB128(buf, this.structs.length + this.functions.length);
+    // struct + array + func の合計
+    writeLEB128(buf, this.structs.length + this.arrays.length + this.functions.length);
     // struct 型 (type index 0, 1, ...)
     for (const s of this.structs) {
       buf.push(WASM_TYPE.struct);
@@ -222,11 +254,15 @@ export class WasmBuilder {
         buf.push(f.mutable ? 0x01 : 0x00);
       }
     }
-    // func 型 (type index structs.length, structs.length+1, ...)
+    // array 型 (type index structs.length, ...)
+    for (const a of this.arrays) {
+      buf.push(WASM_TYPE.array);
+      buf.push(a.elementType);
+      buf.push(a.mutable ? 0x01 : 0x00);
+    }
+    // func 型 (type index structs.length + arrays.length, ...)
     for (const fn of this.functions) {
       buf.push(WASM_TYPE.func);
-      // params/results はエンコード済みバイト列
-      // paramCount/resultCount は別に持つ
       writeLEB128(buf, fn.paramCount);
       buf.push(...fn.params);
       writeLEB128(buf, fn.resultCount);
@@ -239,7 +275,7 @@ export class WasmBuilder {
     const buf: number[] = [];
     writeLEB128(buf, this.functions.length);
     for (let i = 0; i < this.functions.length; i++) {
-      writeLEB128(buf, this.structs.length + i); // type index (struct 分オフセット)
+      writeLEB128(buf, this.funcTypeOffset + i); // type index
     }
     return buf;
   }
@@ -281,7 +317,14 @@ export class WasmBuilder {
     for (const fn of this.functions) {
       // 関数本体
       const bodyBuf: number[] = [];
-      if (fn.extraLocals > 0) {
+      if (fn.extraLocalGroups && fn.extraLocalGroups.length > 0) {
+        // 複数グループの extra locals
+        writeLEB128(bodyBuf, fn.extraLocalGroups.length);
+        for (const group of fn.extraLocalGroups) {
+          writeLEB128(bodyBuf, group.count);
+          bodyBuf.push(...group.type);
+        }
+      } else if (fn.extraLocals > 0) {
         // ローカル変数宣言: 1 グループ (count, type)
         bodyBuf.push(0x01); // 1 group
         writeLEB128(bodyBuf, fn.extraLocals);

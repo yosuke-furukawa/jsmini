@@ -55,6 +55,109 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
 
   // Array.prototype: コールバック系メソッド
   vm.arrayPrototype = {
+    push: function(this: unknown[], ...items: unknown[]) {
+      for (const item of items) this[this.length] = item;
+      return this.length;
+    },
+    pop: function(this: unknown[]) {
+      if (this.length === 0) return undefined;
+      const val = this[this.length - 1];
+      this.length = this.length - 1;
+      return val;
+    },
+    shift: function(this: unknown[]) {
+      if (this.length === 0) return undefined;
+      const val = this[0];
+      for (let i = 1; i < this.length; i++) this[i - 1] = this[i];
+      this.length = this.length - 1;
+      return val;
+    },
+    unshift: function(this: unknown[], ...items: unknown[]) {
+      for (let i = this.length - 1; i >= 0; i--) this[i + items.length] = this[i];
+      for (let i = 0; i < items.length; i++) this[i] = items[i];
+      return this.length;
+    },
+    slice: function(this: unknown[], start?: number, end?: number) {
+      const len = this.length;
+      let s = start ?? 0;
+      let e = end ?? len;
+      if (s < 0) s = Math.max(len + s, 0);
+      if (e < 0) e = Math.max(len + e, 0);
+      if (s > len) s = len;
+      if (e > len) e = len;
+      const result: unknown[] = [];
+      for (let i = s; i < e; i++) result[result.length] = this[i];
+      return result;
+    },
+    splice: function(this: unknown[], start: number, deleteCount?: number, ...items: unknown[]) {
+      const len = this.length;
+      let s = start < 0 ? Math.max(len + start, 0) : Math.min(start, len);
+      const dc = deleteCount === undefined ? len - s : Math.min(Math.max(deleteCount, 0), len - s);
+      const removed: unknown[] = [];
+      for (let i = 0; i < dc; i++) removed[i] = this[s + i];
+      const diff = items.length - dc;
+      if (diff > 0) {
+        for (let i = len - 1; i >= s + dc; i--) this[i + diff] = this[i];
+      } else if (diff < 0) {
+        for (let i = s + dc; i < len; i++) this[i + diff] = this[i];
+        this.length = len + diff;
+      }
+      for (let i = 0; i < items.length; i++) this[s + i] = items[i];
+      return removed;
+    },
+    indexOf: function(this: unknown[], item: unknown, from?: number) {
+      const start = from ?? 0;
+      for (let i = start; i < this.length; i++) {
+        if (this[i] === item) return i;
+      }
+      return -1;
+    },
+    includes: function(this: unknown[], item: unknown, from?: number) {
+      const start = from ?? 0;
+      for (let i = start; i < this.length; i++) {
+        if (this[i] === item) return true;
+      }
+      return false;
+    },
+    join: function(this: unknown[], sep?: unknown) {
+      const s = sep !== undefined ? (isJSString(sep) ? jsStringToString(sep) : String(sep)) : ",";
+      const parts: string[] = [];
+      for (let i = 0; i < this.length; i++) {
+        const v = this[i];
+        parts.push(v === null || v === undefined ? "" : (isJSString(v) ? jsStringToString(v) : String(v)));
+      }
+      return internString(parts.join(s));
+    },
+    concat: function(this: unknown[], ...args: unknown[]) {
+      const result = this.slice();
+      for (const a of args) {
+        if (Array.isArray(a)) { for (const item of a) (result as unknown[]).push(item); }
+        else (result as unknown[]).push(a);
+      }
+      return result;
+    },
+    reverse: function(this: unknown[]) {
+      for (let i = 0, j = this.length - 1; i < j; i++, j--) {
+        const tmp = this[i]; this[i] = this[j]; this[j] = tmp;
+      }
+      return this;
+    },
+    sort: function(this: unknown[], fn?: unknown) {
+      const cmp = fn ? (a: unknown, b: unknown) => vm.callFunction(fn, undefined, [a, b]) as number
+                      : (a: unknown, b: unknown) => {
+                          const sa = isJSString(a) ? jsStringToString(a) : String(a);
+                          const sb = isJSString(b) ? jsStringToString(b) : String(b);
+                          return sa < sb ? -1 : sa > sb ? 1 : 0;
+                        };
+      // simple insertion sort
+      for (let i = 1; i < this.length; i++) {
+        const key = this[i];
+        let j = i - 1;
+        while (j >= 0 && cmp(this[j], key) > 0) { this[j + 1] = this[j]; j--; }
+        this[j + 1] = key;
+      }
+      return this;
+    },
     map: function(this: unknown[], fn: unknown) {
       const result: unknown[] = [];
       for (let i = 0; i < this.length; i++) {
@@ -89,6 +192,12 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
       }
       return undefined;
     },
+    findIndex: function(this: unknown[], fn: unknown) {
+      for (let i = 0; i < this.length; i++) {
+        if (vm.callFunction(fn, undefined, [this[i], i, this])) return i;
+      }
+      return -1;
+    },
     some: function(this: unknown[], fn: unknown) {
       for (let i = 0; i < this.length; i++) {
         if (vm.callFunction(fn, undefined, [this[i], i, this])) return true;
@@ -100,6 +209,27 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
         if (!vm.callFunction(fn, undefined, [this[i], i, this])) return false;
       }
       return true;
+    },
+    flat: function(this: unknown[], depth?: number) {
+      const d = depth ?? 1;
+      const result: unknown[] = [];
+      const flatten = (arr: unknown[], level: number) => {
+        for (const item of arr) {
+          if (Array.isArray(item) && level > 0) flatten(item, level - 1);
+          else result.push(item);
+        }
+      };
+      flatten(this, d);
+      return result;
+    },
+    fill: function(this: unknown[], value: unknown, start?: number, end?: number) {
+      const s = start ?? 0;
+      const e = end ?? this.length;
+      for (let i = s; i < e; i++) this[i] = value;
+      return this;
+    },
+    toString: function(this: unknown[]) {
+      return (this as any).join();
     },
   };
 
@@ -139,11 +269,62 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   vm.setGlobal("TypeError", TypeError);
   vm.setGlobal("SyntaxError", SyntaxError);
   vm.setGlobal("RangeError", RangeError);
-  vm.setGlobal("Boolean", Boolean);
-  vm.setGlobal("Number", Number);
-  vm.setGlobal("String", String);
-  vm.setGlobal("Array", Array);
-  vm.setGlobal("Function", Function);
+
+  // 自前ビルトインコンストラクタ
+  const ArrayCtor: any = function(...args: unknown[]) {
+    if (args.length === 1 && typeof args[0] === "number") {
+      return new Array(args[0]);
+    }
+    return [...args];
+  };
+  ArrayCtor.isArray = (v: unknown) => Array.isArray(v);
+  ArrayCtor.from = (iterable: unknown) => {
+    if (Array.isArray(iterable)) return [...iterable];
+    if (typeof iterable === "object" && iterable !== null && "length" in (iterable as any)) {
+      const len = (iterable as any).length;
+      const result: unknown[] = [];
+      for (let i = 0; i < len; i++) result[i] = (iterable as any)[i];
+      return result;
+    }
+    return [];
+  };
+  ArrayCtor.of = (...items: unknown[]) => [...items];
+  vm.setGlobal("Array", ArrayCtor);
+
+  // Boolean/Number/String: new で呼ばれたらラッパーオブジェクト、関数呼びならプリミティブ変換
+  function BooleanCtor(this: any, v: unknown) {
+    if (new.target) { this.valueOf = () => !!v; return; }
+    return !!v;
+  }
+  (BooleanCtor as any).prototype = {};
+  vm.setGlobal("Boolean", BooleanCtor);
+
+  function NumberCtor(this: any, v: unknown) {
+    const n = isJSString(v) ? Number(jsStringToString(v)) : Number(v);
+    if (new.target) { this.valueOf = () => n; return; }
+    return n;
+  }
+  (NumberCtor as any).isNaN = Number.isNaN;
+  (NumberCtor as any).isFinite = Number.isFinite;
+  (NumberCtor as any).isInteger = Number.isInteger;
+  (NumberCtor as any).parseInt = parseInt;
+  (NumberCtor as any).parseFloat = parseFloat;
+  (NumberCtor as any).MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
+  (NumberCtor as any).MIN_SAFE_INTEGER = Number.MIN_SAFE_INTEGER;
+  (NumberCtor as any).prototype = {};
+  vm.setGlobal("Number", NumberCtor);
+
+  function StringCtor(this: any, v: unknown) {
+    const s = isJSString(v) ? v : internString(String(v));
+    if (new.target) { this.valueOf = () => s; this.toString = () => s; return; }
+    return s;
+  }
+  (StringCtor as any).fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
+  (StringCtor as any).prototype = {};
+  vm.setGlobal("String", StringCtor);
+
+  // Function は new Function() が実用的でないので最低限
+  vm.setGlobal("Function", function() {});
 
   // グローバル関数
   vm.setGlobal("isNaN", (v: unknown) => Number.isNaN(Number(v)));
