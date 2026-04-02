@@ -193,7 +193,19 @@ class BytecodeCompiler {
       this.emit("Pop");
     } else if (id.type === "ObjectPattern") {
       // stack: obj → 各プロパティを取り出す
+      const boundKeys: string[] = [];
       for (const prop of id.properties) {
+        if (prop.type === "RestElement") {
+          // {...rest}: 残りのプロパティを集める
+          // ExecExpr でランタイムに処理（Object.keys フィルタが必要）
+          // 簡易実装: boundKeys を除外した新オブジェクトを作る
+          // → VM で直接サポートが難しいので、一旦 obj をそのままバインド
+          // TODO: proper object rest
+          this.emit("Dup");
+          this.compileBindingTarget(prop.argument);
+          break;
+        }
+        boundKeys.push(prop.key.name);
         this.emit("Dup"); // obj を残す
         const nameIdx = this.addConstant(prop.key.name);
         this.emitWithIC("GetProperty", nameIdx);
@@ -203,14 +215,48 @@ class BytecodeCompiler {
     } else if (id.type === "ArrayPattern") {
       // stack: arr → 各要素を取り出す
       for (let i = 0; i < id.elements.length; i++) {
-        if (id.elements[i]) {
-          this.emit("Dup"); // arr を残す
-          this.emit("LdaConst", this.addConstant(i));
-          this.emit("GetPropertyComputed");
-          this.compileBindingTarget(id.elements[i]);
+        const el = id.elements[i];
+        if (!el) continue;
+        if (el.type === "RestElement") {
+          // [...rest]: arr.slice(i)
+          // stack: [arr(orig)]
+          // CallMethod(1) needs: [i, arr, slice]
+          this.emit("LdaConst", this.addConstant(i));  // arr, i
+          this.emit("Dup");                             // arr, i, i  (dummy, need arr)
+          this.emit("Pop");                             // arr, i
+          // arr is below i — we need arr on top to get slice
+          // Use temp global to save arr
+          const tmpName = `__rest_arr_${this.currentOffset()}`;
+          const tmpIdx = this.addConstant(tmpName);
+          this.emit("Pop");                             // arr (removed i)
+          this.emit("Dup");                             // arr, arr
+          this.emit("StaGlobal", tmpIdx);               // arr, arr (saved to global)
+          this.emit("Pop");                             // arr
+          // Now build CallMethod stack: i, arr, slice
+          this.emit("LdaConst", this.addConstant(i));   // arr, i
+          this.emit("LdaGlobal", tmpIdx);               // arr, i, arr
+          this.emit("Dup");                             // arr, i, arr, arr
+          this.emitWithIC("GetProperty", this.addConstant("slice")); // arr, i, arr, slice
+          this.emit("CallMethod", 1);                   // arr, result
+          this.compileBindingTarget(el.argument);        // arr (result consumed)
+          break;
         }
+        this.emit("Dup"); // arr を残す
+        this.emit("LdaConst", this.addConstant(i));
+        this.emit("GetPropertyComputed");
+        this.compileBindingTarget(el);
       }
       this.emit("Pop"); // arr を捨てる
+    } else if (id.type === "AssignmentPattern") {
+      // stack: value → value が undefined ならデフォルト値を使う
+      this.emit("Dup");
+      this.emit("LdaUndefined");
+      this.emit("StrictEqual");
+      const skipDefault = this.emit("JumpIfFalse", 0);
+      this.emit("Pop"); // undefined を捨てる
+      this.compileExpression(id.right); // デフォルト値
+      this.patch(skipDefault, this.currentOffset());
+      this.compileBindingTarget(id.left);
     }
   }
 

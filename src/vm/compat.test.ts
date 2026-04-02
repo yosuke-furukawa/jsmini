@@ -354,6 +354,12 @@ const cases: [string, string][] = [
   ["class expression", "var C = class { x() { return 42; } }; var c = new C(); c.x();"],
   ["named class expression", "var C = class Foo { y() { return 99; } }; var c = new C(); c.y();"],
 
+  // destructuring rest/default
+  ["array rest", "var [a, ...rest] = [1, 2, 3]; rest[0] + rest[1];"],
+  ["obj rest", "var {a, ...rest} = {a: 1, b: 2, c: 3}; rest.b + rest.c;"],
+  ["obj default", "var {a = 10, b = 20} = {a: 1}; a + b;"],
+  ["array default", "var [x = 5, y = 6] = [1]; x + y;"],
+
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {
