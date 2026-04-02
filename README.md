@@ -132,7 +132,7 @@ V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run 
 
 - **VM が TW に勝つ** のは再帰が深いパターン (fibonacci 1.54x, ackermann 1.56x)。関数呼び出しコストの構造的な差
 - **TW が遅くなった理由**: Generator 対応のため evaluator 全体を `function*` に変換（engine262 スタイル）。全式評価に generator overhead がかかる
-- **Wasm JIT** は V8-JIT 無効下では Wasm instantiate のオーバーヘッドが大きく、V8-JIT 有効時ほどの差が出ない
+- **Wasm JIT が VM に負ける**のは再帰ケース (fibonacci)。再帰呼び出しが Wasm ↔ ホストを行き来するオーバーヘッド + `WebAssembly.instantiate()` のコスト。ループが Wasm 内で完結するケースでは効果が出る
 - 詳細は [BENCHMARK.md](./BENCHMARK.md)、学んだことは [LEARN-VM.md](./LEARN-VM.md)、[LEARN-JIT.md](./LEARN-JIT.md) を参照
 
 ## Test262 準拠率
