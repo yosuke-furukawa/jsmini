@@ -1121,10 +1121,10 @@ export class VM {
             const locals = new Array(fn.localCount).fill(undefined);
             if (fn.hasRestParam) {
               const restIdx = fn.paramCount - 1;
-              for (let i = 0; i < restIdx; i++) locals[i] = args[i] ?? undefined;
+              for (let i = 0; i < restIdx; i++) locals[i] = i < args.length ? args[i] : undefined;
               locals[restIdx] = args.slice(restIdx);
             } else {
-              for (let i = 0; i < fn.paramCount; i++) locals[i] = args[i] ?? undefined;
+              for (let i = 0; i < fn.paramCount; i++) locals[i] = i < args.length ? args[i] : undefined;
             }
             if (fn.isGenerator) {
               // Generator: フレームを push せず、GeneratorObject を返す
@@ -1171,7 +1171,7 @@ export class VM {
             }
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
-              locals[i] = args[i] ?? undefined;
+              locals[i] = i < args.length ? args[i] : undefined;
             }
             this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
           } else if (typeof method === "object" && method !== null && "bytecode" in method) {
@@ -1184,7 +1184,7 @@ export class VM {
             }
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
-              locals[i] = args[i] ?? undefined;
+              locals[i] = i < args.length ? args[i] : undefined;
             }
             this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: [] });
           } else {
@@ -1252,7 +1252,7 @@ export class VM {
             // BytecodeFunction
             const locals = new Array(ctor.localCount).fill(undefined);
             for (let i = 0; i < ctor.paramCount; i++) {
-              locals[i] = args[i] ?? undefined;
+              locals[i] = i < args.length ? args[i] : undefined;
             }
             this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor), upvalueBoxes: [] });
             (frame as any).__pendingNewObj = newObj;
@@ -1262,7 +1262,7 @@ export class VM {
             const fn = closure.func;
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
-              locals[i] = args[i] ?? undefined;
+              locals[i] = i < args.length ? args[i] : undefined;
             }
             this.frames.push({ func: fn, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
             (frame as any).__pendingNewObj = newObj;
