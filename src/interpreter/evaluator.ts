@@ -992,7 +992,7 @@ function* evalNewExpression(
     if (param.type === "RestElement") {
       fnEnv.define(param.argument.name, args.slice(i));
     } else {
-      yield* bindParam(param, args[i] ?? undefined, fnEnv, fnEnv);
+      yield* bindParam(param, i < args.length ? args[i] : undefined, fnEnv, fnEnv);
     }
   }
   // インスタンスフィールドを初期化
@@ -1050,7 +1050,7 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment)
       if (param.type === "RestElement") {
         fnEnv.define(param.argument.name, args.slice(i));
       } else {
-        yield* bindParam(param, args[i] ?? undefined, fnEnv, fnEnv);
+        yield* bindParam(param, i < args.length ? args[i] : undefined, fnEnv, fnEnv);
       }
     }
     hoistVarDeclarations(jsFn.body.body, fnEnv);
@@ -1074,7 +1074,7 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment)
     if (param.type === "RestElement") {
       fnEnv.define(param.argument.name, args.slice(i));
     } else {
-      yield* bindParam(param, args[i] ?? undefined, fnEnv, fnEnv);
+      yield* bindParam(param, i < args.length ? args[i] : undefined, fnEnv, fnEnv);
     }
   }
   hoistVarDeclarations(jsFn.body.body, fnEnv);
@@ -1129,7 +1129,7 @@ function* evalCallExpression(
       if (param.type === "RestElement") {
         superEnv.define(param.argument.name, args.slice(i));
       } else {
-        yield* bindParam(param, args[i] ?? undefined, superEnv, superEnv);
+        yield* bindParam(param, i < args.length ? args[i] : undefined, superEnv, superEnv);
       }
     }
     hoistVarDeclarations(superFn.body.body, superEnv);
@@ -1178,7 +1178,7 @@ function* evalCallExpression(
       if (param.type === "RestElement") {
         fnEnv.define(param.argument.name, args.slice(i));
       } else {
-        yield* bindParam(param, args[i] ?? undefined, fnEnv, fnEnv);
+        yield* bindParam(param, i < args.length ? args[i] : undefined, fnEnv, fnEnv);
       }
     }
     hoistVarDeclarations(jsFn.body.body, fnEnv);
@@ -1214,7 +1214,7 @@ function* evalCallExpression(
     if (param.type === "RestElement") {
       fnEnv.define(param.argument.name, args.slice(i));
     } else {
-      yield* bindParam(param, args[i] ?? undefined, fnEnv, fnEnv);
+      yield* bindParam(param, i < args.length ? args[i] : undefined, fnEnv, fnEnv);
     }
   }
 
