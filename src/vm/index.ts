@@ -291,30 +291,36 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   ArrayCtor.of = (...items: unknown[]) => [...items];
   vm.setGlobal("Array", ArrayCtor);
 
-  const BooleanCtor: any = (v: unknown) => !!v;
-  BooleanCtor.prototype = {};
+  // Boolean/Number/String: new で呼ばれたらラッパーオブジェクト、関数呼びならプリミティブ変換
+  function BooleanCtor(this: any, v: unknown) {
+    if (new.target) { this.valueOf = () => !!v; return; }
+    return !!v;
+  }
+  (BooleanCtor as any).prototype = {};
   vm.setGlobal("Boolean", BooleanCtor);
 
-  const NumberCtor: any = (v: unknown) => {
-    if (isJSString(v)) return Number(jsStringToString(v));
-    return Number(v);
-  };
-  NumberCtor.isNaN = Number.isNaN;
-  NumberCtor.isFinite = Number.isFinite;
-  NumberCtor.isInteger = Number.isInteger;
-  NumberCtor.parseInt = parseInt;
-  NumberCtor.parseFloat = parseFloat;
-  NumberCtor.MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
-  NumberCtor.MIN_SAFE_INTEGER = Number.MIN_SAFE_INTEGER;
-  NumberCtor.prototype = {};
+  function NumberCtor(this: any, v: unknown) {
+    const n = isJSString(v) ? Number(jsStringToString(v)) : Number(v);
+    if (new.target) { this.valueOf = () => n; return; }
+    return n;
+  }
+  (NumberCtor as any).isNaN = Number.isNaN;
+  (NumberCtor as any).isFinite = Number.isFinite;
+  (NumberCtor as any).isInteger = Number.isInteger;
+  (NumberCtor as any).parseInt = parseInt;
+  (NumberCtor as any).parseFloat = parseFloat;
+  (NumberCtor as any).MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
+  (NumberCtor as any).MIN_SAFE_INTEGER = Number.MIN_SAFE_INTEGER;
+  (NumberCtor as any).prototype = {};
   vm.setGlobal("Number", NumberCtor);
 
-  const StringCtor: any = (v: unknown) => {
-    if (isJSString(v)) return v;
-    return internString(String(v));
-  };
-  StringCtor.fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
-  StringCtor.prototype = {};
+  function StringCtor(this: any, v: unknown) {
+    const s = isJSString(v) ? v : internString(String(v));
+    if (new.target) { this.valueOf = () => s; this.toString = () => s; return; }
+    return s;
+  }
+  (StringCtor as any).fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
+  (StringCtor as any).prototype = {};
   vm.setGlobal("String", StringCtor);
 
   // Function は new Function() が実用的でないので最低限
