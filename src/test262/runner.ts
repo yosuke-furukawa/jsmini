@@ -219,6 +219,8 @@ const TEST_DIRS = [
   "test/language/expressions/arrow-function",
   "test/language/expressions/this",
   "test/language/expressions/template-literal",
+  "test/language/expressions/optional-chaining",
+  "test/language/expressions/coalesce",
   // statements
   "test/language/statements/variable",
   "test/language/statements/if",
