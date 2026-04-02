@@ -122,16 +122,15 @@ V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run 
 
 | Benchmark | Tree-Walking | Bytecode VM | Wasm JIT |
 |-----------|-------------|-------------|----------|
-| fibonacci(25) | 1629ms | 1068ms (1.53x) | **0.42ms (3889x)** |
-| for loop sum (10K) | 53ms | 57ms (0.92x) | — |
+| fibonacci(25) | 1630ms | 1063ms (1.53x) | **0.42ms (3912x)** |
+| for loop sum (10K) | 54ms | 51ms (1.05x) | **0.71ms (76x)** |
+| nested loop (100x100) | 54ms | 50ms (1.08x) | **0.71ms (76x)** |
+| ackermann(3,4) | 88ms | 57ms (1.55x) | **0.26ms (342x)** |
+| hot add (10K calls) | 101ms | 86ms (1.17x) | **79ms (1.28x)** |
 | quicksort (200 x10) | 486ms | 448ms (1.08x) | 499ms (0.97x) |
-| ackermann(3,4) | 89ms | 57ms (1.56x) | — |
-| hot add (10K calls) | 101ms | 86ms (1.17x) | 79ms (1.28x) |
-| Vec class (1K iter) | 25ms | 34ms (0.75x) | — |
-| closure counter (10K) | 86ms | 79ms (1.10x) | — |
 
-- **VM が TW に勝つ** のは再帰が深いパターン (fibonacci 1.53x, ackermann 1.56x)。関数呼び出しコストの構造的な差
-- **Wasm JIT が 3889x** (fibonacci) は再帰が Wasm 内で完結し dispatch を完全排除するため
+- **Wasm JIT** が圧倒的に速い: fibonacci 3912x、ackermann 342x、for loop 76x
+- **VM が TW に勝つ** のは再帰が深いパターン (fibonacci 1.53x, ackermann 1.55x)
 - **TW の generator overhead**: evaluator 全体を `function*` に変換（engine262 スタイル）したため、全式評価に generator overhead がかかる
 - 詳細は [BENCHMARK.md](./BENCHMARK.md)、学んだことは [LEARN-VM.md](./LEARN-VM.md)、[LEARN-JIT.md](./LEARN-JIT.md) を参照
 

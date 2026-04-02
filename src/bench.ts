@@ -16,13 +16,16 @@ const benchmarks = [
   {
     name: "for loop sum (10000)",
     source: `
-      var sum = 0;
-      for (var i = 0; i < 10000; i = i + 1) {
-        sum = sum + i;
+      function loopSum(n) {
+        var sum = 0;
+        for (var i = 0; i < n; i = i + 1) {
+          sum = sum + i;
+        }
+        return sum;
       }
-      sum;
+      loopSum(10000);
     `,
-    jitEligible: false,
+    jitEligible: true,
   },
   {
     name: "hot function add (10000 calls)",
@@ -51,15 +54,18 @@ const benchmarks = [
   {
     name: "nested loop (100x100)",
     source: `
-      var sum = 0;
-      for (var i = 0; i < 100; i = i + 1) {
-        for (var j = 0; j < 100; j = j + 1) {
-          sum = sum + 1;
+      function nestedLoop() {
+        var sum = 0;
+        for (var i = 0; i < 100; i = i + 1) {
+          for (var j = 0; j < 100; j = j + 1) {
+            sum = sum + 1;
+          }
         }
+        return sum;
       }
-      sum;
+      nestedLoop();
     `,
-    jitEligible: false,
+    jitEligible: true,
   },
   {
     name: "map/reduce (500 elements)",
@@ -120,7 +126,7 @@ const benchmarks = [
       }
       ack(3, 4);
     `,
-    jitEligible: false,
+    jitEligible: true,
   },
   {
     name: "mutual recursion — isEven/isOdd 10000 calls",
