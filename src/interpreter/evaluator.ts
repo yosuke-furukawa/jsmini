@@ -169,6 +169,7 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
 
   // 組み込みコンストラクタ
   env.defineReadOnly("Error", { __nativeConstructor: true, name: "Error" });
+  env.defineReadOnly("Symbol", Symbol);
 
   _currentOnStep = onStep;
   try {

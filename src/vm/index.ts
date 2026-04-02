@@ -212,6 +212,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   };
   vm.setGlobal("console", consoleObj);
   vm.setGlobal("Error", { __nativeConstructor: true, name: "Error" });
+  vm.setGlobal("Symbol", Symbol);
 
   // フィードバック収集 (JIT 有効時は自動で有効)
   if (options.collectFeedback || options.jit) {
