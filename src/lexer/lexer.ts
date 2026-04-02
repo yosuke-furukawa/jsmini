@@ -33,6 +33,7 @@ Object.assign(KEYWORDS, {
   switch: "Switch",
   case: "Case",
   default: "Default",
+  yield: "Yield",
   // undefined は予約語ではないのでキーワードに含めない
 });
 

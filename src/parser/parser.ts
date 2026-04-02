@@ -144,6 +144,8 @@ export function parse(source: string): Program {
   // FunctionDeclaration = 'function' Identifier '(' params ')' BlockStatement
   function parseFunctionDeclaration(): Statement {
     eat("Function");
+    const generator = current().type === "Star";
+    if (generator) eat("Star");
     const id = parseIdentifier();
     eat("LeftParen");
     resetParamState();
@@ -157,7 +159,7 @@ export function parse(source: string): Program {
     }
     eat("RightParen");
     const body = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
-    return { type: "FunctionDeclaration", id, params, body };
+    return { type: "FunctionDeclaration", id, params, body, generator } as any;
   }
 
   // ClassDeclaration = 'class' Identifier ('extends' Expression)? '{' ClassElement* '}'
@@ -582,7 +584,7 @@ export function parse(source: string): Program {
     "While", "For", "Function", "Return", "Break", "Continue",
     "Typeof", "Throw", "Try", "Catch", "Finally", "New", "This",
     "Class", "Extends", "Super", "Of", "In", "Instanceof",
-    "Do", "Switch", "Case", "Default",
+    "Do", "Switch", "Case", "Default", "Yield",
   ]);
 
   function parsePropertyKey(): { type: "Identifier"; name: string } {
@@ -611,8 +613,22 @@ export function parse(source: string): Program {
     return expr;
   }
 
-  // Assignment = ArrowFunction | LogicalOr ('=' Assignment)?
+  // Assignment = YieldExpression | ArrowFunction | LogicalOr ('=' Assignment)?
   function parseAssignment(): Expression {
+    // yield expression
+    if (current().type === "Yield") {
+      eat("Yield");
+      const delegate = current().type === "Star";
+      if (delegate) eat("Star");
+      // yield の引数: 次のトークンが文末系でなければ式をパース
+      let argument: Expression | null = null;
+      if (current().type !== "Semicolon" && current().type !== "RightParen" &&
+          current().type !== "RightBracket" && current().type !== "RightBrace" &&
+          current().type !== "Comma" && current().type !== "Colon" && current().type !== "EOF") {
+        argument = parseAssignment();
+      }
+      return { type: "YieldExpression", argument, delegate } as any;
+    }
     // 単一引数アロー: `ident =>`
     if (current().type === "Identifier" && tokens[pos + 1]?.type === "Arrow") {
       const param = parseIdentifier();
@@ -1045,6 +1061,8 @@ export function parse(source: string): Program {
   // FunctionExpression = 'function' Identifier? '(' params ')' BlockStatement
   function parseFunctionExpression(): Expression {
     eat("Function");
+    const generator = current().type === "Star";
+    if (generator) eat("Star");
     let id: { type: "Identifier"; name: string } | null = null;
     if (current().type === "Identifier") {
       id = parseIdentifier();
@@ -1061,7 +1079,7 @@ export function parse(source: string): Program {
     }
     eat("RightParen");
     const body = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
-    return { type: "FunctionExpression", id, params, body };
+    return { type: "FunctionExpression", id, params, body, generator } as any;
   }
 
   // TemplateLiteral = TemplateHead Expression (TemplateMiddle Expression)* TemplateTail

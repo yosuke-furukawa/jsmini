@@ -91,6 +91,7 @@ export type TokenType =
   | "Dot"              // .
   | "Comma"            // ,
   | "Semicolon"        // ;
+  | "Yield"             // yield
   // Private identifier
   | "PrivateIdentifier"  // #name
   // Special
