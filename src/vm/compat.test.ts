@@ -353,6 +353,7 @@ const cases: [string, string][] = [
   // class expression
   ["class expression", "var C = class { x() { return 42; } }; var c = new C(); c.x();"],
   ["named class expression", "var C = class Foo { y() { return 99; } }; var c = new C(); c.y();"],
+
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {

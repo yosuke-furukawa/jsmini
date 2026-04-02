@@ -346,5 +346,13 @@ describe("Evaluator - Step 1-6: 文字列リテラル + console.log", () => {
     assert.equal(evaluate('"quote\\"here";'), 'quote"here');
     assert.equal(evaluate('"back\\\\slash";'), "back\\slash");
   });
+
+  it("分割代入 rest/default が動く", () => {
+    assert.equal(evaluate("var [a, ...rest] = [1, 2, 3]; rest[0] + rest[1];"), 5);
+    assert.equal(evaluate("var {a, ...rest} = {a: 1, b: 2, c: 3}; rest.b + rest.c;"), 5);
+    assert.equal(evaluate("var {a = 10, b = 20} = {a: 1}; a + b;"), 21);
+    assert.equal(evaluate("var [x = 5, y = 6] = [1]; x + y;"), 7);
+    assert.equal(evaluate("var [,, x] = [1, 2, 3]; x;"), 3);
+  });
 });
 

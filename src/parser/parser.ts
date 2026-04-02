@@ -508,12 +508,17 @@ export function parse(source: string): Program {
     return parseIdentifier();
   }
 
-  // ObjectPattern = '{' (Identifier (',' Identifier)*)? '}'
-  // ネスト対応: { a: { b } } → key: a, value: ObjectPattern
+  // ObjectPattern = '{' (Property | RestElement)* '}'
   function parseObjectPattern(): any {
     eat("LeftBrace");
     const properties: any[] = [];
     while (current().type !== "RightBrace") {
+      if (current().type === "DotDotDot") {
+        eat("DotDotDot");
+        properties.push({ type: "RestElement", argument: parseBindingPattern() });
+        if (current().type === "Comma") eat("Comma");
+        break; // rest は最後
+      }
       const key = parseIdentifier();
       let value: any;
       if (current().type === "Colon") {
@@ -522,6 +527,12 @@ export function parse(source: string): Program {
       } else {
         value = { type: "Identifier", name: key.name };
       }
+      // デフォルト値: { a = 1 }
+      if (current().type === "Equals") {
+        eat("Equals");
+        const defaultValue = parseAssignment();
+        value = { type: "AssignmentPattern", left: value, right: defaultValue };
+      }
       properties.push({ type: "Property", key, value, kind: "init" });
       if (current().type === "Comma") eat("Comma");
     }
@@ -529,12 +540,30 @@ export function parse(source: string): Program {
     return { type: "ObjectPattern", properties };
   }
 
-  // ArrayPattern = '[' (Pattern (',' Pattern)*)? ']'
+  // ArrayPattern = '[' (Pattern | RestElement)* ']'
   function parseArrayPattern(): any {
     eat("LeftBracket");
     const elements: any[] = [];
     while (current().type !== "RightBracket") {
-      elements.push(parseBindingPattern());
+      if (current().type === "Comma") {
+        // 穴あき: [, , x] → [undefined, undefined, x]
+        eat("Comma");
+        elements.push(null);
+        continue;
+      }
+      if (current().type === "DotDotDot") {
+        eat("DotDotDot");
+        elements.push({ type: "RestElement", argument: parseBindingPattern() });
+        break; // rest は最後
+      }
+      let elem = parseBindingPattern();
+      // デフォルト値: [a = 1]
+      if (current().type === "Equals") {
+        eat("Equals");
+        const defaultValue = parseAssignment();
+        elem = { type: "AssignmentPattern", left: elem, right: defaultValue };
+      }
+      elements.push(elem);
       if (current().type === "Comma") eat("Comma");
     }
     eat("RightBracket");
@@ -631,34 +660,34 @@ export function parse(source: string): Program {
   }
 
   // カバー文法: ObjectExpression → ObjectPattern に変換
+  function exprToPattern(expr: any): any {
+    if (!expr) return null;
+    if (expr.type === "Identifier") return expr;
+    if (expr.type === "MemberExpression") return expr;
+    if (expr.type === "ObjectExpression") return exprToObjectPattern(expr);
+    if (expr.type === "ArrayExpression") return exprToArrayPattern(expr);
+    if (expr.type === "AssignmentExpression" && expr.operator === "=") {
+      return { type: "AssignmentPattern", left: exprToPattern(expr.left), right: expr.right };
+    }
+    if (expr.type === "SpreadElement") {
+      return { type: "RestElement", argument: exprToPattern(expr.argument) };
+    }
+    throw new SyntaxError("Invalid destructuring assignment target");
+  }
+
   function exprToObjectPattern(expr: any): any {
     const properties = expr.properties.map((prop: any) => {
-      // { a: expr } → { key: a, value: Pattern }
-      // { a } → shorthand: { key: a, value: Identifier(a) }
-      let value: any;
-      if (prop.value.type === "Identifier") {
-        value = prop.value;
-      } else if (prop.value.type === "ObjectExpression") {
-        value = exprToObjectPattern(prop.value);
-      } else if (prop.value.type === "ArrayExpression") {
-        value = exprToArrayPattern(prop.value);
-      } else {
-        throw new SyntaxError("Invalid destructuring assignment target");
+      if (prop.type === "SpreadElement") {
+        return { type: "RestElement", argument: exprToPattern(prop.argument) };
       }
+      const value = exprToPattern(prop.value);
       return { type: "Property", key: prop.key, value, kind: "init" };
     });
     return { type: "ObjectPattern", properties };
   }
 
-  // カバー文法: ArrayExpression → ArrayPattern に変換
   function exprToArrayPattern(expr: any): any {
-    const elements = expr.elements.map((el: any) => {
-      if (!el) return null;
-      if (el.type === "Identifier") return el;
-      if (el.type === "ObjectExpression") return exprToObjectPattern(el);
-      if (el.type === "ArrayExpression") return exprToArrayPattern(el);
-      throw new SyntaxError("Invalid destructuring assignment target");
-    });
+    const elements = expr.elements.map((el: any) => exprToPattern(el));
     return { type: "ArrayPattern", elements };
   }
 

@@ -434,7 +434,7 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
             varEnv.define(decl.id.name, undefined);
           }
         } else {
-          bindPattern(decl.id, value, env, stmt.kind);
+          bindPattern(decl.id, value, env, stmt.kind, (expr: any) => evalExpression(expr, env));
         }
       }
       return undefined;
@@ -619,7 +619,7 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
 
       for (const item of iterable) {
         const iterEnv = isBlockScoped ? new Environment(env) : env;
-        bindPattern(pattern, item, iterEnv, kind);
+        bindPattern(pattern, item, iterEnv, kind, (expr: any) => evalExpression(expr, iterEnv));
         try {
           evalStatement(stmt.body, iterEnv);
         } catch (e) {
