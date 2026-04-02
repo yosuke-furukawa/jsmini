@@ -240,16 +240,37 @@ class BytecodeCompiler {
     // パラメータをローカルスロットに登録
     this.paramCount = params.length;
     const destructureParams: { slot: number; pattern: any }[] = [];
+    const defaultParams: { slot: number; defaultExpr: any }[] = [];
     for (const param of params) {
       if (param.type === "Identifier") {
         this.declareLocal(param.name);
+      } else if (param.type === "AssignmentPattern") {
+        // デフォルト引数: function f(x = 10) → slot に undefined が来たらデフォルト値
+        if (param.left.type === "Identifier") {
+          const slot = this.declareLocal(param.left.name);
+          defaultParams.push({ slot, defaultExpr: param.right });
+        } else {
+          const slot = this.localCount++;
+          destructureParams.push({ slot, pattern: param.left });
+          defaultParams.push({ slot, defaultExpr: param.right });
+        }
       } else if (param.type === "RestElement") {
         this.declareLocal(param.argument.name);
       } else if (param.type === "ArrayPattern" || param.type === "ObjectPattern") {
-        // 一旦ダミースロットを確保、後で展開
         const slot = this.localCount++;
         destructureParams.push({ slot, pattern: param });
       }
+    }
+    // デフォルト引数: undefined なら default 値で上書き
+    for (const { slot, defaultExpr } of defaultParams) {
+      this.emit("LdaLocal", slot);
+      this.emit("LdaUndefined");
+      this.emit("StrictEqual");
+      const skipDefault = this.emit("JumpIfFalse", 0);
+      this.compileExpression(defaultExpr);
+      this.emit("StaLocal", slot);
+      this.emit("Pop");
+      this.patch(skipDefault, this.currentOffset());
     }
     // 分割代入パラメータを展開
     for (const { slot, pattern } of destructureParams) {

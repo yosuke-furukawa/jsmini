@@ -792,7 +792,7 @@ function evalNewExpression(
     if (param.type === "RestElement") {
       fnEnv.define(param.argument.name, args.slice(i));
     } else {
-      bindPattern(param, args[i] ?? undefined, fnEnv, "let");
+      bindParam(param, args[i] ?? undefined, fnEnv, fnEnv);
     }
   }
   hoistVarDeclarations(constructor.body.body, fnEnv);
@@ -819,6 +819,16 @@ function evalNewExpression(
 }
 
 // jsmini の JSFunction をネイティブから呼べるようにするヘルパー
+// パラメータバインド: AssignmentPattern (デフォルト引数) を処理
+function bindParam(param: any, value: unknown, env: Environment, evalEnv: Environment): void {
+  if (param.type === "AssignmentPattern") {
+    const val = value !== undefined ? value : evalExpression(param.right, evalEnv);
+    bindPattern(param.left, val, env, "let");
+  } else {
+    bindPattern(param, value, env, "let");
+  }
+}
+
 function evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment): unknown {
   if (!isJSFunction(fn)) return undefined;
   const jsFn = fn;
@@ -828,7 +838,7 @@ function evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment):
     if (param.type === "RestElement") {
       fnEnv.define(param.argument.name, args.slice(i));
     } else {
-      bindPattern(param, args[i] ?? undefined, fnEnv, "let");
+      bindParam(param, args[i] ?? undefined, fnEnv, fnEnv);
     }
   }
   hoistVarDeclarations(jsFn.body.body, fnEnv);
@@ -883,7 +893,7 @@ function evalCallExpression(
       if (param.type === "RestElement") {
         superEnv.define(param.argument.name, args.slice(i));
       } else {
-        bindPattern(param, args[i] ?? undefined, superEnv, "let");
+        bindParam(param, args[i] ?? undefined, superEnv, superEnv);
       }
     }
     hoistVarDeclarations(superFn.body.body, superEnv);
@@ -934,7 +944,7 @@ function evalCallExpression(
     if (param.type === "RestElement") {
       fnEnv.define(param.argument.name, args.slice(i));
     } else {
-      bindPattern(param, args[i] ?? undefined, fnEnv, "let");
+      bindParam(param, args[i] ?? undefined, fnEnv, fnEnv);
     }
   }
 

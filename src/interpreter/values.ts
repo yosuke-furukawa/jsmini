@@ -118,6 +118,10 @@ export function bindPattern(
         bindPattern(pattern.elements[i], arr?.[i], env, kind);
       }
     }
+  } else if (pattern.type === "AssignmentPattern") {
+    // デフォルト引数: value が undefined のときデフォルト値をそのまま渡す
+    // (evaluator 側で defaultResolver を通じて評価済みの値を渡す)
+    bindPattern(pattern.left, value, env, kind);
   }
 }
 

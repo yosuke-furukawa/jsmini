@@ -416,7 +416,14 @@ export function parse(source: string): Program {
       _lastParamWasRest = true;
       return { type: "RestElement", argument: parseIdentifier() };
     }
-    return parseBindingPattern();
+    const pattern = parseBindingPattern();
+    // デフォルト引数: param = defaultValue
+    if (current().type === "Equals") {
+      eat("Equals");
+      const right = parseAssignment();
+      return { type: "AssignmentPattern", left: pattern, right };
+    }
+    return pattern;
   }
   function resetParamState(): void {
     _lastParamWasRest = false;
