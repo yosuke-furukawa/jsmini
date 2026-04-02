@@ -817,8 +817,7 @@ class BytecodeCompiler {
       }
 
       case "ForOfStatement": {
-        // 配列を取得して GetIterator 的な処理
-        // 簡易: 配列の各要素をループ
+        // 配列を取得してインデックスループ
         this.compileExpression(stmt.right);
         // イテラブルをグローバルの一時変数に格納
         const iterName = `__iter_${this.currentOffset()}`;

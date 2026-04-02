@@ -212,7 +212,17 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   };
   vm.setGlobal("console", consoleObj);
   vm.setGlobal("Error", { __nativeConstructor: true, name: "Error" });
-  vm.setGlobal("Symbol", Symbol);
+  // Symbol: 自前実装 (一意な文字列ベース)
+  let symbolCounter = 0;
+  const SymbolFn: any = (desc?: unknown) => {
+    const d = desc !== undefined ? (isJSString(desc) ? jsStringToString(desc) : String(desc)) : "";
+    return internString(`@@symbol_${symbolCounter++}_${d}`);
+  };
+  SymbolFn.iterator = internString("@@iterator");
+  SymbolFn.toPrimitive = internString("@@toPrimitive");
+  SymbolFn.hasInstance = internString("@@hasInstance");
+  SymbolFn.toStringTag = internString("@@toStringTag");
+  vm.setGlobal("Symbol", SymbolFn);
 
   // フィードバック収集 (JIT 有効時は自動で有効)
   if (options.collectFeedback || options.jit) {

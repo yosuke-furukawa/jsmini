@@ -169,7 +169,17 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
 
   // 組み込みコンストラクタ
   env.defineReadOnly("Error", { __nativeConstructor: true, name: "Error" });
-  env.defineReadOnly("Symbol", Symbol);
+  // Symbol: 自前実装 (一意な文字列ベース)
+  let symbolCounter = 0;
+  const SymbolFn: any = (desc?: unknown) => {
+    const d = desc !== undefined ? (isJSString(desc) ? jsStringToString(desc) : String(desc)) : "";
+    return internString(`@@symbol_${symbolCounter++}_${d}`);
+  };
+  SymbolFn.iterator = internString("@@iterator");
+  SymbolFn.toPrimitive = internString("@@toPrimitive");
+  SymbolFn.hasInstance = internString("@@hasInstance");
+  SymbolFn.toStringTag = internString("@@toStringTag");
+  env.defineReadOnly("Symbol", SymbolFn);
 
   _currentOnStep = onStep;
   try {
@@ -613,7 +623,29 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
     }
     case "ForOfStatement": {
       const lbl = (stmt as any).__label__ as string | undefined;
-      const iterable = evalExpression(stmt.right, env) as unknown[];
+      const rawIterable = evalExpression(stmt.right, env);
+      // iterator プロトコル: "@@iterator" キーがあれば使う、なければ配列として扱う
+      let iterable: unknown[];
+      const iterKey = "@@iterator";
+      const iterFn = typeof rawIterable === "object" && rawIterable !== null
+        ? getProperty(rawIterable as JSObject, iterKey) ?? (rawIterable as any)[iterKey]
+        : undefined;
+      if (iterFn && (isJSFunction(iterFn) || typeof iterFn === "function")) {
+        const iterator = isJSFunction(iterFn)
+          ? evalCallWithJSFunction(iterFn, [], env)
+          : (iterFn as Function).call(rawIterable);
+        iterable = [];
+        for (let step = 0; step < 10000; step++) {
+          const nextFn = getProperty(iterator as JSObject, "next") ?? (iterator as any)?.next;
+          const result = isJSFunction(nextFn)
+            ? evalCallWithJSFunction(nextFn, [], env)
+            : typeof nextFn === "function" ? nextFn.call(iterator) : undefined;
+          if (!result || (result as any).done) break;
+          iterable.push((result as any).value);
+        }
+      } else {
+        iterable = rawIterable as unknown[];
+      }
       const kind = stmt.left.kind;
       const isBlockScoped = kind !== "var";
       const pattern = stmt.left.declarations[0].id;
