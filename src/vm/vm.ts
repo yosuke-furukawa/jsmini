@@ -14,6 +14,17 @@ function isTruthy(value: unknown): boolean {
   return !!value;
 }
 
+// jsmini の typeof: Symbol は "@@symbol_" プレフィックスの文字列
+function jsminiTypeof(val: unknown): string {
+  if (isJSString(val)) {
+    if (jsStringToString(val).startsWith("@@symbol_")) return "symbol";
+    return "string";
+  }
+  if (val === null) return "object";
+  if (typeof val === "object" && val !== null && ("bytecode" in val && "paramCount" in val || "__closure" in val)) return "function";
+  return typeof val;
+}
+
 // toPrimitive/callInternal 内で例外が unwindToHandler で処理された場合の sentinel
 const THROWN_SENTINEL = Symbol("thrown");
 
@@ -848,10 +859,7 @@ export class VM {
         // typeof
         case "TypeOf": {
           const val = this.pop();
-          if (isJSString(val)) this.push(internString("string"));
-          else if (val === null) this.push(internString("object"));
-          else if (typeof val === "object" && val !== null && ("bytecode" in val && "paramCount" in val || "__closure" in val)) this.push(internString("function"));
-          else this.push(internString(typeof val));
+          this.push(internString(jsminiTypeof(val)));
           break;
         }
 
@@ -861,10 +869,7 @@ export class VM {
             this.push(internString("undefined"));
           } else {
             const val = this.globals.get(name);
-            if (isJSString(val)) this.push(internString("string"));
-            else if (val === null) this.push(internString("object"));
-            else if (typeof val === "object" && val !== null && ("bytecode" in val && "paramCount" in val || "__closure" in val)) this.push(internString("function"));
-            else this.push(internString(typeof val));
+            this.push(internString(jsminiTypeof(val)));
           }
           break;
         }

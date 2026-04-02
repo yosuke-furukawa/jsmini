@@ -1167,7 +1167,10 @@ function evalUnaryExpression(
     } else {
       value = evalExpression(expr.argument, env);
     }
-    if (isJSString(value)) return internString("string");
+    if (isJSString(value)) {
+      if (jsStringToString(value).startsWith("@@symbol_")) return internString("symbol");
+      return internString("string");
+    }
     if (value === null) return internString("object");
     if (isJSFunction(value)) return internString("function");
     return internString(typeof value);
