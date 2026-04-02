@@ -109,6 +109,11 @@ type ArrayDef = {
   mutable: boolean;
 };
 
+type LocalGroup = {
+  count: number;
+  type: number[];  // type bytes (single byte for i32/f64, multi-byte for ref types)
+};
+
 type FuncDef = {
   name: string;
   paramCount: number;   // パラメータ数
@@ -117,6 +122,7 @@ type FuncDef = {
   results: number[];    // 結果型のエンコード済みバイト列
   body: number[];       // Wasm 命令列 (end 含む)
   extraLocals: number;  // params 以外のローカル変数の数
+  extraLocalGroups?: LocalGroup[];  // 複数型の extra locals (指定時は extraLocals を無視)
 };
 
 export class WasmBuilder {
@@ -140,7 +146,7 @@ export class WasmBuilder {
     return idx;
   }
 
-  addFunction(name: string, params: number[], results: number[], body: number[], extraLocals = 0, paramCount?: number, resultCount?: number): void {
+  addFunction(name: string, params: number[], results: number[], body: number[], extraLocals = 0, paramCount?: number, resultCount?: number, extraLocalGroups?: LocalGroup[]): void {
     this.functions.push({
       name,
       paramCount: paramCount ?? params.length,
@@ -149,6 +155,7 @@ export class WasmBuilder {
       results,
       body,
       extraLocals,
+      extraLocalGroups,
     });
   }
 
@@ -310,7 +317,14 @@ export class WasmBuilder {
     for (const fn of this.functions) {
       // 関数本体
       const bodyBuf: number[] = [];
-      if (fn.extraLocals > 0) {
+      if (fn.extraLocalGroups && fn.extraLocalGroups.length > 0) {
+        // 複数グループの extra locals
+        writeLEB128(bodyBuf, fn.extraLocalGroups.length);
+        for (const group of fn.extraLocalGroups) {
+          writeLEB128(bodyBuf, group.count);
+          bodyBuf.push(...group.type);
+        }
+      } else if (fn.extraLocals > 0) {
         // ローカル変数宣言: 1 グループ (count, type)
         bodyBuf.push(0x01); // 1 group
         writeLEB128(bodyBuf, fn.extraLocals);
