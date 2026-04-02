@@ -23,6 +23,7 @@ export type Opcode =
   | "ShiftLeft"       // pop 2つ、左シフト
   | "ShiftRight"      // pop 2つ、右シフト(符号あり)
   | "UShiftRight"     // pop 2つ、右シフト(符号なし)
+  | "IsNullish"       // pop 1つ、null/undefined なら true を push
   | "Negate"          // pop 1つ、符号反転して push
 
   // 比較

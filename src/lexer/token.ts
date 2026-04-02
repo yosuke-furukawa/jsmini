@@ -76,6 +76,8 @@ export type TokenType =
   | "ShiftRight"       // >>
   | "UnsignedShiftRight" // >>>
   | "StarStar"         // **
+  | "QuestionDot"      // ?.
+  | "QuestionQuestion" // ??
   // Delimiters
   | "LeftParen"        // (
   | "RightParen"       // )

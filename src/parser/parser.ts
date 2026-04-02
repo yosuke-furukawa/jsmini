@@ -612,8 +612,8 @@ export function parse(source: string): Program {
   // LogicalOr = LogicalAnd ('||' LogicalAnd)*
   function parseLogicalOr(): Expression {
     let left = parseLogicalAnd();
-    while (current().type === "PipePipe") {
-      const operator = eat("PipePipe").value;
+    while (current().type === "PipePipe" || current().type === "QuestionQuestion") {
+      const operator = eat(current().type).value;
       const right = parseLogicalAnd();
       left = { type: "LogicalExpression", operator, left, right };
     }
@@ -812,10 +812,11 @@ export function parse(source: string): Program {
         const args = parseArguments();
         eat("RightParen");
         expr = { type: "CallExpression", callee: expr, arguments: args };
-      } else if (current().type === "Dot") {
-        eat("Dot");
+      } else if (current().type === "Dot" || current().type === "QuestionDot") {
+        const optional = current().type === "QuestionDot";
+        eat(current().type);
         const property = parseIdentifier();
-        expr = { type: "MemberExpression", object: expr, property, computed: false };
+        expr = { type: "MemberExpression", object: expr, property, computed: false, optional } as any;
       } else if (current().type === "LeftBracket") {
         eat("LeftBracket");
         const property = parseExpression();

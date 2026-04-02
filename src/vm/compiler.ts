@@ -805,12 +805,26 @@ class BytecodeCompiler {
 
       case "MemberExpression": {
         this.compileExpression(expr.object);
+        // optional chaining: obj?.prop → null/undefined なら undefined を返す
+        let optionalJump = -1;
+        if ((expr as any).optional) {
+          this.emit("Dup");
+          this.emit("IsNullish");
+          optionalJump = this.emit("JumpIfTrue", 0);
+        }
         if (!expr.computed && expr.property.type === "Identifier") {
           const nameIdx = this.addConstant(expr.property.name);
           this.emitWithIC("GetProperty", nameIdx);
         } else {
           this.compileExpression(expr.property);
           this.emit("GetPropertyComputed");
+        }
+        if (optionalJump >= 0) {
+          const skipUndefined = this.emit("Jump", 0);
+          this.patch(optionalJump, this.currentOffset());
+          this.emit("Pop"); // obj を捨てる
+          this.emit("LdaUndefined");
+          this.patch(skipUndefined, this.currentOffset());
         }
         break;
       }
@@ -919,6 +933,16 @@ class BytecodeCompiler {
           this.emit("Dup");
           const skipRight = this.emit("JumpIfTrue", 0);
           this.emit("Pop");
+          this.compileExpression(expr.right);
+          this.patch(skipRight, this.currentOffset());
+        } else if (expr.operator === "??") {
+          // null/undefined でないなら左を返す
+          this.emit("Dup");
+          this.emit("IsNullish");
+          const useRight = this.emit("JumpIfTrue", 0);
+          const skipRight = this.emit("Jump", 0);
+          this.patch(useRight, this.currentOffset());
+          this.emit("Pop"); // left を捨てる
           this.compileExpression(expr.right);
           this.patch(skipRight, this.currentOffset());
         }

@@ -250,6 +250,14 @@ export function tokenize(source: string): Token[] {
       pushToken("DotDotDot", "...", startCol);
       pos += 3; column += 3; continue;
     }
+    if (ch === "?" && peek(1) === ".") {
+      pushToken("QuestionDot", "?.", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "?" && peek(1) === "?") {
+      pushToken("QuestionQuestion", "??", startCol);
+      pos += 2; column += 2; continue;
+    }
 
     // 波括弧: テンプレートリテラルのネスト管理のため特別扱い
     if (ch === "{") {

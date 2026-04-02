@@ -682,6 +682,7 @@ function evalExpression(expr: Expression, env: Environment): unknown {
     case "MemberExpression": {
       const obj = evalExpression(expr.object, env);
       if (obj === null || obj === undefined) {
+        if ((expr as any).optional) return undefined; // ?. → undefined
         const key = resolveMemberKey(expr, env);
         throw new TypeError(`Cannot read properties of ${obj} (reading '${key}')`);
       }
@@ -998,6 +999,7 @@ function evalLogicalExpression(
   switch (expr.operator) {
     case "&&": return isTruthy(left) ? evalExpression(expr.right, env) : left;
     case "||": return isTruthy(left) ? left : evalExpression(expr.right, env);
+    case "??": return (left !== null && left !== undefined) ? left : evalExpression(expr.right, env);
     default:
       throw new Error(`Unknown logical operator: ${expr.operator}`);
   }

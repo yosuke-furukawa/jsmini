@@ -449,6 +449,11 @@ export class VM {
         case "ShiftLeft": { const r = this.pop(); const l = this.pop(); this.push((l as number) << (r as number)); break; }
         case "ShiftRight": { const r = this.pop(); const l = this.pop(); this.push((l as number) >> (r as number)); break; }
         case "UShiftRight": { const r = this.pop(); const l = this.pop(); this.push((l as number) >>> (r as number)); break; }
+        case "IsNullish": {
+          const val = this.pop();
+          this.push(val === null || val === undefined);
+          break;
+        }
         case "Negate": {
           const val = this.toPrimitive(this.pop());
           if (val === THROWN_SENTINEL) continue;
