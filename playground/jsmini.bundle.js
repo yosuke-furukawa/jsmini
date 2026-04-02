@@ -3277,6 +3277,11 @@ var jsmini = (() => {
         return;
       }
       if (this.isFunction) {
+        if (this.parent && !this.parent.isFunction && this.parent.resolveLocal(name2) !== null) {
+          const nameIdx2 = this.addConstant(name2);
+          this.emit("LdaGlobal", nameIdx2);
+          return;
+        }
         const upIdx = this.resolveUpvalue(name2);
         if (upIdx >= 0) {
           this.emit("LdaUpvalue", upIdx);
@@ -3417,6 +3422,7 @@ var jsmini = (() => {
       }
       for (let i = 0; i < program.body.length; i++) {
         const stmt = program.body[i];
+        if (stmt.type === "FunctionDeclaration") continue;
         const isLast = i === program.body.length - 1;
         this.compileStatement(stmt);
         if (stmt.type === "ExpressionStatement" && isLast) {
@@ -4548,6 +4554,7 @@ var jsmini = (() => {
     f64: 124,
     func: 96,
     struct: 95,
+    array: 94,
     ref: 100,
     // ref (non-null) + heap type
     ref_null: 99
@@ -4604,20 +4611,46 @@ var jsmini = (() => {
     struct_set: 251
     // 0xfb 0x05 + type_idx + field_idx
   };
+  var WASM_GC_OP = {
+    struct_new: 0,
+    struct_new_default: 1,
+    struct_get: 2,
+    struct_get_s: 3,
+    struct_get_u: 4,
+    struct_set: 5,
+    array_new: 6,
+    array_new_default: 7,
+    array_new_fixed: 8,
+    array_get: 11,
+    array_get_s: 12,
+    array_get_u: 13,
+    array_set: 14,
+    array_len: 15
+  };
+  function refType(typeIdx, nullable = false) {
+    return [nullable ? 99 : 100, typeIdx];
+  }
   var WasmBuilder = class {
     constructor() {
       __publicField(this, "functions", []);
       __publicField(this, "structs", []);
+      __publicField(this, "arrays", []);
       __publicField(this, "memoryPages", 0);
       __publicField(this, "globals", []);
     }
-    // struct 型を追加。返り値は type index (struct は関数型より先に定義される)
+    // struct 型を追加。返り値は type index (struct → array → func の順)
     addStruct(fields) {
       const idx = this.structs.length;
       this.structs.push({ fields });
       return idx;
     }
-    addFunction(name2, params, results, body, extraLocals = 0, paramCount, resultCount) {
+    // array 型を追加。返り値は type index
+    addArray(elementType, mutable = true) {
+      const idx = this.structs.length + this.arrays.length;
+      this.arrays.push({ elementType, mutable });
+      return idx;
+    }
+    addFunction(name2, params, results, body, extraLocals = 0, paramCount, resultCount, extraLocalGroups) {
       this.functions.push({
         name: name2,
         paramCount: paramCount ?? params.length,
@@ -4625,7 +4658,8 @@ var jsmini = (() => {
         resultCount: resultCount ?? results.length,
         results,
         body,
-        extraLocals
+        extraLocals,
+        extraLocalGroups
       });
     }
     enableMemory(pages = 1) {
@@ -4683,13 +4717,20 @@ var jsmini = (() => {
       writeLEB128(buf, this.memoryPages);
       return buf;
     }
-    // struct の type index オフセット (struct が先、func が後)
+    // composite type のオフセット (struct → array → func の順)
     get structCount() {
       return this.structs.length;
     }
+    get arrayCount() {
+      return this.arrays.length;
+    }
+    // func の type index は structs + arrays の後
+    get funcTypeOffset() {
+      return this.structs.length + this.arrays.length;
+    }
     buildTypeSection() {
       const buf = [];
-      writeLEB128(buf, this.structs.length + this.functions.length);
+      writeLEB128(buf, this.structs.length + this.arrays.length + this.functions.length);
       for (const s of this.structs) {
         buf.push(WASM_TYPE.struct);
         writeLEB128(buf, s.fields.length);
@@ -4697,6 +4738,11 @@ var jsmini = (() => {
           buf.push(f.type);
           buf.push(f.mutable ? 1 : 0);
         }
+      }
+      for (const a of this.arrays) {
+        buf.push(WASM_TYPE.array);
+        buf.push(a.elementType);
+        buf.push(a.mutable ? 1 : 0);
       }
       for (const fn of this.functions) {
         buf.push(WASM_TYPE.func);
@@ -4711,7 +4757,7 @@ var jsmini = (() => {
       const buf = [];
       writeLEB128(buf, this.functions.length);
       for (let i = 0; i < this.functions.length; i++) {
-        writeLEB128(buf, this.structs.length + i);
+        writeLEB128(buf, this.funcTypeOffset + i);
       }
       return buf;
     }
@@ -4748,7 +4794,13 @@ var jsmini = (() => {
       writeLEB128(buf, this.functions.length);
       for (const fn of this.functions) {
         const bodyBuf = [];
-        if (fn.extraLocals > 0) {
+        if (fn.extraLocalGroups && fn.extraLocalGroups.length > 0) {
+          writeLEB128(bodyBuf, fn.extraLocalGroups.length);
+          for (const group of fn.extraLocalGroups) {
+            writeLEB128(bodyBuf, group.count);
+            bodyBuf.push(...group.type);
+          }
+        } else if (fn.extraLocals > 0) {
           bodyBuf.push(1);
           writeLEB128(bodyBuf, fn.extraLocals);
           bodyBuf.push(fn.params.length > 0 ? fn.params[0] : WASM_TYPE.i32);
@@ -4862,7 +4914,12 @@ var jsmini = (() => {
     }
     const anyConstruct = funcs.some((f) => f.bytecode.some((i) => i.op === "Construct" || i.op === "CreateArray" && i.operand === 0));
     const builder = new WasmBuilder();
-    if (anyArrayLocals || anyObjectProps || anyConstruct) builder.enableMemory(1);
+    let arrayTypeIdx = -1;
+    let helperFuncOffset = funcs.length;
+    if (anyArrayLocals) {
+      arrayTypeIdx = builder.addArray(WASM_TYPE.i32, true);
+    }
+    if (anyObjectProps || anyConstruct) builder.enableMemory(1);
     let heapPtrGlobal = -1;
     if (anyConstruct) {
       heapPtrGlobal = builder.addGlobal(WASM_TYPE.i32, true, 0);
@@ -4887,24 +4944,36 @@ var jsmini = (() => {
       const hasThis = func.bytecode.some((i) => i.op === "LoadThis");
       const inlineCandidates = /* @__PURE__ */ new Map();
       for (const f of funcs) inlineCandidates.set(f.name, f);
+      const useGCArray = anyArrayLocals && arrayTypeIdx >= 0;
       const ctx = {
         spec: t2,
         isI32: t2 === "i32",
         wasmType,
         funcIndex,
         arrayLocals,
-        hasMemory: anyArrayLocals || anyObjectProps,
+        hasMemory: anyObjectProps || anyConstruct,
         objectPropOffsets,
         hasThis,
         heapPtrGlobal,
         objectSize: objectPropOffsets.size * 4,
         inlineCandidates,
         inlineLocalOffset: 0,
-        stringLocals: /* @__PURE__ */ new Set()
+        stringLocals: /* @__PURE__ */ new Set(),
+        useGCArray,
+        arrayTypeIdx
       };
       const upvalueCount = func.upvalues?.length ?? 0;
       const paramCount = func.paramCount + (hasThis ? 1 : 0) + upvalueCount;
-      const params = new Array(paramCount).fill(wasmType);
+      const params = [];
+      for (let i = 0; i < func.paramCount; i++) {
+        if (useGCArray && arrayLocals.has(i)) {
+          params.push(...refType(arrayTypeIdx));
+        } else {
+          params.push(wasmType);
+        }
+      }
+      if (hasThis) params.push(wasmType);
+      for (let i = 0; i < upvalueCount; i++) params.push(wasmType);
       const results = [wasmType];
       let extraLocals = func.localCount - func.paramCount;
       const needsTempLocal = func.bytecode.some((i) => i.op === "SetPropertyComputed");
@@ -4926,7 +4995,59 @@ var jsmini = (() => {
       if (func.bytecode.some((i) => i.op === "Dup")) extraLocals = Math.max(extraLocals, 1);
       const body = translateBytecode(func, ctx);
       if (!body) return null;
-      builder.addFunction(func.name, params, results, body, extraLocals > 0 ? extraLocals : 0);
+      const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: [wasmType] }] : void 0;
+      builder.addFunction(func.name, params, results, body, extraLocals > 0 ? extraLocals : 0, paramCount, 1, extraLocalGroups);
+    }
+    if (anyArrayLocals && arrayTypeIdx >= 0) {
+      const createBody = [];
+      createBody.push(WASM_OP.i32_const, ...i32ToLEB128(0));
+      createBody.push(WASM_OP.local_get, 0);
+      createBody.push(251, WASM_GC_OP.array_new, arrayTypeIdx);
+      createBody.push(WASM_OP.end);
+      builder.addFunction(
+        "__create_array",
+        [WASM_TYPE.i32],
+        refType(arrayTypeIdx),
+        createBody,
+        0,
+        1,
+        // paramCount
+        1
+        // resultCount
+      );
+      const getBody = [];
+      getBody.push(WASM_OP.local_get, 0);
+      getBody.push(WASM_OP.local_get, 1);
+      getBody.push(251, WASM_GC_OP.array_get, arrayTypeIdx);
+      getBody.push(WASM_OP.end);
+      builder.addFunction(
+        "__get_array",
+        [...refType(arrayTypeIdx), WASM_TYPE.i32],
+        [WASM_TYPE.i32],
+        getBody,
+        0,
+        2,
+        // paramCount
+        1
+        // resultCount
+      );
+      const setBody = [];
+      setBody.push(WASM_OP.local_get, 0);
+      setBody.push(WASM_OP.local_get, 1);
+      setBody.push(WASM_OP.local_get, 2);
+      setBody.push(251, WASM_GC_OP.array_set, arrayTypeIdx);
+      setBody.push(WASM_OP.end);
+      builder.addFunction(
+        "__set_array",
+        [...refType(arrayTypeIdx), WASM_TYPE.i32, WASM_TYPE.i32],
+        [],
+        setBody,
+        0,
+        3,
+        // paramCount
+        0
+        // resultCount
+      );
     }
     try {
       const bytes = builder.build();
@@ -4936,7 +5057,12 @@ var jsmini = (() => {
       for (const func of funcs) {
         result.set(func.name, instance.exports[func.name]);
       }
-      if ((anyArrayLocals || anyObjectProps || anyConstruct) && instance.exports.memory) {
+      if (anyArrayLocals && arrayTypeIdx >= 0) {
+        result.__create_array = instance.exports.__create_array;
+        result.__get_array = instance.exports.__get_array;
+        result.__set_array = instance.exports.__set_array;
+      }
+      if ((anyObjectProps || anyConstruct) && instance.exports.memory) {
         result.__memory = instance.exports.memory;
       }
       if (anyConstruct && instance.exports.__global_0) {
@@ -4975,7 +5101,7 @@ var jsmini = (() => {
     if (needsHeap) hasMemory = true;
     const inlineCandidates = /* @__PURE__ */ new Map();
     if (allFuncs) for (const f of allFuncs) inlineCandidates.set(f.name, f);
-    const ctx = { spec: t2, isI32: t2 === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: needsHeap ? 0 : -1, objectSize: objectPropOffsets.size * 4, inlineCandidates, inlineLocalOffset: 0, stringLocals: /* @__PURE__ */ new Set() };
+    const ctx = { spec: t2, isI32: t2 === "i32", wasmType, funcIndex, arrayLocals, hasMemory, objectPropOffsets, hasThis, heapPtrGlobal: needsHeap ? 0 : -1, objectSize: objectPropOffsets.size * 4, inlineCandidates, inlineLocalOffset: 0, stringLocals: /* @__PURE__ */ new Set(), useGCArray: false, arrayTypeIdx: -1 };
     const body = translateBytecode(func, ctx);
     if (!body) return null;
     const lines = [];
@@ -5253,8 +5379,12 @@ var jsmini = (() => {
             out.push(71);
           } else return false;
           break;
-        // 配列アクセス (linear memory 経由)
+        // 配列アクセス (WasmGC array)
         case "GetPropertyComputed": {
+          if (ctx.useGCArray && isI32) {
+            out.push(251, WASM_GC_OP.array_get, ctx.arrayTypeIdx);
+            break;
+          }
           if (!ctx.hasMemory) return false;
           if (isI32) {
             out.push(WASM_OP.i32_const, ...i32ToLEB128(4));
@@ -5267,6 +5397,15 @@ var jsmini = (() => {
           break;
         }
         case "SetPropertyComputed": {
+          if (ctx.useGCArray && isI32) {
+            const tempLocal = func.localCount;
+            out.push(34, tempLocal);
+            out.push(WASM_OP.drop);
+            out.push(WASM_OP.local_get, tempLocal);
+            out.push(251, WASM_GC_OP.array_set, ctx.arrayTypeIdx);
+            out.push(WASM_OP.local_get, tempLocal);
+            break;
+          }
           if (!ctx.hasMemory) return false;
           if (isI32) {
             const tempLocal = func.localCount;
@@ -5288,6 +5427,10 @@ var jsmini = (() => {
           if (pc + 1 < bytecode.length && bytecode[pc + 1].op === "CallMethod" && pc > 0 && bytecode[pc - 1].op === "Dup") {
             out.push(WASM_OP.drop);
             out.push(WASM_OP.i32_const, 0);
+            break;
+          }
+          if (name2 === "length" && ctx.useGCArray) {
+            out.push(251, WASM_GC_OP.array_len);
             break;
           }
           if (name2 === "length" && ctx.hasMemory) {
@@ -7029,7 +7172,7 @@ var jsmini = (() => {
       } else {
         const wasmFn = compileToWasmSync(func, spec);
         if (wasmFn) {
-          compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec };
+          compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
         }
       }
       this.wasmCache.set(func, compiled);
@@ -7046,13 +7189,34 @@ var jsmini = (() => {
       if (!result) return null;
       const wasmFn = result.get(func.name);
       if (!wasmFn) return null;
-      const memory = result.__memory;
-      const cached = { fn: wasmFn, memory: memory ?? null, arrayArgIndices, stringArgIndices: [], spec };
+      const memory2 = result.__memory;
+      const createArray = result.__create_array;
+      const getArray = result.__get_array;
+      const setArray = result.__set_array;
+      const cached = {
+        fn: wasmFn,
+        memory: memory2 ?? null,
+        arrayArgIndices,
+        stringArgIndices: [],
+        spec,
+        createArray: createArray ?? null,
+        getArray: getArray ?? null,
+        setArray: setArray ?? null
+      };
       for (const f of funcsToCompile) {
         if (f !== func) {
           const relFn = result.get(f.name);
           if (relFn) {
-            this.wasmCache.set(f, { fn: relFn, memory: memory ?? null, arrayArgIndices: [], stringArgIndices: [], spec });
+            this.wasmCache.set(f, {
+              fn: relFn,
+              memory: memory2 ?? null,
+              arrayArgIndices: [],
+              stringArgIndices: [],
+              spec,
+              createArray: createArray ?? null,
+              getArray: getArray ?? null,
+              setArray: setArray ?? null
+            });
           }
         }
       }
@@ -7080,9 +7244,9 @@ var jsmini = (() => {
       return result;
     }
     executeWasm(func, cached, args, callCount, upvalueValues = [], thisObj) {
-      const { fn, memory, arrayArgIndices } = cached;
-      if (arrayArgIndices.length > 0 && memory) {
-        return this.executeWithArrayArgs(func, fn, memory, args, arrayArgIndices, callCount);
+      const { fn, arrayArgIndices } = cached;
+      if (arrayArgIndices.length > 0 && cached.createArray) {
+        return this.executeWithArrayArgs(func, cached, args, arrayArgIndices, callCount);
       }
       const { stringArgIndices } = cached;
       const wasmArgs = [];
@@ -7145,11 +7309,11 @@ var jsmini = (() => {
       this.logTier(func, "Wasm", callCount);
       return { result: fn(...wasmArgs) };
     }
-    executeWithArrayArgs(func, fn, memory, args, arrayArgIndices, callCount) {
-      const view = new Int32Array(memory.buffer);
+    executeWithArrayArgs(func, cached, args, arrayArgIndices, callCount) {
+      const { fn, createArray, getArray, setArray } = cached;
+      if (!createArray || !getArray || !setArray) return null;
       const wasmArgs = [];
       const arrayRefs = [];
-      let memOffset = 0;
       for (let i = 0; i < args.length; i++) {
         if (arrayArgIndices.includes(i)) {
           const arr = args[i];
@@ -7161,14 +7325,12 @@ var jsmini = (() => {
             this.deoptimize(func, args);
             return null;
           }
-          const base2 = memOffset * 4;
-          view[memOffset] = arr.length;
+          const gcArr = createArray(arr.length);
           for (let j = 0; j < arr.length; j++) {
-            view[memOffset + 1 + j] = arr[j];
+            setArray(gcArr, j, arr[j]);
           }
-          arrayRefs.push({ jsArr: arr, base: base2, length: arr.length });
-          wasmArgs.push(base2);
-          memOffset += 1 + arr.length;
+          arrayRefs.push({ jsArr: arr, gcArr, length: arr.length });
+          wasmArgs.push(gcArr);
         } else {
           if (typeof args[i] !== "number") {
             this.deoptimize(func, args);
@@ -7179,10 +7341,9 @@ var jsmini = (() => {
       }
       this.logTier(func, "Wasm (array)", callCount);
       const result = fn(...wasmArgs);
-      for (const { jsArr, base: base2, length } of arrayRefs) {
-        const elemStart = base2 / 4 + 1;
+      for (const { jsArr, gcArr, length } of arrayRefs) {
         for (let j = 0; j < length; j++) {
-          jsArr[j] = view[elemStart + j];
+          jsArr[j] = getArray(gcArr, j);
         }
       }
       return { result };
@@ -7275,6 +7436,113 @@ var jsmini = (() => {
       }
     };
     vm.arrayPrototype = {
+      push: function(...items) {
+        for (const item of items) this[this.length] = item;
+        return this.length;
+      },
+      pop: function() {
+        if (this.length === 0) return void 0;
+        const val = this[this.length - 1];
+        this.length = this.length - 1;
+        return val;
+      },
+      shift: function() {
+        if (this.length === 0) return void 0;
+        const val = this[0];
+        for (let i = 1; i < this.length; i++) this[i - 1] = this[i];
+        this.length = this.length - 1;
+        return val;
+      },
+      unshift: function(...items) {
+        for (let i = this.length - 1; i >= 0; i--) this[i + items.length] = this[i];
+        for (let i = 0; i < items.length; i++) this[i] = items[i];
+        return this.length;
+      },
+      slice: function(start, end) {
+        const len = this.length;
+        let s = start ?? 0;
+        let e = end ?? len;
+        if (s < 0) s = Math.max(len + s, 0);
+        if (e < 0) e = Math.max(len + e, 0);
+        if (s > len) s = len;
+        if (e > len) e = len;
+        const result = [];
+        for (let i = s; i < e; i++) result[result.length] = this[i];
+        return result;
+      },
+      splice: function(start, deleteCount, ...items) {
+        const len = this.length;
+        let s = start < 0 ? Math.max(len + start, 0) : Math.min(start, len);
+        const dc = deleteCount === void 0 ? len - s : Math.min(Math.max(deleteCount, 0), len - s);
+        const removed = [];
+        for (let i = 0; i < dc; i++) removed[i] = this[s + i];
+        const diff = items.length - dc;
+        if (diff > 0) {
+          for (let i = len - 1; i >= s + dc; i--) this[i + diff] = this[i];
+        } else if (diff < 0) {
+          for (let i = s + dc; i < len; i++) this[i + diff] = this[i];
+          this.length = len + diff;
+        }
+        for (let i = 0; i < items.length; i++) this[s + i] = items[i];
+        return removed;
+      },
+      indexOf: function(item, from) {
+        const start = from ?? 0;
+        for (let i = start; i < this.length; i++) {
+          if (this[i] === item) return i;
+        }
+        return -1;
+      },
+      includes: function(item, from) {
+        const start = from ?? 0;
+        for (let i = start; i < this.length; i++) {
+          if (this[i] === item) return true;
+        }
+        return false;
+      },
+      join: function(sep) {
+        const s = sep !== void 0 ? isJSString(sep) ? jsStringToString(sep) : String(sep) : ",";
+        const parts = [];
+        for (let i = 0; i < this.length; i++) {
+          const v = this[i];
+          parts.push(v === null || v === void 0 ? "" : isJSString(v) ? jsStringToString(v) : String(v));
+        }
+        return internString(parts.join(s));
+      },
+      concat: function(...args) {
+        const result = this.slice();
+        for (const a of args) {
+          if (Array.isArray(a)) {
+            for (const item of a) result.push(item);
+          } else result.push(a);
+        }
+        return result;
+      },
+      reverse: function() {
+        for (let i = 0, j = this.length - 1; i < j; i++, j--) {
+          const tmp = this[i];
+          this[i] = this[j];
+          this[j] = tmp;
+        }
+        return this;
+      },
+      sort: function(fn) {
+        const cmp = fn ? (a, b) => vm.callFunction(fn, void 0, [a, b]) : (a, b) => {
+          const sa = isJSString(a) ? jsStringToString(a) : String(a);
+          const sb = isJSString(b) ? jsStringToString(b) : String(b);
+          return sa < sb ? -1 : sa > sb ? 1 : 0;
+        };
+        for (let i = 1; i < this.length; i++) {
+          const key = this[i];
+          let j = i - 1;
+          while (j >= 0 && cmp(this[j], key) > 0) {
+            this[j + 1] = this[j];
+            j--;
+          }
+          this[j + 1] = key;
+        }
+        return this;
+      },
       map: function(fn) {
         const result = [];
         for (let i = 0; i < this.length; i++) {
@@ -7312,6 +7580,12 @@ var jsmini = (() => {
         }
         return void 0;
       },
+      findIndex: function(fn) {
+        for (let i = 0; i < this.length; i++) {
+          if (vm.callFunction(fn, void 0, [this[i], i, this])) return i;
+        }
+        return -1;
+      },
       some: function(fn) {
         for (let i = 0; i < this.length; i++) {
           if (vm.callFunction(fn, void 0, [this[i], i, this])) return true;
@@ -7323,6 +7597,27 @@ var jsmini = (() => {
           if (!vm.callFunction(fn, void 0, [this[i], i, this])) return false;
         }
         return true;
+      },
+      flat: function(depth) {
+        const d = depth ?? 1;
+        const result = [];
+        const flatten3 = (arr, level) => {
+          for (const item of arr) {
+            if (Array.isArray(item) && level > 0) flatten3(item, level - 1);
+            else result.push(item);
+          }
+        };
+        flatten3(this, d);
+        return result;
+      },
+      fill: function(value2, start, end) {
+        const s = start ?? 0;
+        const e = end ?? this.length;
+        for (let i = s; i < e; i++) this[i] = value2;
+        return this;
+      },
+      toString: function() {
+        return this.join();
       }
     };
     const strArg = (v) => isJSString(v) ? jsStringToString(v) : String(v);
@@ -7399,11 +7694,65 @@ var jsmini = (() => {
     vm.setGlobal("TypeError", TypeError);
     vm.setGlobal("SyntaxError", SyntaxError);
     vm.setGlobal("RangeError", RangeError);
-    vm.setGlobal("Boolean", Boolean);
-    vm.setGlobal("Number", Number);
-    vm.setGlobal("String", String);
-    vm.setGlobal("Array", Array);
-    vm.setGlobal("Function", Function);
+    const ArrayCtor = function(...args) {
+      if (args.length === 1 && typeof args[0] === "number") {
+        return new Array(args[0]);
+      }
+      return [...args];
+    };
+    ArrayCtor.isArray = (v) => Array.isArray(v);
+    ArrayCtor.from = (iterable) => {
+      if (Array.isArray(iterable)) return [...iterable];
+      if (typeof iterable === "object" && iterable !== null && "length" in iterable) {
+        const len = iterable.length;
+        const result = [];
+        for (let i = 0; i < len; i++) result[i] = iterable[i];
+        return result;
+      }
+      return [];
+    };
+    ArrayCtor.of = (...items) => [...items];
+    vm.setGlobal("Array", ArrayCtor);
+    function BooleanCtor(v) {
+      if (new.target) {
+        this.valueOf = () => !!v;
+        return;
+      }
+      return !!v;
+    }
+    BooleanCtor.prototype = {};
+    vm.setGlobal("Boolean", BooleanCtor);
+    function NumberCtor(v) {
+      const n = isJSString(v) ? Number(jsStringToString(v)) : Number(v);
+      if (new.target) {
+        this.valueOf = () => n;
+        return;
+      }
+      return n;
+    }
+    NumberCtor.isNaN = Number.isNaN;
+    NumberCtor.isFinite = Number.isFinite;
+    NumberCtor.isInteger = Number.isInteger;
+    NumberCtor.parseInt = parseInt;
+    NumberCtor.parseFloat = parseFloat;
+    NumberCtor.MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
+    NumberCtor.MIN_SAFE_INTEGER = Number.MIN_SAFE_INTEGER;
+    NumberCtor.prototype = {};
+    vm.setGlobal("Number", NumberCtor);
+    function StringCtor(v) {
+      const s = isJSString(v) ? v : internString(String(v));
+      if (new.target) {
+        this.valueOf = () => s;
+        this.toString = () => s;
+        return;
+      }
+      return s;
+    }
+    StringCtor.fromCharCode = (...codes) => internString(String.fromCharCode(...codes));
+    StringCtor.prototype = {};
+    vm.setGlobal("String", StringCtor);
+    vm.setGlobal("Function", function() {
+    });
     vm.setGlobal("isNaN", (v) => Number.isNaN(Number(v)));
     vm.setGlobal("isFinite", (v) => Number.isFinite(Number(v)));
     vm.setGlobal("parseInt", (s, radix) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
