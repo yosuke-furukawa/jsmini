@@ -817,43 +817,46 @@ class BytecodeCompiler {
       }
 
       case "ForOfStatement": {
-        // 配列を取得してインデックスループ
+        // iterator protocol:
+        //   GetIterator → temp
+        //   loop: IteratorNext → IteratorComplete → break if done → IteratorValue → bind → body
         this.compileExpression(stmt.right);
-        // イテラブルをグローバルの一時変数に格納
+        this.emit("GetIterator");
         const iterName = `__iter_${this.currentOffset()}`;
         const iterIdx = this.addConstant(iterName);
         this.emit("StaGlobal", iterIdx);
         this.emit("Pop");
-        // カウンタ
-        const counterName = `__idx_${this.currentOffset()}`;
-        const counterIdx = this.addConstant(counterName);
-        const zeroIdx = this.addConstant(0);
-        this.emit("LdaConst", zeroIdx);
-        this.emit("StaGlobal", counterIdx);
-        this.emit("Pop");
-        // ループ
+
         const loopStart = this.currentOffset();
-        // i < arr.length
-        this.emit("LdaGlobal", counterIdx);
+        this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
+
+        // IteratorNext: pop iterator, push result
         this.emit("LdaGlobal", iterIdx);
-        this.emitWithIC("GetProperty", this.addConstant("length"));
-        this.emit("LessThan");
-        const exitJump = this.emit("JumpIfFalse", 0);
-        // var/let x = arr[i]
-        this.emit("LdaGlobal", iterIdx);
-        this.emit("LdaGlobal", counterIdx);
-        this.emit("GetPropertyComputed");
+        this.emit("IteratorNext");
+        // stack: [result]
+
+        // IteratorComplete: peek result, push done
+        this.emit("Dup");
+        this.emit("IteratorComplete");
+        // stack: [result, done]
+        const exitJump = this.emit("JumpIfTrue", 0);
+        // stack: [result]
+
+        // IteratorValue: pop result, push value
+        this.emit("IteratorValue");
+        // stack: [value]
+
         this.compileBindingTarget(stmt.left.declarations[0].id);
-        // body
+        // stack: []
+
         this.compileStatement(stmt.body);
-        // i++
-        this.emit("LdaGlobal", counterIdx);
-        this.emit("LdaConst", this.addConstant(1));
-        this.emit("Add");
-        this.emit("StaGlobal", counterIdx);
-        this.emit("Pop");
         this.emit("Jump", loopStart);
+
         this.patch(exitJump, this.currentOffset());
+        this.emit("Pop"); // done=true の result を捨てる
+
+        const loop = this.loopStack.pop()!;
+        for (const bp of loop.breakPatches) this.patch(bp, this.currentOffset());
         break;
       }
 

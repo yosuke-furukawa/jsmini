@@ -365,6 +365,10 @@ const cases: [string, string][] = [
   ["arrow rest param", "var f = (...args) => args.length; f(1, 2, 3, 4);"],
   ["destructuring arrow", "var f = ({a, b}) => a + b; f({a: 1, b: 2});"],
 
+  // iterator protocol
+  ["for-of custom iterator", "var obj = {}; obj[Symbol.iterator] = function() { var i = 0; return { next: function() { i = i + 1; if (i <= 3) return { value: i, done: false }; return { value: undefined, done: true }; } }; }; var s = 0; for (var x of obj) s = s + x; s;"],
+  ["typeof Symbol()", "typeof Symbol();"],
+
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {

@@ -194,6 +194,47 @@ export class VM {
     return Array.from({ length: func.icSlotCount || 0 }, createICSlot);
   }
 
+  // 汎用の関数呼び出し (BytecodeFunction, closure, native function 対応)
+  private callAny(fn: unknown, thisValue: unknown, args: unknown[]): unknown {
+    if (typeof fn === "function") {
+      return (fn as Function).apply(thisValue, args);
+    }
+    if (typeof fn === "object" && fn !== null && "__closure" in (fn as any)) {
+      const closure = fn as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
+      return this.callInternalWithBoxes(closure.func, thisValue, args, closure.capturedBoxes);
+    }
+    if (typeof fn === "object" && fn !== null && "bytecode" in (fn as any)) {
+      return this.callInternal(fn as BytecodeFunction, thisValue, args);
+    }
+    throw new TypeError("Not a function");
+  }
+
+  private callInternalWithBoxes(func: BytecodeFunction, thisValue: unknown, args: unknown[], boxes: UpvalueBox[]): unknown {
+    const locals = new Array(func.localCount).fill(undefined);
+    for (let i = 0; i < args.length && i < func.paramCount; i++) {
+      locals[i] = args[i];
+    }
+    const savedSp = this.sp;
+    const baseFrameCount = this.frames.length;
+    this.frames.push({
+      func, pc: 0, locals, thisValue,
+      icSlots: this.createICSlots(func),
+      upvalueBoxes: boxes,
+    });
+    try {
+      this.run(baseFrameCount);
+    } catch (e: any) {
+      this.sp = savedSp;
+      const throwValue = e?.__thrown ? e.value : e;
+      if (this.unwindToHandler(throwValue)) return THROWN_SENTINEL;
+      throw e;
+    }
+    const hasResult = this.sp > savedSp;
+    const result = hasResult ? this.stack[this.sp] : undefined;
+    this.sp = savedSp;
+    return result;
+  }
+
   // getter/setter 関数を呼び出すヘルパー
   callGetterSetter(fn: unknown, thisValue: unknown, arg: unknown): unknown {
     const isClosure = typeof fn === "object" && fn !== null && (fn as any).__closure;
@@ -828,6 +869,60 @@ export class VM {
         }
 
         // in / instanceof
+        // Iterator protocol
+        case "GetIterator": {
+          const obj = this.pop();
+          if (Array.isArray(obj)) {
+            this.push({ __arrayIter__: true, arr: obj, idx: 0 });
+          } else if (isJSString(obj)) {
+            // 文字列イテレータ: 1文字ずつ返す
+            const str = jsStringToString(obj);
+            const chars = [...str].map(c => internString(c));
+            this.push({ __arrayIter__: true, arr: chars, idx: 0 });
+          } else {
+            // @@iterator を取得
+            const iterFn = isJSObject(obj) ? jsObjGet(obj, "@@iterator") : (obj as any)?.["@@iterator"];
+            if (!iterFn) throw new TypeError("obj is not iterable");
+            const iterator = this.callAny(iterFn, obj, []);
+            if (iterator === THROWN_SENTINEL) break;
+            this.push(iterator);
+          }
+          break;
+        }
+        case "IteratorNext": {
+          const iterator = this.pop();
+          if ((iterator as any)?.__arrayIter__) {
+            const ai = iterator as { arr: unknown[]; idx: number };
+            if (ai.idx < ai.arr.length) {
+              this.push({ value: ai.arr[ai.idx], done: false });
+              ai.idx++;
+            } else {
+              this.push({ value: undefined, done: true });
+            }
+          } else {
+            const nextFn = isJSObject(iterator) ? jsObjGet(iterator, "next") : (iterator as any)?.next;
+            if (!nextFn) throw new TypeError("iterator.next is not a function");
+            const result = this.callAny(nextFn, iterator, []);
+            if (result === THROWN_SENTINEL) break;
+            this.push(result);
+          }
+          break;
+        }
+        case "IteratorComplete": {
+          // pop result, push result.done
+          const result = this.pop();
+          const done = isJSObject(result) ? jsObjGet(result, "done") : (result as any)?.done;
+          this.push(!!done);
+          break;
+        }
+        case "IteratorValue": {
+          // pop result, push result.value
+          const result = this.pop();
+          const value = isJSObject(result) ? jsObjGet(result, "value") : (result as any)?.value;
+          this.push(value);
+          break;
+        }
+
         case "In": {
           const right = this.pop() as Record<string, unknown>;
           const left = this.pop();

@@ -64,6 +64,12 @@ export type Opcode =
   | "In"              // pop right, pop left, push (left in right)
   | "Instanceof"      // pop right, pop left, push (left instanceof right)
 
+  // iterator protocol
+  | "GetIterator"      // pop obj, call obj[@@iterator](), push iterator
+  | "IteratorNext"     // pop iterator, call iterator.next(), push result, push iterator
+  | "IteratorComplete" // pop result, push result.done
+  | "IteratorValue"    // pop result, push result.value
+
   // typeof / throw
   | "TypeOf"          // pop 1つ、typeof 文字列を push
   | "TypeOfGlobal"    // operand=名前index, 未定義なら "undefined" を push (ReferenceError にしない)
