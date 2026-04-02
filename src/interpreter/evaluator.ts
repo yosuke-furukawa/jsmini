@@ -690,6 +690,14 @@ function evalExpression(expr: Expression, env: Environment): unknown {
       }
       return fn;
     }
+    case "ClassExpression": {
+      // ClassExpression は ClassDeclaration と同じロジックだが env.define しない
+      const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: "__anonymous__" } } as any;
+      // evalClassDeclaration は env.define するので、一時 env を使う
+      const tempEnv = new Environment(env);
+      evalClassDeclaration(fakeStmt, tempEnv);
+      return tempEnv.get(fakeStmt.id.name);
+    }
     case "ArrowFunctionExpression": {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,

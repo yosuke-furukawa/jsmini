@@ -857,6 +857,49 @@ class BytecodeCompiler {
         break;
       }
 
+      case "ClassExpression": {
+        // ClassDeclaration と同じコンパイルだが、変数登録せずスタックに残す
+        const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: "__anonymous__" } } as any;
+        // ClassDeclaration のコンパイルは StaGlobal+Pop で終わるので、
+        // ここでは ClassDeclaration の中身を再実装して Pop しない
+        const instanceFields = fakeStmt.body.body.filter((m: any) => m.type === "PropertyDefinition" && !m.static);
+        const ctorMethod = fakeStmt.body.body.find((m: any) => m.type === "MethodDefinition" && m.kind === "constructor");
+        const fnCompiler = new BytecodeCompiler(this);
+        if (ctorMethod) {
+          fnCompiler.compileFunctionBody(ctorMethod.value.params, ctorMethod.value.body.body);
+        } else {
+          fnCompiler.compileFunctionBody([], []);
+        }
+        const ctorFunc = fnCompiler.finish(fakeStmt.id.name);
+        (ctorFunc as any).prototype = {};
+        if (instanceFields.length > 0) (ctorFunc as any).__instanceFields = instanceFields;
+        this.emit("LdaConst", this.addConstant(ctorFunc));
+        // methods
+        for (const member of fakeStmt.body.body) {
+          if (member.type === "PropertyDefinition") continue;
+          if (member.kind === "constructor") continue;
+          const name = member.computed ? null : (member.key.type === "Literal" ? String(member.key.value) : member.key.name);
+          if (member.kind === "method") {
+            this.emit("Dup");
+            if (!member.static) this.emitWithIC("GetProperty", this.addConstant("prototype"));
+            if (member.computed) {
+              this.compileExpression(member.key);
+              const mc = new BytecodeCompiler(this);
+              mc.compileFunctionBody(member.value.params, member.value.body.body);
+              this.emit("LdaConst", this.addConstant(mc.finish("<computed>")));
+              this.emit("SetPropertyComputed");
+            } else {
+              const mc = new BytecodeCompiler(this);
+              mc.compileFunctionBody(member.value.params, member.value.body.body);
+              this.emit("LdaConst", this.addConstant(mc.finish(name!)));
+              this.emitWithIC("SetProperty", this.addConstant(name!));
+            }
+            this.emit("Pop");
+          }
+        }
+        break;
+      }
+
       case "AssignmentExpression": {
         if (expr.left.type === "MemberExpression") {
           if (expr.left.computed) {

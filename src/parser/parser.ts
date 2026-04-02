@@ -170,57 +170,56 @@ export function parse(source: string): Program {
       superClass = parseAssignment();
     }
 
+    const classBody = parseClassBody();
+    return { type: "ClassDeclaration", id, superClass, body: classBody };
+  }
+
+  // ClassBody = '{' ClassElement* '}'
+  function parseClassBody(): any {
     eat("LeftBrace");
     const body: any[] = [];
     while (current().type !== "RightBrace") {
-      // セミコロンをスキップ（空文）
       if (current().type === "Semicolon") { eat("Semicolon"); continue; }
 
-      // static キーワード
       let isStatic = false;
       if (current().type === "Identifier" && current().value === "static" &&
           tokens[pos + 1]?.type !== "LeftParen") {
         isStatic = true;
-        eat("Identifier"); // consume 'static'
+        eat("Identifier");
       }
 
-      // キー: Identifier, PrivateIdentifier, String, Number, or [expr]
       let key: any;
       let computed = false;
       if (current().type === "LeftBracket") {
-        eat("LeftBracket");
-        key = parseAssignment();
-        eat("RightBracket");
-        computed = true;
+        eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
       } else if (current().type === "PrivateIdentifier") {
-        const tok = eat("PrivateIdentifier");
-        key = { type: "PrivateIdentifier", name: tok.value };
+        key = { type: "PrivateIdentifier", name: eat("PrivateIdentifier").value };
       } else if (current().type === "String") {
         key = { type: "Literal", value: eat("String").value };
       } else if (current().type === "Number") {
         key = { type: "Literal", value: Number(eat("Number").value) };
       } else {
-        key = parseIdentifier();
+        key = parsePropertyKey();
       }
 
-      // getter/setter: get name() {} / set name(v) {}
+      // getter/setter
       if ((key.name === "get" || key.name === "set") && !computed &&
           (current().type === "Identifier" || current().type === "PrivateIdentifier" ||
-           current().type === "LeftBracket" || current().type === "String" || current().type === "Number") &&
+           current().type === "LeftBracket" || current().type === "String" || current().type === "Number" ||
+           KEYWORD_TYPES.has(current().type)) &&
           key.type !== "PrivateIdentifier") {
         const kind = key.name as "get" | "set";
         computed = false;
         if (current().type === "LeftBracket") {
           eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
         } else if (current().type === "PrivateIdentifier") {
-          const tok = eat("PrivateIdentifier");
-          key = { type: "PrivateIdentifier", name: tok.value };
+          key = { type: "PrivateIdentifier", name: eat("PrivateIdentifier").value };
         } else if (current().type === "String") {
           key = { type: "Literal", value: eat("String").value };
         } else if (current().type === "Number") {
           key = { type: "Literal", value: Number(eat("Number").value) };
         } else {
-          key = parseIdentifier();
+          key = parsePropertyKey();
         }
         eat("LeftParen");
         resetParamState();
@@ -231,18 +230,11 @@ export function parse(source: string): Program {
         }
         eat("RightParen");
         const mbody = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
-        body.push({
-          type: "MethodDefinition",
-          key,
-          value: { type: "FunctionExpression", id: null, params, body: mbody },
-          kind,
-          computed,
-          static: isStatic,
-        });
+        body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody }, kind, computed, static: isStatic });
         continue;
       }
 
-      // メソッド: name(...) { ... }
+      // メソッド
       if (current().type === "LeftParen") {
         const kind = !computed && key.type !== "PrivateIdentifier" && key.name === "constructor" ? "constructor" : "method";
         eat("LeftParen");
@@ -254,40 +246,18 @@ export function parse(source: string): Program {
         }
         eat("RightParen");
         const mbody = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
-        body.push({
-          type: "MethodDefinition",
-          key,
-          value: { type: "FunctionExpression", id: null, params, body: mbody },
-          kind,
-          computed,
-          static: isStatic,
-        });
+        body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody }, kind, computed, static: isStatic });
         continue;
       }
 
-      // フィールド宣言: name = expr; or name;
+      // フィールド宣言
       let fieldValue: Expression | null = null;
-      if (current().type === "Equals") {
-        eat("Equals");
-        fieldValue = parseAssignment();
-      }
+      if (current().type === "Equals") { eat("Equals"); fieldValue = parseAssignment(); }
       if (current().type === "Semicolon") eat("Semicolon");
-      body.push({
-        type: "PropertyDefinition",
-        key,
-        value: fieldValue,
-        computed,
-        static: isStatic,
-      });
+      body.push({ type: "PropertyDefinition", key, value: fieldValue, computed, static: isStatic });
     }
     eat("RightBrace");
-
-    return {
-      type: "ClassDeclaration",
-      id,
-      superClass,
-      body: { type: "ClassBody", body },
-    };
+    return { type: "ClassBody", body };
   }
 
   // ReturnStatement = 'return' Expression? ';'
@@ -574,6 +544,27 @@ export function parse(source: string): Program {
   function parseIdentifier() {
     const token = eat("Identifier");
     return { type: "Identifier" as const, name: token.value };
+  }
+
+  // プロパティキー位置では予約語も識別子として許可
+  const KEYWORD_TYPES: Set<string> = new Set([
+    "Var", "Let", "Const", "If", "Else", "True", "False", "Null",
+    "While", "For", "Function", "Return", "Break", "Continue",
+    "Typeof", "Throw", "Try", "Catch", "Finally", "New", "This",
+    "Class", "Extends", "Super", "Of", "In", "Instanceof",
+    "Do", "Switch", "Case", "Default",
+  ]);
+
+  function parsePropertyKey(): { type: "Identifier"; name: string } {
+    if (current().type === "Identifier") {
+      return parseIdentifier();
+    }
+    if (KEYWORD_TYPES.has(current().type)) {
+      const token = eat(current().type);
+      return { type: "Identifier", name: token.value };
+    }
+    // fallback: parseIdentifier でエラーを出す
+    return parseIdentifier();
   }
 
   // Expression = Assignment (',' Assignment)*
@@ -929,7 +920,7 @@ export function parse(source: string): Program {
           const tok = eat("PrivateIdentifier");
           property = { type: "PrivateIdentifier", name: tok.value };
         } else {
-          property = parseIdentifier();
+          property = parsePropertyKey();
         }
         expr = { type: "MemberExpression", object: expr, property, computed: false, optional } as any;
       } else if (current().type === "LeftBracket") {
@@ -992,6 +983,8 @@ export function parse(source: string): Program {
         return parseObjectExpression();
       case "LeftBracket":
         return parseArrayExpression();
+      case "Class":
+        return parseClassExpression();
       case "LeftParen": {
         eat("LeftParen");
         const expr = parseExpression();
@@ -1003,6 +996,22 @@ export function parse(source: string): Program {
           `Unexpected token ${token.type} at line ${token.line}, column ${token.column}`
         );
     }
+  }
+
+  // ClassExpression = 'class' Identifier? ('extends' Expression)? '{' ClassElement* '}'
+  function parseClassExpression(): Expression {
+    eat("Class");
+    let id: { type: "Identifier"; name: string } | null = null;
+    if (current().type === "Identifier") {
+      id = parseIdentifier();
+    }
+    let superClass: Expression | null = null;
+    if (current().type === "Extends") {
+      eat("Extends");
+      superClass = parseAssignment();
+    }
+    const classBody = parseClassBody();
+    return { type: "ClassExpression", id, superClass, body: classBody } as any;
   }
 
   // FunctionExpression = 'function' Identifier? '(' params ')' BlockStatement
@@ -1070,11 +1079,11 @@ export function parse(source: string): Program {
         key = parseAssignment();
         eat("RightBracket");
         computed = true;
-      } else if (current().type === "Identifier") {
-        const t = eat("Identifier");
+      } else if (current().type === "Identifier" || KEYWORD_TYPES.has(current().type)) {
+        const t = eat(current().type);
         // getter/setter: get name() {} / set name(v) {}
         if ((t.value === "get" || t.value === "set") &&
-            (current().type === "Identifier" || current().type === "LeftBracket" || current().type === "String" || current().type === "Number")) {
+            (current().type === "Identifier" || KEYWORD_TYPES.has(current().type) || current().type === "LeftBracket" || current().type === "String" || current().type === "Number")) {
           propKind = t.value as "get" | "set";
           if (current().type === "LeftBracket") {
             eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
@@ -1083,7 +1092,8 @@ export function parse(source: string): Program {
           } else if (current().type === "Number") {
             key = { type: "Literal", value: Number(eat("Number").value) };
           } else {
-            key = { type: "Identifier", name: eat("Identifier").value };
+            const kt = eat(current().type);
+            key = { type: "Identifier", name: kt.value };
           }
           eat("LeftParen");
           resetParamState();

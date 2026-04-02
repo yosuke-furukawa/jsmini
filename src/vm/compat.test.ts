@@ -345,6 +345,14 @@ const cases: [string, string][] = [
   ["obj computed key", 'var k = "x"; var o = { [k]: 42 }; o.x;'],
   ["obj computed expr", "var o = { [1+1]: 99 }; o[2];"],
   ["class computed method", 'var m = "foo"; class C { [m]() { return 7; } } var c = new C(); c.foo();'],
+
+  // keyword as property key
+  ["keyword prop key", "var o = { return: 1, class: 2 }; o.return + o.class;"],
+  ["keyword member access", "var o = { if: 10 }; o.if;"],
+
+  // class expression
+  ["class expression", "var C = class { x() { return 42; } }; var c = new C(); c.x();"],
+  ["named class expression", "var C = class Foo { y() { return 99; } }; var c = new C(); c.y();"],
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {
