@@ -95,7 +95,8 @@ export function parse(source: string): Program {
     }
 
     const expression = parseExpression();
-    eat("Semicolon");
+    if (current().type === "Semicolon") eat("Semicolon");
+    // ASI: セミコロンがなくても } や EOF の前なら許容
     return { type: "ExpressionStatement", expression };
   }
 
@@ -132,7 +133,7 @@ export function parse(source: string): Program {
       declarations.push({ type: "VariableDeclarator", id: nextId, init: nextInit });
     }
 
-    eat("Semicolon");
+    if (current().type === "Semicolon") eat("Semicolon"); // ASI
     return {
       type: "VariableDeclaration",
       declarations,
