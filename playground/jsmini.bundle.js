@@ -71,7 +71,12 @@ var jsmini = (() => {
     super: "Super",
     of: "Of",
     in: "In",
-    instanceof: "Instanceof"
+    instanceof: "Instanceof",
+    do: "Do",
+    switch: "Switch",
+    case: "Case",
+    default: "Default",
+    yield: "Yield"
     // undefined は予約語ではないのでキーワードに含めない
   });
   function tokenize(source) {
@@ -128,10 +133,24 @@ var jsmini = (() => {
       if (isDigit(ch)) {
         const start = pos;
         const startCol2 = column;
-        while (pos < source.length && isDigit(peek())) advance();
-        if (peek() === "." && isDigit(peek(1))) {
+        if (ch === "0" && (peek(1) === "x" || peek(1) === "X")) {
           advance();
+          advance();
+          while (pos < source.length && /[0-9a-fA-F]/.test(peek())) advance();
+        } else if (ch === "0" && (peek(1) === "b" || peek(1) === "B")) {
+          advance();
+          advance();
+          while (pos < source.length && (peek() === "0" || peek() === "1")) advance();
+        } else if (ch === "0" && (peek(1) === "o" || peek(1) === "O")) {
+          advance();
+          advance();
+          while (pos < source.length && /[0-7]/.test(peek())) advance();
+        } else {
           while (pos < source.length && isDigit(peek())) advance();
+          if (peek() === "." && isDigit(peek(1))) {
+            advance();
+            while (pos < source.length && isDigit(peek())) advance();
+          }
         }
         pushToken("Number", source.slice(start, pos), startCol2);
         continue;
@@ -179,12 +198,39 @@ var jsmini = (() => {
         scanTemplate(false);
         continue;
       }
-      if (isAlpha(ch)) {
-        const start = pos;
+      if (isAlpha(ch) || ch === "\\" && peek(1) === "u") {
         const startCol2 = column;
-        while (pos < source.length && isAlphaNumeric(peek())) advance();
-        const word = source.slice(start, pos);
+        let word = "";
+        while (pos < source.length) {
+          if (peek() === "\\" && peek(1) === "u") {
+            advance();
+            advance();
+            if (peek() === "{") {
+              advance();
+              let hex = "";
+              while (pos < source.length && peek() !== "}") hex += advance();
+              if (pos < source.length) advance();
+              word += String.fromCodePoint(parseInt(hex, 16));
+            } else {
+              let hex = "";
+              for (let j = 0; j < 4 && pos < source.length; j++) hex += advance();
+              word += String.fromCharCode(parseInt(hex, 16));
+            }
+          } else if (isAlphaNumeric(peek())) {
+            word += advance();
+          } else {
+            break;
+          }
+        }
         pushToken(KEYWORDS[word] ?? "Identifier", word, startCol2);
+        continue;
+      }
+      if (ch === "#" && isAlpha(peek(1))) {
+        const startCol2 = column;
+        advance();
+        const start = pos;
+        while (pos < source.length && isAlphaNumeric(peek())) advance();
+        pushToken("PrivateIdentifier", "#" + source.slice(start, pos), startCol2);
         continue;
       }
       const startCol = column;
@@ -284,10 +330,46 @@ var jsmini = (() => {
         column += 2;
         continue;
       }
+      if (ch === ">" && peek(1) === ">" && peek(2) === ">") {
+        pushToken("UnsignedShiftRight", ">>>", startCol);
+        pos += 3;
+        column += 3;
+        continue;
+      }
+      if (ch === "<" && peek(1) === "<") {
+        pushToken("ShiftLeft", "<<", startCol);
+        pos += 2;
+        column += 2;
+        continue;
+      }
+      if (ch === ">" && peek(1) === ">") {
+        pushToken("ShiftRight", ">>", startCol);
+        pos += 2;
+        column += 2;
+        continue;
+      }
+      if (ch === "*" && peek(1) === "*") {
+        pushToken("StarStar", "**", startCol);
+        pos += 2;
+        column += 2;
+        continue;
+      }
       if (ch === "." && peek(1) === "." && peek(2) === ".") {
         pushToken("DotDotDot", "...", startCol);
         pos += 3;
         column += 3;
+        continue;
+      }
+      if (ch === "?" && peek(1) === ".") {
+        pushToken("QuestionDot", "?.", startCol);
+        pos += 2;
+        column += 2;
+        continue;
+      }
+      if (ch === "?" && peek(1) === "?") {
+        pushToken("QuestionQuestion", "??", startCol);
+        pos += 2;
+        column += 2;
         continue;
       }
       if (ch === "{") {
@@ -317,11 +399,16 @@ var jsmini = (() => {
         "!": "Bang",
         "<": "Less",
         ">": "Greater",
+        "&": "Ampersand",
+        "|": "Pipe",
+        "^": "Caret",
+        "~": "Tilde",
         "(": "LeftParen",
         ")": "RightParen",
         "[": "LeftBracket",
         "]": "RightBracket",
         ":": "Colon",
+        "?": "Question",
         ".": "Dot",
         ",": "Comma",
         ";": "Semicolon"
@@ -472,20 +559,30 @@ var jsmini = (() => {
       if (current().type === "Try") return parseTryStatement();
       if (current().type === "Break") {
         eat("Break");
+        const label = current().type === "Identifier" ? eat("Identifier").value : null;
         if (current().type === "Semicolon") eat("Semicolon");
-        return { type: "BreakStatement", label: null };
+        return { type: "BreakStatement", label };
       }
       if (current().type === "Continue") {
         eat("Continue");
+        const label = current().type === "Identifier" ? eat("Identifier").value : null;
         if (current().type === "Semicolon") eat("Semicolon");
-        return { type: "ContinueStatement", label: null };
+        return { type: "ContinueStatement", label };
       }
       if (current().type === "If") return parseIfStatement();
       if (current().type === "While") return parseWhileStatement();
+      if (current().type === "Do") return parseDoWhileStatement();
       if (current().type === "For") return parseForStatement();
+      if (current().type === "Switch") return parseSwitchStatement();
       if (current().type === "LeftBrace") return parseBlockStatement();
+      if (current().type === "Identifier" && tokens[pos + 1]?.type === "Colon") {
+        const label = eat("Identifier").value;
+        eat("Colon");
+        const body = parseStatement();
+        return { type: "LabeledStatement", label, body };
+      }
       const expression = parseExpression();
-      eat("Semicolon");
+      if (current().type === "Semicolon") eat("Semicolon");
       return { type: "ExpressionStatement", expression };
     }
     function parseVariableDeclaration() {
@@ -515,7 +612,7 @@ var jsmini = (() => {
         }
         declarations.push({ type: "VariableDeclarator", id: nextId2, init: nextInit });
       }
-      eat("Semicolon");
+      if (current().type === "Semicolon") eat("Semicolon");
       return {
         type: "VariableDeclaration",
         declarations,
@@ -524,6 +621,8 @@ var jsmini = (() => {
     }
     function parseFunctionDeclaration() {
       eat("Function");
+      const generator = current().type === "Star";
+      if (generator) eat("Star");
       const id2 = parseIdentifier();
       eat("LeftParen");
       resetParamState();
@@ -537,7 +636,7 @@ var jsmini = (() => {
       }
       eat("RightParen");
       const body = parseBlockStatement();
-      return { type: "FunctionDeclaration", id: id2, params, body };
+      return { type: "FunctionDeclaration", id: id2, params, body, generator };
     }
     function parseClassDeclaration() {
       eat("Class");
@@ -547,38 +646,97 @@ var jsmini = (() => {
         eat("Extends");
         superClass = parseAssignment();
       }
+      const classBody = parseClassBody();
+      return { type: "ClassDeclaration", id: id2, superClass, body: classBody };
+    }
+    function parseClassBody() {
       eat("LeftBrace");
-      const methods = [];
+      const body = [];
       while (current().type !== "RightBrace") {
-        const key = parseIdentifier();
-        eat("LeftParen");
-        resetParamState();
-        const params = [];
-        if (current().type !== "RightParen") {
-          params.push(parseParam());
-          while (current().type === "Comma") {
-            eat("Comma");
-            params.push(parseParam());
-          }
+        if (current().type === "Semicolon") {
+          eat("Semicolon");
+          continue;
         }
-        eat("RightParen");
-        const body = parseBlockStatement();
-        const kind = key.name === "constructor" ? "constructor" : "method";
-        methods.push({
-          type: "MethodDefinition",
-          key,
-          value: { type: "FunctionExpression", id: null, params, body },
-          kind,
-          static: false
-        });
+        let isStatic = false;
+        if (current().type === "Identifier" && current().value === "static" && tokens[pos + 1]?.type !== "LeftParen") {
+          isStatic = true;
+          eat("Identifier");
+        }
+        let key;
+        let computed = false;
+        if (current().type === "LeftBracket") {
+          eat("LeftBracket");
+          key = parseAssignment();
+          eat("RightBracket");
+          computed = true;
+        } else if (current().type === "PrivateIdentifier") {
+          key = { type: "PrivateIdentifier", name: eat("PrivateIdentifier").value };
+        } else if (current().type === "String") {
+          key = { type: "Literal", value: eat("String").value };
+        } else if (current().type === "Number") {
+          key = { type: "Literal", value: Number(eat("Number").value) };
+        } else {
+          key = parsePropertyKey();
+        }
+        if ((key.name === "get" || key.name === "set") && !computed && (current().type === "Identifier" || current().type === "PrivateIdentifier" || current().type === "LeftBracket" || current().type === "String" || current().type === "Number" || KEYWORD_TYPES.has(current().type)) && key.type !== "PrivateIdentifier") {
+          const kind = key.name;
+          computed = false;
+          if (current().type === "LeftBracket") {
+            eat("LeftBracket");
+            key = parseAssignment();
+            eat("RightBracket");
+            computed = true;
+          } else if (current().type === "PrivateIdentifier") {
+            key = { type: "PrivateIdentifier", name: eat("PrivateIdentifier").value };
+          } else if (current().type === "String") {
+            key = { type: "Literal", value: eat("String").value };
+          } else if (current().type === "Number") {
+            key = { type: "Literal", value: Number(eat("Number").value) };
+          } else {
+            key = parsePropertyKey();
+          }
+          eat("LeftParen");
+          resetParamState();
+          const params = [];
+          if (current().type !== "RightParen") {
+            params.push(parseParam());
+            while (current().type === "Comma") {
+              eat("Comma");
+              params.push(parseParam());
+            }
+          }
+          eat("RightParen");
+          const mbody = parseBlockStatement();
+          body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody }, kind, computed, static: isStatic });
+          continue;
+        }
+        if (current().type === "LeftParen") {
+          const kind = !computed && key.type !== "PrivateIdentifier" && key.name === "constructor" ? "constructor" : "method";
+          eat("LeftParen");
+          resetParamState();
+          const params = [];
+          if (current().type !== "RightParen") {
+            params.push(parseParam());
+            while (current().type === "Comma") {
+              eat("Comma");
+              params.push(parseParam());
+            }
+          }
+          eat("RightParen");
+          const mbody = parseBlockStatement();
+          body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody }, kind, computed, static: isStatic });
+          continue;
+        }
+        let fieldValue = null;
+        if (current().type === "Equals") {
+          eat("Equals");
+          fieldValue = parseAssignment();
+        }
+        if (current().type === "Semicolon") eat("Semicolon");
+        body.push({ type: "PropertyDefinition", key, value: fieldValue, computed, static: isStatic });
       }
       eat("RightBrace");
-      return {
-        type: "ClassDeclaration",
-        id: id2,
-        superClass,
-        body: { type: "ClassBody", body: methods }
-      };
+      return { type: "ClassBody", body };
     }
     function parseReturnStatement() {
       eat("Return");
@@ -638,6 +796,16 @@ var jsmini = (() => {
       const body = parseStatement();
       return { type: "WhileStatement", test, body };
     }
+    function parseDoWhileStatement() {
+      eat("Do");
+      const body = parseStatement();
+      eat("While");
+      eat("LeftParen");
+      const test = parseExpression();
+      eat("RightParen");
+      if (current().type === "Semicolon") eat("Semicolon");
+      return { type: "DoWhileStatement", test, body };
+    }
     function parseForStatement() {
       eat("For");
       eat("LeftParen");
@@ -645,6 +813,18 @@ var jsmini = (() => {
         const kindToken = eat(current().type);
         const kind = kindToken.value;
         const id2 = parseBindingPattern();
+        if (current().type === "In") {
+          eat("In");
+          const right = parseExpression();
+          eat("RightParen");
+          const body3 = parseStatement();
+          const left = {
+            type: "VariableDeclaration",
+            declarations: [{ type: "VariableDeclarator", id: id2, init: null }],
+            kind
+          };
+          return { type: "ForInStatement", left, right, body: body3 };
+        }
         if (current().type === "Of") {
           eat("Of");
           const right = parseExpression();
@@ -715,6 +895,31 @@ var jsmini = (() => {
       eat("RightBrace");
       return { type: "BlockStatement", body };
     }
+    function parseSwitchStatement() {
+      eat("Switch");
+      eat("LeftParen");
+      const discriminant = parseExpression();
+      eat("RightParen");
+      eat("LeftBrace");
+      const cases = [];
+      while (current().type !== "RightBrace") {
+        let test = null;
+        if (current().type === "Case") {
+          eat("Case");
+          test = parseExpression();
+        } else {
+          eat("Default");
+        }
+        eat("Colon");
+        const consequent = [];
+        while (current().type !== "Case" && current().type !== "Default" && current().type !== "RightBrace") {
+          consequent.push(parseStatementOrDeclaration());
+        }
+        cases.push({ type: "SwitchCase", test, consequent });
+      }
+      eat("RightBrace");
+      return { type: "SwitchStatement", discriminant, cases };
+    }
     let _lastParamWasRest = false;
     function parseParam() {
       if (_lastParamWasRest) {
@@ -725,7 +930,13 @@ var jsmini = (() => {
         _lastParamWasRest = true;
         return { type: "RestElement", argument: parseIdentifier() };
       }
-      return parseBindingPattern();
+      const pattern = parseBindingPattern();
+      if (current().type === "Equals") {
+        eat("Equals");
+        const right = parseAssignment();
+        return { type: "AssignmentPattern", left: pattern, right };
+      }
+      return pattern;
     }
     function resetParamState() {
       _lastParamWasRest = false;
@@ -739,6 +950,12 @@ var jsmini = (() => {
       eat("LeftBrace");
       const properties = [];
       while (current().type !== "RightBrace") {
+        if (current().type === "DotDotDot") {
+          eat("DotDotDot");
+          properties.push({ type: "RestElement", argument: parseBindingPattern() });
+          if (current().type === "Comma") eat("Comma");
+          break;
+        }
         const key = parseIdentifier();
         let value;
         if (current().type === "Colon") {
@@ -746,6 +963,11 @@ var jsmini = (() => {
           value = parseBindingPattern();
         } else {
           value = { type: "Identifier", name: key.name };
+        }
+        if (current().type === "Equals") {
+          eat("Equals");
+          const defaultValue = parseAssignment();
+          value = { type: "AssignmentPattern", left: value, right: defaultValue };
         }
         properties.push({ type: "Property", key, value, kind: "init" });
         if (current().type === "Comma") eat("Comma");
@@ -757,7 +979,23 @@ var jsmini = (() => {
       eat("LeftBracket");
       const elements = [];
       while (current().type !== "RightBracket") {
-        elements.push(parseBindingPattern());
+        if (current().type === "Comma") {
+          eat("Comma");
+          elements.push(null);
+          continue;
+        }
+        if (current().type === "DotDotDot") {
+          eat("DotDotDot");
+          elements.push({ type: "RestElement", argument: parseBindingPattern() });
+          break;
+        }
+        let elem = parseBindingPattern();
+        if (current().type === "Equals") {
+          eat("Equals");
+          const defaultValue = parseAssignment();
+          elem = { type: "AssignmentPattern", left: elem, right: defaultValue };
+        }
+        elements.push(elem);
         if (current().type === "Comma") eat("Comma");
       }
       eat("RightBracket");
@@ -766,6 +1004,50 @@ var jsmini = (() => {
     function parseIdentifier() {
       const token = eat("Identifier");
       return { type: "Identifier", name: token.value };
+    }
+    const KEYWORD_TYPES = /* @__PURE__ */ new Set([
+      "Var",
+      "Let",
+      "Const",
+      "If",
+      "Else",
+      "True",
+      "False",
+      "Null",
+      "While",
+      "For",
+      "Function",
+      "Return",
+      "Break",
+      "Continue",
+      "Typeof",
+      "Throw",
+      "Try",
+      "Catch",
+      "Finally",
+      "New",
+      "This",
+      "Class",
+      "Extends",
+      "Super",
+      "Of",
+      "In",
+      "Instanceof",
+      "Do",
+      "Switch",
+      "Case",
+      "Default",
+      "Yield"
+    ]);
+    function parsePropertyKey() {
+      if (current().type === "Identifier") {
+        return parseIdentifier();
+      }
+      if (KEYWORD_TYPES.has(current().type)) {
+        const token = eat(current().type);
+        return { type: "Identifier", name: token.value };
+      }
+      return parseIdentifier();
     }
     function parseExpression() {
       let expr = parseAssignment();
@@ -780,6 +1062,16 @@ var jsmini = (() => {
       return expr;
     }
     function parseAssignment() {
+      if (current().type === "Yield") {
+        eat("Yield");
+        const delegate = current().type === "Star";
+        if (delegate) eat("Star");
+        let argument = null;
+        if (current().type !== "Semicolon" && current().type !== "RightParen" && current().type !== "RightBracket" && current().type !== "RightBrace" && current().type !== "Comma" && current().type !== "Colon" && current().type !== "EOF") {
+          argument = parseAssignment();
+        }
+        return { type: "YieldExpression", argument, delegate };
+      }
       if (current().type === "Identifier" && tokens[pos + 1]?.type === "Arrow") {
         const param = parseIdentifier();
         eat("Arrow");
@@ -790,7 +1082,14 @@ var jsmini = (() => {
         eat("Arrow");
         return parseArrowBody(params);
       }
-      const left = parseLogicalOr();
+      let left = parseLogicalOr();
+      if (current().type === "Question") {
+        eat("Question");
+        const consequent = parseAssignment();
+        eat("Colon");
+        const alternate = parseAssignment();
+        left = { type: "ConditionalExpression", test: left, consequent, alternate };
+      }
       const assignOps = ["Equals", "PlusEquals", "MinusEquals", "StarEquals", "SlashEquals", "PercentEquals"];
       if (assignOps.includes(current().type)) {
         const opToken = eat(current().type);
@@ -811,46 +1110,46 @@ var jsmini = (() => {
       }
       return left;
     }
+    function exprToPattern(expr) {
+      if (!expr) return null;
+      if (expr.type === "Identifier") return expr;
+      if (expr.type === "MemberExpression") return expr;
+      if (expr.type === "ObjectExpression") return exprToObjectPattern(expr);
+      if (expr.type === "ArrayExpression") return exprToArrayPattern(expr);
+      if (expr.type === "AssignmentExpression" && expr.operator === "=") {
+        return { type: "AssignmentPattern", left: exprToPattern(expr.left), right: expr.right };
+      }
+      if (expr.type === "SpreadElement") {
+        return { type: "RestElement", argument: exprToPattern(expr.argument) };
+      }
+      throw new SyntaxError("Invalid destructuring assignment target");
+    }
     function exprToObjectPattern(expr) {
       const properties = expr.properties.map((prop) => {
-        let value;
-        if (prop.value.type === "Identifier") {
-          value = prop.value;
-        } else if (prop.value.type === "ObjectExpression") {
-          value = exprToObjectPattern(prop.value);
-        } else if (prop.value.type === "ArrayExpression") {
-          value = exprToArrayPattern(prop.value);
-        } else {
-          throw new SyntaxError("Invalid destructuring assignment target");
+        if (prop.type === "SpreadElement") {
+          return { type: "RestElement", argument: exprToPattern(prop.argument) };
         }
+        const value = exprToPattern(prop.value);
         return { type: "Property", key: prop.key, value, kind: "init" };
       });
       return { type: "ObjectPattern", properties };
     }
     function exprToArrayPattern(expr) {
-      const elements = expr.elements.map((el) => {
-        if (!el) return null;
-        if (el.type === "Identifier") return el;
-        if (el.type === "ObjectExpression") return exprToObjectPattern(el);
-        if (el.type === "ArrayExpression") return exprToArrayPattern(el);
-        throw new SyntaxError("Invalid destructuring assignment target");
-      });
+      const elements = expr.elements.map((el) => exprToPattern(el));
       return { type: "ArrayPattern", elements };
     }
     function isArrowParams() {
       let i = pos + 1;
       if (tokens[i]?.type === "RightParen" && tokens[i + 1]?.type === "Arrow") return true;
-      while (i < tokens.length) {
-        if (tokens[i]?.type !== "Identifier") return false;
-        i++;
-        if (tokens[i]?.type === "RightParen") {
+      let depth = 1;
+      while (i < tokens.length && depth > 0) {
+        const t2 = tokens[i]?.type;
+        if (t2 === "LeftParen" || t2 === "LeftBracket" || t2 === "LeftBrace") depth++;
+        else if (t2 === "RightParen" || t2 === "RightBracket" || t2 === "RightBrace") depth--;
+        if (depth === 0) {
           return tokens[i + 1]?.type === "Arrow";
         }
-        if (tokens[i]?.type === "Comma") {
-          i++;
-          continue;
-        }
-        return false;
+        i++;
       }
       return false;
     }
@@ -878,19 +1177,46 @@ var jsmini = (() => {
     }
     function parseLogicalOr() {
       let left = parseLogicalAnd();
-      while (current().type === "PipePipe") {
-        const operator2 = eat("PipePipe").value;
+      while (current().type === "PipePipe" || current().type === "QuestionQuestion") {
+        const operator2 = eat(current().type).value;
         const right = parseLogicalAnd();
         left = { type: "LogicalExpression", operator: operator2, left, right };
       }
       return left;
     }
     function parseLogicalAnd() {
-      let left = parseEquality();
+      let left = parseBitwiseOr();
       while (current().type === "AmpersandAmpersand") {
         const operator2 = eat("AmpersandAmpersand").value;
-        const right = parseEquality();
+        const right = parseBitwiseOr();
         left = { type: "LogicalExpression", operator: operator2, left, right };
+      }
+      return left;
+    }
+    function parseBitwiseOr() {
+      let left = parseBitwiseXor();
+      while (current().type === "Pipe") {
+        eat("Pipe");
+        const right = parseBitwiseXor();
+        left = { type: "BinaryExpression", operator: "|", left, right };
+      }
+      return left;
+    }
+    function parseBitwiseXor() {
+      let left = parseBitwiseAnd();
+      while (current().type === "Caret") {
+        eat("Caret");
+        const right = parseBitwiseAnd();
+        left = { type: "BinaryExpression", operator: "^", left, right };
+      }
+      return left;
+    }
+    function parseBitwiseAnd() {
+      let left = parseEquality();
+      while (current().type === "Ampersand") {
+        eat("Ampersand");
+        const right = parseEquality();
+        left = { type: "BinaryExpression", operator: "&", left, right };
       }
       return left;
     }
@@ -904,8 +1230,17 @@ var jsmini = (() => {
       return left;
     }
     function parseComparison() {
-      let left = parseAdditive();
+      let left = parseShift();
       while (current().type === "Less" || current().type === "Greater" || current().type === "LessEqual" || current().type === "GreaterEqual" || current().type === "In" || current().type === "Instanceof") {
+        const operator2 = eat(current().type).value;
+        const right = parseShift();
+        left = { type: "BinaryExpression", operator: operator2, left, right };
+      }
+      return left;
+    }
+    function parseShift() {
+      let left = parseAdditive();
+      while (current().type === "ShiftLeft" || current().type === "ShiftRight" || current().type === "UnsignedShiftRight") {
         const operator2 = eat(current().type).value;
         const right = parseAdditive();
         left = { type: "BinaryExpression", operator: operator2, left, right };
@@ -922,17 +1257,26 @@ var jsmini = (() => {
       return left;
     }
     function parseMultiplicative() {
-      let left = parseUnary();
+      let left = parseExponent();
       while (current().type === "Star" || current().type === "Slash" || current().type === "Percent") {
         const operator2 = eat(current().type).value;
-        const right = parseUnary();
+        const right = parseExponent();
         left = { type: "BinaryExpression", operator: operator2, left, right };
       }
       return left;
     }
+    function parseExponent() {
+      const left = parseUnary();
+      if (current().type === "StarStar") {
+        eat("StarStar");
+        const right = parseExponent();
+        return { type: "BinaryExpression", operator: "**", left, right };
+      }
+      return left;
+    }
     function parseUnary() {
-      if (current().type === "Bang") {
-        const operator2 = eat("Bang").value;
+      if (current().type === "Bang" || current().type === "Tilde") {
+        const operator2 = eat(current().type).value;
         const argument = parseUnary();
         return { type: "UnaryExpression", operator: operator2, prefix: true, argument };
       }
@@ -993,10 +1337,17 @@ var jsmini = (() => {
           const args = parseArguments();
           eat("RightParen");
           expr = { type: "CallExpression", callee: expr, arguments: args };
-        } else if (current().type === "Dot") {
-          eat("Dot");
-          const property = parseIdentifier();
-          expr = { type: "MemberExpression", object: expr, property, computed: false };
+        } else if (current().type === "Dot" || current().type === "QuestionDot") {
+          const optional = current().type === "QuestionDot";
+          eat(current().type);
+          let property;
+          if (current().type === "PrivateIdentifier") {
+            const tok = eat("PrivateIdentifier");
+            property = { type: "PrivateIdentifier", name: tok.value };
+          } else {
+            property = parsePropertyKey();
+          }
+          expr = { type: "MemberExpression", object: expr, property, computed: false, optional };
         } else if (current().type === "LeftBracket") {
           eat("LeftBracket");
           const property = parseExpression();
@@ -1054,6 +1405,8 @@ var jsmini = (() => {
           return parseObjectExpression();
         case "LeftBracket":
           return parseArrayExpression();
+        case "Class":
+          return parseClassExpression();
         case "LeftParen": {
           eat("LeftParen");
           const expr = parseExpression();
@@ -1066,8 +1419,24 @@ var jsmini = (() => {
           );
       }
     }
+    function parseClassExpression() {
+      eat("Class");
+      let id2 = null;
+      if (current().type === "Identifier") {
+        id2 = parseIdentifier();
+      }
+      let superClass = null;
+      if (current().type === "Extends") {
+        eat("Extends");
+        superClass = parseAssignment();
+      }
+      const classBody = parseClassBody();
+      return { type: "ClassExpression", id: id2, superClass, body: classBody };
+    }
     function parseFunctionExpression() {
       eat("Function");
+      const generator = current().type === "Star";
+      if (generator) eat("Star");
       let id2 = null;
       if (current().type === "Identifier") {
         id2 = parseIdentifier();
@@ -1084,7 +1453,7 @@ var jsmini = (() => {
       }
       eat("RightParen");
       const body = parseBlockStatement();
-      return { type: "FunctionExpression", id: id2, params, body };
+      return { type: "FunctionExpression", id: id2, params, body, generator };
     }
     function parseTemplateLiteral() {
       const quasis = [];
@@ -1112,22 +1481,73 @@ var jsmini = (() => {
           continue;
         }
         let key;
-        if (current().type === "Identifier") {
-          const t2 = eat("Identifier");
+        let propKind = "init";
+        let computed = false;
+        if (current().type === "LeftBracket") {
+          eat("LeftBracket");
+          key = parseAssignment();
+          eat("RightBracket");
+          computed = true;
+        } else if (current().type === "Identifier" || KEYWORD_TYPES.has(current().type)) {
+          const t2 = eat(current().type);
+          if ((t2.value === "get" || t2.value === "set") && (current().type === "Identifier" || KEYWORD_TYPES.has(current().type) || current().type === "LeftBracket" || current().type === "String" || current().type === "Number")) {
+            propKind = t2.value;
+            if (current().type === "LeftBracket") {
+              eat("LeftBracket");
+              key = parseAssignment();
+              eat("RightBracket");
+              computed = true;
+            } else if (current().type === "String") {
+              key = { type: "Literal", value: eat("String").value };
+            } else if (current().type === "Number") {
+              key = { type: "Literal", value: Number(eat("Number").value) };
+            } else {
+              const kt = eat(current().type);
+              key = { type: "Identifier", name: kt.value };
+            }
+            eat("LeftParen");
+            resetParamState();
+            const params = [];
+            if (current().type !== "RightParen") {
+              params.push(parseParam());
+              while (current().type === "Comma") {
+                eat("Comma");
+                params.push(parseParam());
+              }
+            }
+            eat("RightParen");
+            const body = parseBlockStatement();
+            const value2 = { type: "FunctionExpression", id: null, params, body };
+            properties.push({ type: "Property", key, value: value2, kind: propKind, computed });
+            if (current().type === "Comma") eat("Comma");
+            continue;
+          }
           key = { type: "Identifier", name: t2.value };
         } else if (current().type === "String") {
-          const t2 = eat("String");
-          key = { type: "Literal", value: t2.value };
+          key = { type: "Literal", value: eat("String").value };
         } else if (current().type === "Number") {
-          const t2 = eat("Number");
-          key = { type: "Literal", value: Number(t2.value) };
+          key = { type: "Literal", value: Number(eat("Number").value) };
         } else {
           throw new SyntaxError(
             `Unexpected token ${current().type} as object key at line ${current().line}, column ${current().column}`
           );
         }
         let value;
-        if (current().type === "Colon") {
+        if (current().type === "LeftParen") {
+          eat("LeftParen");
+          resetParamState();
+          const params = [];
+          if (current().type !== "RightParen") {
+            params.push(parseParam());
+            while (current().type === "Comma") {
+              eat("Comma");
+              params.push(parseParam());
+            }
+          }
+          eat("RightParen");
+          const body = parseBlockStatement();
+          value = { type: "FunctionExpression", id: null, params, body };
+        } else if (current().type === "Colon") {
           eat("Colon");
           value = parseAssignment();
         } else {
@@ -1136,7 +1556,7 @@ var jsmini = (() => {
           }
           value = { type: "Identifier", name: key.name };
         }
-        properties.push({ type: "Property", key, value, kind: "init" });
+        properties.push({ type: "Property", key, value, kind: propKind, computed });
         if (current().type === "Comma") {
           eat("Comma");
         }
@@ -1293,8 +1713,16 @@ var jsmini = (() => {
     }
   };
   var BreakSignal = class {
+    constructor(label = null) {
+      __publicField(this, "label");
+      this.label = label;
+    }
   };
   var ContinueSignal = class {
+    constructor(label = null) {
+      __publicField(this, "label");
+      this.label = label;
+    }
   };
   var JS_FUNCTION_BRAND = /* @__PURE__ */ Symbol("JSFunction");
   var PROTO_KEY = "__proto__";
@@ -1313,10 +1741,13 @@ var jsmini = (() => {
   }
   function collectBoundNames(pattern) {
     if (pattern.type === "Identifier") return [pattern.name];
+    if (pattern.type === "RestElement") return collectBoundNames(pattern.argument);
+    if (pattern.type === "AssignmentPattern") return collectBoundNames(pattern.left);
     if (pattern.type === "ObjectPattern") {
       const names = [];
       for (const prop of pattern.properties) {
-        names.push(...collectBoundNames(prop.value));
+        if (prop.type === "RestElement") names.push(...collectBoundNames(prop.argument));
+        else names.push(...collectBoundNames(prop.value));
       }
       return names;
     }
@@ -1329,7 +1760,7 @@ var jsmini = (() => {
     }
     return [];
   }
-  function bindPattern(pattern, value, env, kind) {
+  function bindPattern(pattern, value, env, kind, defaultResolver) {
     if (pattern.type === "Identifier") {
       if (kind === "const") {
         env.defineConst(pattern.name, value);
@@ -1341,17 +1772,36 @@ var jsmini = (() => {
       }
     } else if (pattern.type === "ObjectPattern") {
       const obj = value;
+      const boundKeys = [];
       for (const prop of pattern.properties) {
-        const propValue = obj ? getProperty(obj, prop.key.name) : void 0;
-        bindPattern(prop.value, propValue, env, kind);
+        if (prop.type === "RestElement") {
+          const rest = {};
+          if (obj) {
+            for (const k of Object.keys(obj)) {
+              if (!boundKeys.includes(k) && k !== "__proto__") rest[k] = obj[k];
+            }
+          }
+          bindPattern(prop.argument, rest, env, kind, defaultResolver);
+        } else {
+          boundKeys.push(prop.key.name);
+          const propValue = obj ? getProperty(obj, prop.key.name) : void 0;
+          bindPattern(prop.value, propValue, env, kind, defaultResolver);
+        }
       }
     } else if (pattern.type === "ArrayPattern") {
       const arr = value;
       for (let i = 0; i < pattern.elements.length; i++) {
-        if (pattern.elements[i]) {
-          bindPattern(pattern.elements[i], arr?.[i], env, kind);
+        const el = pattern.elements[i];
+        if (!el) continue;
+        if (el.type === "RestElement") {
+          bindPattern(el.argument, arr?.slice(i) ?? [], env, kind, defaultResolver);
+          break;
         }
+        bindPattern(el, arr?.[i], env, kind, defaultResolver);
       }
+    } else if (pattern.type === "AssignmentPattern") {
+      const val = value === void 0 && defaultResolver ? defaultResolver(pattern.right) : value;
+      bindPattern(pattern.left, val, env, kind, defaultResolver);
     }
   }
   function assignPattern(pattern, value, env) {
@@ -1359,16 +1809,32 @@ var jsmini = (() => {
       env.set(pattern.name, value);
     } else if (pattern.type === "ObjectPattern") {
       const obj = value;
+      const boundKeys = [];
       for (const prop of pattern.properties) {
-        const propValue = obj ? getProperty(obj, prop.key.name) : void 0;
-        assignPattern(prop.value, propValue, env);
+        if (prop.type === "RestElement") {
+          const rest = {};
+          if (obj) {
+            for (const k of Object.keys(obj)) {
+              if (!boundKeys.includes(k) && k !== "__proto__") rest[k] = obj[k];
+            }
+          }
+          assignPattern(prop.argument, rest, env);
+        } else {
+          boundKeys.push(prop.key.name);
+          const propValue = obj ? getProperty(obj, prop.key.name) : void 0;
+          assignPattern(prop.value, propValue, env);
+        }
       }
     } else if (pattern.type === "ArrayPattern") {
       const arr = value;
       for (let i = 0; i < pattern.elements.length; i++) {
-        if (pattern.elements[i]) {
-          assignPattern(pattern.elements[i], arr?.[i], env);
+        const el = pattern.elements[i];
+        if (!el) continue;
+        if (el.type === "RestElement") {
+          assignPattern(el.argument, arr?.slice(i) ?? [], env);
+          break;
         }
+        assignPattern(el, arr?.[i], env);
       }
     }
   }
@@ -1472,10 +1938,29 @@ var jsmini = (() => {
     return jsStr;
   }
 
+  // src/vm/js-symbol.ts
+  var symbolCounter = 0;
+  function createSymbol(description) {
+    const id2 = symbolCounter++;
+    return { __symbol__: true, id: id2, description, key: `@@symbol_${id2}_${description}` };
+  }
+  function isJSSymbol(val) {
+    return typeof val === "object" && val !== null && val.__symbol__ === true;
+  }
+  var SYMBOL_ITERATOR = { __symbol__: true, id: -1, description: "Symbol.iterator", key: "@@iterator" };
+  var SYMBOL_TO_PRIMITIVE = { __symbol__: true, id: -2, description: "Symbol.toPrimitive", key: "@@toPrimitive" };
+  var SYMBOL_HAS_INSTANCE = { __symbol__: true, id: -3, description: "Symbol.hasInstance", key: "@@hasInstance" };
+  var SYMBOL_TO_STRING_TAG = { __symbol__: true, id: -4, description: "Symbol.toStringTag", key: "@@toStringTag" };
+
   // src/interpreter/evaluator.ts
   function isTruthy(value) {
     if (isJSString(value)) return value.length > 0;
     return !!value;
+  }
+  function exhaustGen(gen) {
+    let r = gen.next();
+    while (!r.done) r = gen.next(void 0);
+    return r.value;
   }
   function toPrimitive(value, hint = "number") {
     if (value === null || value === void 0) return value;
@@ -1498,7 +1983,7 @@ var jsmini = (() => {
         fnEnv.setThis(obj);
         hoistVarDeclarations(jsFn.body.body, fnEnv);
         try {
-          for (const s of jsFn.body.body) evalStatement(s, fnEnv);
+          for (const s of jsFn.body.body) exhaustGen(evalStatement(s, fnEnv));
         } catch (e) {
           if (e instanceof ReturnSignal) {
             const r = e.value;
@@ -1511,10 +1996,10 @@ var jsmini = (() => {
     }
     throw new TypeError("Cannot convert object to primitive value");
   }
-  function resolveMemberKey(expr, env) {
+  function* resolveMemberKey(expr, env) {
     if (expr.computed) {
-      const key = evalExpression(expr.property, env);
-      return isJSString(key) ? jsStringToString(key) : String(key);
+      const key = yield* evalExpression(expr.property, env);
+      return isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
     }
     return expr.property.name;
   }
@@ -1530,6 +2015,11 @@ var jsmini = (() => {
     env.defineReadOnly("TypeError", TypeError);
     env.defineReadOnly("SyntaxError", SyntaxError);
     env.defineReadOnly("RangeError", RangeError);
+    env.defineReadOnly("Boolean", Boolean);
+    env.defineReadOnly("Number", Number);
+    env.defineReadOnly("String", String);
+    env.defineReadOnly("Array", Array);
+    env.defineReadOnly("Function", Function);
     env.defineReadOnly("isNaN", (v) => Number.isNaN(Number(v)));
     env.defineReadOnly("isFinite", (v) => Number.isFinite(Number(v)));
     env.defineReadOnly("parseInt", (s, radix) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
@@ -1551,29 +2041,31 @@ var jsmini = (() => {
       trunc: Math.trunc
     });
     const strArg = (v) => isJSString(v) ? jsStringToString(v) : String(v);
-    env.defineReadOnly("Object", {
-      keys: (obj) => {
-        if (typeof obj === "object" && obj !== null) {
-          return Object.keys(obj).filter((k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol("));
-        }
-        return [];
-      },
-      values: (obj) => {
-        if (typeof obj === "object" && obj !== null) {
-          return Object.keys(obj).filter((k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map((k) => obj[k]);
-        }
-        return [];
-      },
-      entries: (obj) => {
-        if (typeof obj === "object" && obj !== null) {
-          return Object.keys(obj).filter((k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map((k) => [k, obj[k]]);
-        }
-        return [];
-      },
-      assign: Object.assign,
-      create: Object.create,
-      freeze: (obj) => obj
-    });
+    const twObjectWrapper = function(...args) {
+      return new Object(...args);
+    };
+    twObjectWrapper.keys = (obj) => {
+      if (typeof obj === "object" && obj !== null) {
+        return Object.keys(obj).filter((k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol("));
+      }
+      return [];
+    };
+    twObjectWrapper.values = (obj) => {
+      if (typeof obj === "object" && obj !== null) {
+        return Object.keys(obj).filter((k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map((k) => obj[k]);
+      }
+      return [];
+    };
+    twObjectWrapper.entries = (obj) => {
+      if (typeof obj === "object" && obj !== null) {
+        return Object.keys(obj).filter((k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")).map((k) => [k, obj[k]]);
+      }
+      return [];
+    };
+    twObjectWrapper.assign = Object.assign;
+    twObjectWrapper.create = Object.create;
+    twObjectWrapper.freeze = (obj) => obj;
+    env.defineReadOnly("Object", twObjectWrapper);
     env.defineReadOnly("JSON", {
       stringify: (val) => {
         const toNative = (v) => {
@@ -1599,20 +2091,37 @@ var jsmini = (() => {
     env.defineReadOnly("console", consoleObj);
     const onStep = options.onStep ?? null;
     env.defineReadOnly("Error", { __nativeConstructor: true, name: "Error" });
+    const SymbolFn = (desc) => {
+      const d = desc !== void 0 ? isJSString(desc) ? jsStringToString(desc) : String(desc) : "";
+      return createSymbol(d);
+    };
+    SymbolFn.iterator = SYMBOL_ITERATOR;
+    SymbolFn.toPrimitive = SYMBOL_TO_PRIMITIVE;
+    SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
+    SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
+    env.defineReadOnly("Symbol", SymbolFn);
     _currentOnStep = onStep;
     try {
-      const result = evalProgram(ast, env);
+      const gen = evalProgram(ast, env);
+      let result;
+      while (true) {
+        const r = gen.next();
+        if (r.done) {
+          result = r.value;
+          break;
+        }
+      }
       return isJSString(result) ? jsStringToString(result) : result;
     } finally {
       _currentOnStep = null;
     }
   }
-  function evalProgram(program, env) {
+  function* evalProgram(program, env) {
     hoistVarDeclarations(program.body, env);
     hoistFunctionDeclarations(program.body, env);
     let result = void 0;
     for (const stmt of program.body) {
-      result = evalStatement(stmt, env);
+      result = yield* evalStatement(stmt, env);
     }
     return result;
   }
@@ -1673,13 +2182,39 @@ var jsmini = (() => {
           closure: env,
           prototype: {}
         };
+        if (stmt.generator) fn.isGenerator = true;
         env.define(stmt.id.name, fn);
       }
     }
   }
-  function evalClassDeclaration(stmt, env) {
-    const superClass = stmt.superClass ? evalExpression(stmt.superClass, env) : null;
-    const ctorMethod = stmt.body.body.find((m) => m.kind === "constructor");
+  function* evalBlock(body, env) {
+    let result = void 0;
+    for (const s of body) result = yield* evalStatement(s, env);
+    return result;
+  }
+  function evalBlockSync(body, env) {
+    try {
+      const gen = evalBlock(body, env);
+      let r = gen.next();
+      while (!r.done) r = gen.next(void 0);
+      return r.value;
+    } catch (e) {
+      if (e instanceof ReturnSignal) return e.value;
+      throw e;
+    }
+  }
+  function classKeyName(key, computed, env) {
+    if (computed && env) {
+      const val = exhaustGen(evalExpression(key, env));
+      return isJSString(val) ? jsStringToString(val) : String(val);
+    }
+    if (key.type === "Literal") return String(key.value);
+    return key.name;
+  }
+  function* evalClassDeclaration(stmt, env) {
+    const superClass = stmt.superClass ? yield* evalExpression(stmt.superClass, env) : null;
+    const ctorMethod = stmt.body.body.find((m) => m.type === "MethodDefinition" && m.kind === "constructor");
+    const instanceFields = stmt.body.body.filter((m) => m.type === "PropertyDefinition" && !m.static);
     let ctorFn;
     if (ctorMethod) {
       ctorFn = {
@@ -1709,16 +2244,61 @@ var jsmini = (() => {
         prototype: {}
       };
     }
-    for (const method of stmt.body.body) {
-      if (method.kind === "method") {
+    if (instanceFields.length > 0) {
+      ctorFn.__instanceFields = instanceFields;
+    }
+    for (const member of stmt.body.body) {
+      if (member.type === "PropertyDefinition") continue;
+      const target = member.static ? ctorFn : ctorFn.prototype;
+      const name2 = classKeyName(member.key, member.computed, env);
+      if (member.kind === "method" || member.kind === "constructor") {
+        if (member.kind === "constructor") continue;
         const fn = {
           [JS_FUNCTION_BRAND]: true,
-          params: method.value.params,
-          body: method.value.body,
+          params: member.value.params,
+          body: member.value.body,
           closure: env,
           prototype: {}
         };
-        ctorFn.prototype[method.key.name] = fn;
+        target[name2] = fn;
+      } else if (member.kind === "get" || member.kind === "set") {
+        const fn = {
+          [JS_FUNCTION_BRAND]: true,
+          params: member.value.params,
+          body: member.value.body,
+          closure: env,
+          prototype: {}
+        };
+        const descriptor = Object.getOwnPropertyDescriptor(target, name2) ?? {};
+        if (member.kind === "get") {
+          const getterFn = fn;
+          descriptor.get = function() {
+            const callEnv = new Environment(getterFn.closure, true);
+            callEnv.setThis(this);
+            hoistVarDeclarations(getterFn.body.body, callEnv);
+            return evalBlockSync(getterFn.body.body, callEnv);
+          };
+        }
+        if (member.kind === "set") {
+          const setterFn = fn;
+          descriptor.set = function(v) {
+            const callEnv = new Environment(setterFn.closure, true);
+            callEnv.setThis(this);
+            callEnv.define(setterFn.params[0].name, v);
+            hoistVarDeclarations(setterFn.body.body, callEnv);
+            evalBlockSync(setterFn.body.body, callEnv);
+          };
+        }
+        descriptor.configurable = true;
+        descriptor.enumerable = false;
+        Object.defineProperty(target, name2, descriptor);
+      }
+    }
+    for (const member of stmt.body.body) {
+      if (member.type === "PropertyDefinition" && member.static) {
+        const name2 = classKeyName(member.key, member.computed, env);
+        const value = member.value ? yield* evalExpression(member.value, env) : void 0;
+        ctorFn[name2] = value;
       }
     }
     if (superClass) {
@@ -1726,44 +2306,48 @@ var jsmini = (() => {
       const classEnv = new Environment(env);
       classEnv.define("__super__", superClass);
       ctorFn.closure = classEnv;
-      for (const method of stmt.body.body) {
-        if (method.kind === "method") {
-          ctorFn.prototype[method.key.name].closure = classEnv;
+      for (const member of stmt.body.body) {
+        if (member.type === "MethodDefinition" && member.kind === "method") {
+          const target = member.static ? ctorFn : ctorFn.prototype;
+          const name2 = classKeyName(member.key, member.computed, env);
+          if (target[name2] && isJSFunction(target[name2])) {
+            target[name2].closure = classEnv;
+          }
         }
       }
     }
     env.define(stmt.id.name, ctorFn);
     return void 0;
   }
-  function evalArguments(argNodes, env) {
+  function* evalArguments(argNodes, env) {
     const result = [];
     for (const arg of argNodes) {
       if (arg.type === "SpreadElement") {
-        const arr = evalExpression(arg.argument, env);
+        const arr = yield* evalExpression(arg.argument, env);
         result.push(...arr);
       } else {
-        result.push(evalExpression(arg, env));
+        result.push(yield* evalExpression(arg, env));
       }
     }
     return result;
   }
-  function evalStatement(stmt, env) {
+  function* evalStatement(stmt, env) {
     if (_currentOnStep && stmt.type !== "BlockStatement") {
       _currentOnStep({ type: stmt.type, env: env.dump() });
     }
     switch (stmt.type) {
       case "ExpressionStatement":
-        return evalExpression(stmt.expression, env);
+        return yield* evalExpression(stmt.expression, env);
       case "VariableDeclaration": {
         for (const decl of stmt.declarations) {
-          const value = decl.init ? evalExpression(decl.init, env) : void 0;
+          const value = decl.init ? yield* evalExpression(decl.init, env) : void 0;
           if (decl.id.type === "Identifier" && stmt.kind === "var" && !decl.init) {
             const varEnv = env.findVarScope();
             if (!varEnv.hasOwn(decl.id.name)) {
               varEnv.define(decl.id.name, void 0);
             }
           } else {
-            bindPattern(decl.id, value, env, stmt.kind);
+            bindPattern(decl.id, value, env, stmt.kind, (expr) => exhaustGen(evalExpression(expr, env)));
           }
         }
         return void 0;
@@ -1772,28 +2356,28 @@ var jsmini = (() => {
         return void 0;
       }
       case "ClassDeclaration": {
-        return evalClassDeclaration(stmt, env);
+        return yield* evalClassDeclaration(stmt, env);
       }
       case "ReturnStatement": {
-        const value = stmt.argument ? evalExpression(stmt.argument, env) : void 0;
+        const value = stmt.argument ? yield* evalExpression(stmt.argument, env) : void 0;
         throw new ReturnSignal(value);
       }
       case "BreakStatement":
-        throw new BreakSignal();
+        throw new BreakSignal(stmt.label);
       case "ContinueStatement":
-        throw new ContinueSignal();
+        throw new ContinueSignal(stmt.label);
       case "ThrowStatement": {
-        const value = evalExpression(stmt.argument, env);
+        const value = yield* evalExpression(stmt.argument, env);
         throw new ThrowSignal(value);
       }
       case "TryStatement": {
         let result = void 0;
         let thrown = null;
         try {
-          result = evalStatement(stmt.block, env);
+          result = yield* evalStatement(stmt.block, env);
         } catch (e) {
           if (e instanceof ReturnSignal) {
-            if (stmt.finalizer) evalStatement(stmt.finalizer, env);
+            if (stmt.finalizer) yield* evalStatement(stmt.finalizer, env);
             throw e;
           }
           const errorValue = e instanceof ThrowSignal ? e.value : e;
@@ -1801,9 +2385,9 @@ var jsmini = (() => {
             const catchEnv = new Environment(env);
             catchEnv.define(stmt.handler.param.name, errorValue);
             try {
-              result = evalStatement(stmt.handler.body, catchEnv);
+              result = yield* evalStatement(stmt.handler.body, catchEnv);
             } catch (catchError) {
-              if (stmt.finalizer) evalStatement(stmt.finalizer, env);
+              if (stmt.finalizer) yield* evalStatement(stmt.finalizer, env);
               throw catchError;
             }
           } else {
@@ -1811,7 +2395,7 @@ var jsmini = (() => {
           }
         }
         if (stmt.finalizer) {
-          evalStatement(stmt.finalizer, env);
+          yield* evalStatement(stmt.finalizer, env);
         }
         if (thrown) {
           throw thrown.error;
@@ -1819,68 +2403,161 @@ var jsmini = (() => {
         return result;
       }
       case "IfStatement": {
-        const test = evalExpression(stmt.test, env);
+        const test = yield* evalExpression(stmt.test, env);
         if (isTruthy(test)) {
-          return evalStatement(stmt.consequent, env);
+          return yield* evalStatement(stmt.consequent, env);
         } else if (stmt.alternate) {
-          return evalStatement(stmt.alternate, env);
+          return yield* evalStatement(stmt.alternate, env);
         }
         return void 0;
       }
-      case "WhileStatement": {
-        outer_while: while (isTruthy(evalExpression(stmt.test, env))) {
+      case "SwitchStatement": {
+        const disc = yield* evalExpression(stmt.discriminant, env);
+        let matched = false;
+        let result = void 0;
+        for (const c of stmt.cases) {
+          if (!matched && c.test !== null) {
+            const testVal = yield* evalExpression(c.test, env);
+            if (isJSString(disc) && isJSString(testVal)) {
+              matched = jsStringEquals(disc, testVal);
+            } else {
+              matched = disc === testVal;
+            }
+          }
+          if (!matched && c.test === null) matched = true;
+          if (matched) {
+            for (const s of c.consequent) {
+              try {
+                result = yield* evalStatement(s, env);
+              } catch (e) {
+                if (e instanceof BreakSignal && !e.label) return result;
+                throw e;
+              }
+            }
+          }
+        }
+        return result;
+      }
+      case "ForInStatement": {
+        const lbl = stmt.__label__;
+        const obj = yield* evalExpression(stmt.right, env);
+        if (obj === null || obj === void 0) return void 0;
+        const keys2 = typeof obj === "object" ? Object.keys(obj).filter((k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")) : [];
+        for (const key of keys2) {
+          const varName = stmt.left.declarations[0].id.name;
+          if (stmt.left.kind === "var") {
+            try {
+              env.set(varName, internString(key));
+            } catch {
+              env.define(varName, internString(key));
+            }
+          } else {
+            env.define(varName, internString(key));
+          }
           try {
-            evalStatement(stmt.body, env);
+            yield* evalStatement(stmt.body, env);
           } catch (e) {
-            if (e instanceof BreakSignal) break outer_while;
-            if (e instanceof ContinueSignal) continue outer_while;
+            if (e instanceof BreakSignal && (!e.label || e.label === lbl)) break;
+            if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) continue;
+            throw e;
+          }
+        }
+        return void 0;
+      }
+      case "DoWhileStatement": {
+        const lbl = stmt.__label__;
+        outer_dowhile: do {
+          try {
+            yield* evalStatement(stmt.body, env);
+          } catch (e) {
+            if (e instanceof BreakSignal && (!e.label || e.label === lbl)) break outer_dowhile;
+            if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) continue outer_dowhile;
+            throw e;
+          }
+        } while (isTruthy(yield* evalExpression(stmt.test, env)));
+        return void 0;
+      }
+      case "WhileStatement": {
+        const lbl = stmt.__label__;
+        outer_while: while (isTruthy(yield* evalExpression(stmt.test, env))) {
+          try {
+            yield* evalStatement(stmt.body, env);
+          } catch (e) {
+            if (e instanceof BreakSignal && (!e.label || e.label === lbl)) break outer_while;
+            if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) continue outer_while;
             throw e;
           }
         }
         return void 0;
       }
       case "ForStatement": {
+        const lbl = stmt.__label__;
         const isBlockScoped = stmt.init?.type === "VariableDeclaration" && stmt.init.kind !== "var";
         const forEnv = isBlockScoped ? new Environment(env) : env;
         if (stmt.init) {
           if (stmt.init.type === "VariableDeclaration") {
-            evalStatement(stmt.init, forEnv);
+            yield* evalStatement(stmt.init, forEnv);
           } else {
-            evalExpression(stmt.init, forEnv);
+            yield* evalExpression(stmt.init, forEnv);
           }
         }
-        outer_for: while (!stmt.test || isTruthy(evalExpression(stmt.test, forEnv))) {
+        outer_for: while (!stmt.test || isTruthy(yield* evalExpression(stmt.test, forEnv))) {
           try {
-            evalStatement(stmt.body, forEnv);
+            yield* evalStatement(stmt.body, forEnv);
           } catch (e) {
-            if (e instanceof BreakSignal) break outer_for;
-            if (e instanceof ContinueSignal) {
-              if (stmt.update) evalExpression(stmt.update, forEnv);
+            if (e instanceof BreakSignal && (!e.label || e.label === lbl)) break outer_for;
+            if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) {
+              if (stmt.update) yield* evalExpression(stmt.update, forEnv);
               continue outer_for;
             }
             throw e;
           }
-          if (stmt.update) evalExpression(stmt.update, forEnv);
+          if (stmt.update) yield* evalExpression(stmt.update, forEnv);
         }
         return void 0;
       }
       case "ForOfStatement": {
-        const iterable = evalExpression(stmt.right, env);
+        const lbl = stmt.__label__;
+        const rawIterable = yield* evalExpression(stmt.right, env);
+        let iterable;
+        const iterKey = "@@iterator";
+        const iterFn = typeof rawIterable === "object" && rawIterable !== null ? getProperty(rawIterable, iterKey) ?? rawIterable[iterKey] : void 0;
+        if (iterFn && (isJSFunction(iterFn) || typeof iterFn === "function")) {
+          const iterator = isJSFunction(iterFn) ? yield* evalCallWithJSFunction(iterFn, [], env) : iterFn.call(rawIterable);
+          iterable = [];
+          for (let step = 0; step < 1e4; step++) {
+            const nextFn = getProperty(iterator, "next") ?? iterator?.next;
+            const result = isJSFunction(nextFn) ? yield* evalCallWithJSFunction(nextFn, [], env) : typeof nextFn === "function" ? nextFn.call(iterator) : void 0;
+            if (!result || result.done) break;
+            iterable.push(result.value);
+          }
+        } else {
+          iterable = rawIterable;
+        }
         const kind = stmt.left.kind;
         const isBlockScoped = kind !== "var";
         const pattern = stmt.left.declarations[0].id;
         for (const item of iterable) {
           const iterEnv = isBlockScoped ? new Environment(env) : env;
-          bindPattern(pattern, item, iterEnv, kind);
+          bindPattern(pattern, item, iterEnv, kind, (expr) => exhaustGen(evalExpression(expr, iterEnv)));
           try {
-            evalStatement(stmt.body, iterEnv);
+            yield* evalStatement(stmt.body, iterEnv);
           } catch (e) {
-            if (e instanceof BreakSignal) break;
-            if (e instanceof ContinueSignal) continue;
+            if (e instanceof BreakSignal && (!e.label || e.label === lbl)) break;
+            if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) continue;
             throw e;
           }
         }
         return void 0;
+      }
+      case "LabeledStatement": {
+        stmt.body.__label__ = stmt.label;
+        try {
+          return yield* evalStatement(stmt.body, env);
+        } catch (e) {
+          if (e instanceof BreakSignal && e.label === stmt.label) return void 0;
+          throw e;
+        }
       }
       case "BlockStatement": {
         const blockEnv = new Environment(env);
@@ -1898,13 +2575,13 @@ var jsmini = (() => {
         }
         let result = void 0;
         for (const s of stmt.body) {
-          result = evalStatement(s, blockEnv);
+          result = yield* evalStatement(s, blockEnv);
         }
         return result;
       }
     }
   }
-  function evalExpression(expr, env) {
+  function* evalExpression(expr, env) {
     switch (expr.type) {
       case "Literal":
         return typeof expr.value === "string" ? internString(expr.value) : expr.value;
@@ -1920,12 +2597,19 @@ var jsmini = (() => {
           closure: env,
           prototype: {}
         };
+        if (expr.generator) fn.isGenerator = true;
         if (expr.id) {
           const fnEnv = new Environment(env);
           fnEnv.define(expr.id.name, fn);
           fn.closure = fnEnv;
         }
         return fn;
+      }
+      case "ClassExpression": {
+        const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: "__anonymous__" } };
+        const tempEnv = new Environment(env);
+        yield* evalClassDeclaration(fakeStmt, tempEnv);
+        return tempEnv.get(fakeStmt.id.name);
       }
       case "ArrowFunctionExpression": {
         const fn = {
@@ -1944,8 +2628,9 @@ var jsmini = (() => {
         for (let i = 0; i < expr.quasis.length; i++) {
           result = jsStringConcat(result, internString(expr.quasis[i].value.cooked));
           if (i < expr.expressions.length) {
-            const val = evalExpression(expr.expressions[i], env);
-            const s = isJSString(val) ? val : createSeqString(String(val));
+            const val = yield* evalExpression(expr.expressions[i], env);
+            const prim = toPrimitive(val, "string");
+            const s = isJSString(prim) ? prim : createSeqString(String(prim));
             result = jsStringConcat(result, s);
           }
         }
@@ -1954,7 +2639,7 @@ var jsmini = (() => {
       case "SequenceExpression": {
         let result = void 0;
         for (const e of expr.expressions) {
-          result = evalExpression(e, env);
+          result = yield* evalExpression(e, env);
         }
         return result;
       }
@@ -1964,31 +2649,70 @@ var jsmini = (() => {
         if (arg.type === "Identifier") {
           oldValue = env.get(arg.name);
         } else {
-          const obj = evalExpression(arg.object, env);
-          const key = resolveMemberKey(arg, env);
+          const obj = yield* evalExpression(arg.object, env);
+          const key = yield* resolveMemberKey(arg, env);
           oldValue = getProperty(obj, key);
         }
         const newValue = expr.operator === "++" ? oldValue + 1 : oldValue - 1;
         if (arg.type === "Identifier") {
           env.set(arg.name, newValue);
         } else {
-          const obj = evalExpression(arg.object, env);
-          const key = resolveMemberKey(arg, env);
+          const obj = yield* evalExpression(arg.object, env);
+          const key = yield* resolveMemberKey(arg, env);
           obj[key] = newValue;
         }
         return expr.prefix ? newValue : oldValue;
       }
       case "NewExpression":
-        return evalNewExpression(expr, env);
+        return yield* evalNewExpression(expr, env);
       case "ObjectExpression": {
         const obj = {};
         for (const prop of expr.properties) {
           if (prop.type === "SpreadElement") {
-            const source = evalExpression(prop.argument, env);
+            const source = yield* evalExpression(prop.argument, env);
             if (source) Object.assign(obj, source);
           } else {
-            const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
-            obj[key] = evalExpression(prop.value, env);
+            const rawKey = prop.computed ? yield* evalExpression(prop.key, env) : void 0;
+            const key = prop.computed ? isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey) : prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+            if (prop.kind === "get" || prop.kind === "set") {
+              const fnValue = yield* evalExpression(prop.value, env);
+              const descriptor = {};
+              const existing = Object.getOwnPropertyDescriptor(obj, key);
+              if (existing) {
+                descriptor.get = existing.get;
+                descriptor.set = existing.set;
+              }
+              if (prop.kind === "get") {
+                if (isJSFunction(fnValue)) {
+                  const fn = fnValue;
+                  descriptor.get = function() {
+                    const callEnv = new Environment(fn.closure, true);
+                    callEnv.setThis(this);
+                    return evalBlockSync(fn.body.body, callEnv);
+                  };
+                } else {
+                  descriptor.get = fnValue;
+                }
+              }
+              if (prop.kind === "set") {
+                if (isJSFunction(fnValue)) {
+                  const fn = fnValue;
+                  descriptor.set = function(v) {
+                    const callEnv = new Environment(fn.closure, true);
+                    callEnv.setThis(this);
+                    callEnv.define(fn.params[0].name, v);
+                    evalBlockSync(fn.body.body, callEnv);
+                  };
+                } else {
+                  descriptor.set = fnValue;
+                }
+              }
+              descriptor.configurable = true;
+              descriptor.enumerable = true;
+              Object.defineProperty(obj, key, descriptor);
+            } else {
+              obj[key] = yield* evalExpression(prop.value, env);
+            }
           }
         }
         return obj;
@@ -1997,38 +2721,39 @@ var jsmini = (() => {
         const result = [];
         for (const el of expr.elements) {
           if (el.type === "SpreadElement") {
-            const arr = evalExpression(el.argument, env);
+            const arr = yield* evalExpression(el.argument, env);
             result.push(...arr);
           } else {
-            result.push(evalExpression(el, env));
+            result.push(yield* evalExpression(el, env));
           }
         }
         return result;
       }
       case "MemberExpression": {
-        const obj = evalExpression(expr.object, env);
+        const obj = yield* evalExpression(expr.object, env);
         if (obj === null || obj === void 0) {
-          const key2 = resolveMemberKey(expr, env);
+          if (expr.optional) return void 0;
+          const key2 = yield* resolveMemberKey(expr, env);
           throw new TypeError(`Cannot read properties of ${obj} (reading '${key2}')`);
         }
-        const key = resolveMemberKey(expr, env);
+        const key = yield* resolveMemberKey(expr, env);
         return getProperty(obj, key);
       }
       case "AssignmentExpression": {
         if (expr.left.type === "ObjectPattern" || expr.left.type === "ArrayPattern") {
-          const value = evalExpression(expr.right, env);
+          const value = yield* evalExpression(expr.right, env);
           assignPattern(expr.left, value, env);
           return value;
         }
-        const rightValue = evalExpression(expr.right, env);
+        const rightValue = yield* evalExpression(expr.right, env);
         let newValue;
         if (expr.operator === "=") {
           newValue = rightValue;
         } else {
           let currentValue;
           if (expr.left.type === "MemberExpression") {
-            const obj = evalExpression(expr.left.object, env);
-            currentValue = getProperty(obj, resolveMemberKey(expr.left, env));
+            const obj = yield* evalExpression(expr.left.object, env);
+            currentValue = getProperty(obj, yield* resolveMemberKey(expr.left, env));
           } else {
             currentValue = env.get(expr.left.name);
           }
@@ -2059,8 +2784,8 @@ var jsmini = (() => {
           }
         }
         if (expr.left.type === "MemberExpression") {
-          const obj = evalExpression(expr.left.object, env);
-          const key = resolveMemberKey(expr.left, env);
+          const obj = yield* evalExpression(expr.left.object, env);
+          const key = yield* resolveMemberKey(expr.left, env);
           obj[key] = newValue;
         } else {
           env.set(expr.left.name, newValue);
@@ -2068,24 +2793,33 @@ var jsmini = (() => {
         return newValue;
       }
       case "CallExpression":
-        return evalCallExpression(expr, env);
+        return yield* evalCallExpression(expr, env);
       case "UnaryExpression":
-        return evalUnaryExpression(expr, env);
+        return yield* evalUnaryExpression(expr, env);
       case "LogicalExpression":
-        return evalLogicalExpression(expr, env);
+        return yield* evalLogicalExpression(expr, env);
       case "BinaryExpression":
-        return evalBinaryExpression(expr, env);
+        return yield* evalBinaryExpression(expr, env);
+      case "ConditionalExpression":
+        return isTruthy(yield* evalExpression(expr.test, env)) ? yield* evalExpression(expr.consequent, env) : yield* evalExpression(expr.alternate, env);
+      case "YieldExpression": {
+        const value = expr.argument ? yield* evalExpression(expr.argument, env) : void 0;
+        return yield value;
+      }
     }
   }
-  function evalNewExpression(expr, env) {
-    const constructor = evalExpression(expr.callee, env);
-    const args = evalArguments(expr.arguments, env);
+  function* evalNewExpression(expr, env) {
+    const constructor = yield* evalExpression(expr.callee, env);
+    const args = yield* evalArguments(expr.arguments, env);
     if (typeof constructor === "object" && constructor !== null && "__nativeConstructor" in constructor) {
       const ctor = constructor;
       if (ctor.name === "Error") {
         return { message: args[0] ?? "" };
       }
       throw new Error(`Unknown native constructor: ${ctor.name}`);
+    }
+    if (typeof constructor === "function") {
+      return new constructor(...args);
     }
     if (!isJSFunction(constructor)) {
       throw new TypeError("Constructor is not a function");
@@ -2102,7 +2836,14 @@ var jsmini = (() => {
       if (param.type === "RestElement") {
         fnEnv.define(param.argument.name, args.slice(i));
       } else {
-        bindPattern(param, args[i] ?? void 0, fnEnv, "let");
+        yield* bindParam(param, args[i] ?? void 0, fnEnv, fnEnv);
+      }
+    }
+    if (constructor.__instanceFields) {
+      for (const field of constructor.__instanceFields) {
+        const name2 = classKeyName(field.key, field.computed, fnEnv);
+        const value = field.value ? yield* evalExpression(field.value, fnEnv) : void 0;
+        newObj[name2] = value;
       }
     }
     hoistVarDeclarations(constructor.body.body, fnEnv);
@@ -2110,7 +2851,7 @@ var jsmini = (() => {
     let returnValue = void 0;
     try {
       for (const stmt of constructor.body.body) {
-        evalStatement(stmt, fnEnv);
+        yield* evalStatement(stmt, fnEnv);
       }
     } catch (e) {
       if (e instanceof ReturnSignal) {
@@ -2124,34 +2865,69 @@ var jsmini = (() => {
     }
     return newObj;
   }
-  function evalCallWithJSFunction(fn, args, env) {
+  function* bindParam(param, value, env, evalEnv) {
+    if (param.type === "AssignmentPattern") {
+      const val = value !== void 0 ? value : yield* evalExpression(param.right, evalEnv);
+      bindPattern(param.left, val, env, "let");
+    } else {
+      bindPattern(param, value, env, "let");
+    }
+  }
+  function* evalCallWithJSFunction(fn, args, env) {
     if (!isJSFunction(fn)) return void 0;
     const jsFn = fn;
+    if (jsFn.isGenerator) {
+      const fnEnv2 = new Environment(jsFn.closure, !jsFn.isArrow);
+      for (let i = 0; i < jsFn.params.length; i++) {
+        const param = jsFn.params[i];
+        if (param.type === "RestElement") {
+          fnEnv2.define(param.argument.name, args.slice(i));
+        } else {
+          yield* bindParam(param, args[i] ?? void 0, fnEnv2, fnEnv2);
+        }
+      }
+      hoistVarDeclarations(jsFn.body.body, fnEnv2);
+      hoistFunctionDeclarations(jsFn.body.body, fnEnv2);
+      const bodyGen = evalBlock(jsFn.body.body, fnEnv2);
+      const genObj = {
+        next(value) {
+          const r = bodyGen.next(value);
+          return { value: r.value, done: r.done };
+        },
+        return(value) {
+          return bodyGen.return(value);
+        },
+        "@@iterator"() {
+          return genObj;
+        }
+      };
+      return genObj;
+    }
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
     for (let i = 0; i < jsFn.params.length; i++) {
       const param = jsFn.params[i];
       if (param.type === "RestElement") {
         fnEnv.define(param.argument.name, args.slice(i));
       } else {
-        bindPattern(param, args[i] ?? void 0, fnEnv, "let");
+        yield* bindParam(param, args[i] ?? void 0, fnEnv, fnEnv);
       }
     }
     hoistVarDeclarations(jsFn.body.body, fnEnv);
     hoistFunctionDeclarations(jsFn.body.body, fnEnv);
     try {
-      for (const s of jsFn.body.body) evalStatement(s, fnEnv);
+      for (const s of jsFn.body.body) yield* evalStatement(s, fnEnv);
     } catch (e) {
       if (e instanceof ReturnSignal) return e.value;
       throw e;
     }
     return void 0;
   }
-  function evalCallExpression(expr, env) {
+  function* evalCallExpression(expr, env) {
     let thisValue = void 0;
     let fn;
     if (expr.callee.type === "MemberExpression") {
-      thisValue = evalExpression(expr.callee.object, env);
-      const key = resolveMemberKey(expr.callee, env);
+      thisValue = yield* evalExpression(expr.callee.object, env);
+      const key = yield* resolveMemberKey(expr.callee, env);
       fn = getProperty(thisValue, key);
       if (fn === void 0 && isJSString(thisValue)) {
         const str = jsStringToString(thisValue);
@@ -2167,9 +2943,9 @@ var jsmini = (() => {
         }
       }
     } else {
-      fn = evalExpression(expr.callee, env);
+      fn = yield* evalExpression(expr.callee, env);
     }
-    const args = evalArguments(expr.arguments, env);
+    const args = yield* evalArguments(expr.arguments, env);
     if (expr.callee.type === "Identifier" && expr.callee.name === "__super__" && isJSFunction(fn)) {
       const superFn = fn;
       const superEnv = new Environment(superFn.closure, true);
@@ -2179,14 +2955,14 @@ var jsmini = (() => {
         if (param.type === "RestElement") {
           superEnv.define(param.argument.name, args.slice(i));
         } else {
-          bindPattern(param, args[i] ?? void 0, superEnv, "let");
+          yield* bindParam(param, args[i] ?? void 0, superEnv, superEnv);
         }
       }
       hoistVarDeclarations(superFn.body.body, superEnv);
       hoistFunctionDeclarations(superFn.body.body, superEnv);
       try {
         for (const s of superFn.body.body) {
-          evalStatement(s, superEnv);
+          yield* evalStatement(s, superEnv);
         }
       } catch (e) {
         if (e instanceof ReturnSignal) return e.value;
@@ -2197,7 +2973,7 @@ var jsmini = (() => {
     if (typeof fn === "function") {
       if (thisValue !== void 0 && args.some((a) => isJSFunction(a))) {
         const wrappedArgs = args.map(
-          (a) => isJSFunction(a) ? (...nativeArgs) => evalCallWithJSFunction(a, nativeArgs, env) : a
+          (a) => isJSFunction(a) ? (...nativeArgs) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env)) : a
         );
         return fn.apply(thisValue, wrappedArgs);
       }
@@ -2210,6 +2986,41 @@ var jsmini = (() => {
       throw new TypeError("Class constructor cannot be invoked without 'new'");
     }
     const jsFn = fn;
+    if (jsFn.isGenerator) {
+      const fnEnv2 = new Environment(jsFn.closure, !jsFn.isArrow);
+      if (!jsFn.isArrow) {
+        fnEnv2.setThis(thisValue);
+      }
+      for (let i = 0; i < jsFn.params.length; i++) {
+        const param = jsFn.params[i];
+        if (param.type === "RestElement") {
+          fnEnv2.define(param.argument.name, args.slice(i));
+        } else {
+          yield* bindParam(param, args[i] ?? void 0, fnEnv2, fnEnv2);
+        }
+      }
+      hoistVarDeclarations(jsFn.body.body, fnEnv2);
+      hoistFunctionDeclarations(jsFn.body.body, fnEnv2);
+      const bodyGen = evalBlock(jsFn.body.body, fnEnv2);
+      const genObj = {
+        next(value) {
+          try {
+            const r = bodyGen.next(value);
+            return { value: r.value, done: r.done };
+          } catch (e) {
+            if (e instanceof ReturnSignal) return { value: e.value, done: true };
+            throw e;
+          }
+        },
+        return(value) {
+          return bodyGen.return(value);
+        },
+        "@@iterator"() {
+          return genObj;
+        }
+      };
+      return genObj;
+    }
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
     if (!jsFn.isArrow) {
       fnEnv.setThis(thisValue);
@@ -2219,14 +3030,14 @@ var jsmini = (() => {
       if (param.type === "RestElement") {
         fnEnv.define(param.argument.name, args.slice(i));
       } else {
-        bindPattern(param, args[i] ?? void 0, fnEnv, "let");
+        yield* bindParam(param, args[i] ?? void 0, fnEnv, fnEnv);
       }
     }
     hoistVarDeclarations(jsFn.body.body, fnEnv);
     hoistFunctionDeclarations(jsFn.body.body, fnEnv);
     try {
       for (const stmt of jsFn.body.body) {
-        evalStatement(stmt, fnEnv);
+        yield* evalStatement(stmt, fnEnv);
       }
     } catch (e) {
       if (e instanceof ReturnSignal) {
@@ -2236,7 +3047,7 @@ var jsmini = (() => {
     }
     return void 0;
   }
-  function evalUnaryExpression(expr, env) {
+  function* evalUnaryExpression(expr, env) {
     if (expr.operator === "typeof") {
       let value;
       if (expr.argument.type === "Identifier") {
@@ -2249,37 +3060,42 @@ var jsmini = (() => {
           return internString("undefined");
         }
       } else {
-        value = evalExpression(expr.argument, env);
+        value = yield* evalExpression(expr.argument, env);
       }
+      if (isJSSymbol(value)) return internString("symbol");
       if (isJSString(value)) return internString("string");
       if (value === null) return internString("object");
       if (isJSFunction(value)) return internString("function");
       return internString(typeof value);
     }
-    const argument = evalExpression(expr.argument, env);
+    const argument = yield* evalExpression(expr.argument, env);
     switch (expr.operator) {
       case "!":
         return !isTruthy(argument);
       case "-":
         return -argument;
+      case "~":
+        return ~argument;
       default:
         throw new Error(`Unknown unary operator: ${expr.operator}`);
     }
   }
-  function evalLogicalExpression(expr, env) {
-    const left = evalExpression(expr.left, env);
+  function* evalLogicalExpression(expr, env) {
+    const left = yield* evalExpression(expr.left, env);
     switch (expr.operator) {
       case "&&":
-        return isTruthy(left) ? evalExpression(expr.right, env) : left;
+        return isTruthy(left) ? yield* evalExpression(expr.right, env) : left;
       case "||":
-        return isTruthy(left) ? left : evalExpression(expr.right, env);
+        return isTruthy(left) ? left : yield* evalExpression(expr.right, env);
+      case "??":
+        return left !== null && left !== void 0 ? left : yield* evalExpression(expr.right, env);
       default:
         throw new Error(`Unknown logical operator: ${expr.operator}`);
     }
   }
-  function evalBinaryExpression(expr, env) {
-    const rawLeft = evalExpression(expr.left, env);
-    const rawRight = evalExpression(expr.right, env);
+  function* evalBinaryExpression(expr, env) {
+    const rawLeft = yield* evalExpression(expr.left, env);
+    const rawRight = yield* evalExpression(expr.right, env);
     const left = toPrimitive(rawLeft);
     const right = toPrimitive(rawRight);
     switch (expr.operator) {
@@ -2298,6 +3114,20 @@ var jsmini = (() => {
         return left / right;
       case "%":
         return left % right;
+      case "**":
+        return left ** right;
+      case "&":
+        return left & right;
+      case "|":
+        return left | right;
+      case "^":
+        return left ^ right;
+      case "<<":
+        return left << right;
+      case ">>":
+        return left >> right;
+      case ">>>":
+        return left >>> right;
       case "<":
         return left < right;
       case ">":
@@ -2307,15 +3137,21 @@ var jsmini = (() => {
       case ">=":
         return left >= right;
       case "==":
+        if (isJSString(left) && isJSString(right)) return jsStringEquals(left, right);
+        if (isJSString(left) || isJSString(right)) return false;
+        return left == right;
       case "===":
         if (isJSString(rawLeft) && isJSString(rawRight)) return jsStringEquals(rawLeft, rawRight);
         if (isJSString(rawLeft) || isJSString(rawRight)) return false;
-        return expr.operator === "==" ? rawLeft == rawRight : rawLeft === rawRight;
+        return rawLeft === rawRight;
       case "!=":
+        if (isJSString(left) && isJSString(right)) return !jsStringEquals(left, right);
+        if (isJSString(left) || isJSString(right)) return true;
+        return left != right;
       case "!==":
         if (isJSString(rawLeft) && isJSString(rawRight)) return !jsStringEquals(rawLeft, rawRight);
         if (isJSString(rawLeft) || isJSString(rawRight)) return true;
-        return expr.operator === "!=" ? rawLeft != rawRight : rawLeft !== rawRight;
+        return rawLeft !== rawRight;
       case "in": {
         const key = isJSString(rawLeft) ? jsStringToString(rawLeft) : String(rawLeft);
         return key in rawRight;
@@ -2358,6 +3194,8 @@ var jsmini = (() => {
       // ループスタック: break/continue のジャンプ先パッチ用
       __publicField(this, "loopStack", []);
       __publicField(this, "icSlotCount", 0);
+      __publicField(this, "hasRestParam", false);
+      __publicField(this, "isGenerator", false);
       __publicField(this, "upvalues", []);
       this.parent = parent;
       this.isFunction = parent !== null;
@@ -2379,6 +3217,14 @@ var jsmini = (() => {
     }
     currentOffset() {
       return this.bytecode.length;
+    }
+    // ラベルに一致するループを探す (ラベルなしは最内ループ)
+    findLoop(label) {
+      if (!label) return this.loopStack.length > 0 ? this.loopStack[this.loopStack.length - 1] : null;
+      for (let i = this.loopStack.length - 1; i >= 0; i--) {
+        if (this.loopStack[i].label === label) return this.loopStack[i];
+      }
+      return null;
     }
     addConstant(value) {
       if (typeof value === "number" || typeof value === "string" || typeof value === "boolean") {
@@ -2462,6 +3308,8 @@ var jsmini = (() => {
         name: name2,
         paramCount: this.paramCount,
         localCount: this.localCount,
+        hasRestParam: this.hasRestParam,
+        isGenerator: this.isGenerator,
         bytecode: this.bytecode,
         constants: this.constants,
         handlers: this.handlers,
@@ -2497,7 +3345,14 @@ var jsmini = (() => {
         }
         this.emit("Pop");
       } else if (id2.type === "ObjectPattern") {
+        const boundKeys = [];
         for (const prop of id2.properties) {
+          if (prop.type === "RestElement") {
+            this.emit("Dup");
+            this.compileBindingTarget(prop.argument);
+            break;
+          }
+          boundKeys.push(prop.key.name);
           this.emit("Dup");
           const nameIdx = this.addConstant(prop.key.name);
           this.emitWithIC("GetProperty", nameIdx);
@@ -2506,17 +3361,60 @@ var jsmini = (() => {
         this.emit("Pop");
       } else if (id2.type === "ArrayPattern") {
         for (let i = 0; i < id2.elements.length; i++) {
-          if (id2.elements[i]) {
-            this.emit("Dup");
+          const el = id2.elements[i];
+          if (!el) continue;
+          if (el.type === "RestElement") {
             this.emit("LdaConst", this.addConstant(i));
-            this.emit("GetPropertyComputed");
-            this.compileBindingTarget(id2.elements[i]);
+            this.emit("Dup");
+            this.emit("Pop");
+            const tmpName = `__rest_arr_${this.currentOffset()}`;
+            const tmpIdx = this.addConstant(tmpName);
+            this.emit("Pop");
+            this.emit("Dup");
+            this.emit("StaGlobal", tmpIdx);
+            this.emit("Pop");
+            this.emit("LdaConst", this.addConstant(i));
+            this.emit("LdaGlobal", tmpIdx);
+            this.emit("Dup");
+            this.emitWithIC("GetProperty", this.addConstant("slice"));
+            this.emit("CallMethod", 1);
+            this.compileBindingTarget(el.argument);
+            break;
           }
+          this.emit("Dup");
+          this.emit("LdaConst", this.addConstant(i));
+          this.emit("GetPropertyComputed");
+          this.compileBindingTarget(el);
         }
         this.emit("Pop");
+      } else if (id2.type === "AssignmentPattern") {
+        this.emit("Dup");
+        this.emit("LdaUndefined");
+        this.emit("StrictEqual");
+        const skipDefault = this.emit("JumpIfFalse", 0);
+        this.emit("Pop");
+        this.compileExpression(id2.right);
+        this.patch(skipDefault, this.currentOffset());
+        this.compileBindingTarget(id2.left);
       }
     }
     compileProgram(program) {
+      for (const stmt of program.body) {
+        if (stmt.type === "FunctionDeclaration") {
+          this.compileStatement(stmt);
+        }
+      }
+      for (const stmt of program.body) {
+        if (stmt.type === "VariableDeclaration" && stmt.kind === "var") {
+          for (const decl of stmt.declarations) {
+            if (decl.id.type === "Identifier") {
+              this.emit("LdaUndefined");
+              this.emit("StaGlobal", this.addConstant(decl.id.name));
+              this.emit("Pop");
+            }
+          }
+        }
+      }
       for (let i = 0; i < program.body.length; i++) {
         const stmt = program.body[i];
         const isLast = i === program.body.length - 1;
@@ -2528,10 +3426,41 @@ var jsmini = (() => {
     }
     compileFunctionBody(params, body) {
       this.paramCount = params.length;
+      const destructureParams = [];
+      const defaultParams = [];
       for (const param of params) {
         if (param.type === "Identifier") {
           this.declareLocal(param.name);
+        } else if (param.type === "AssignmentPattern") {
+          if (param.left.type === "Identifier") {
+            const slot = this.declareLocal(param.left.name);
+            defaultParams.push({ slot, defaultExpr: param.right });
+          } else {
+            const slot = this.localCount++;
+            destructureParams.push({ slot, pattern: param.left });
+            defaultParams.push({ slot, defaultExpr: param.right });
+          }
+        } else if (param.type === "RestElement") {
+          this.declareLocal(param.argument.name);
+          this.hasRestParam = true;
+        } else if (param.type === "ArrayPattern" || param.type === "ObjectPattern") {
+          const slot = this.localCount++;
+          destructureParams.push({ slot, pattern: param });
         }
+      }
+      for (const { slot, defaultExpr } of defaultParams) {
+        this.emit("LdaLocal", slot);
+        this.emit("LdaUndefined");
+        this.emit("StrictEqual");
+        const skipDefault = this.emit("JumpIfFalse", 0);
+        this.compileExpression(defaultExpr);
+        this.emit("StaLocal", slot);
+        this.emit("Pop");
+        this.patch(skipDefault, this.currentOffset());
+      }
+      for (const { slot, pattern } of destructureParams) {
+        this.emit("LdaLocal", slot);
+        this.compileBindingTarget(pattern);
       }
       for (const stmt of body) {
         this.compileStatement(stmt);
@@ -2563,6 +3492,7 @@ var jsmini = (() => {
         }
         case "FunctionDeclaration": {
           const fnCompiler = new _BytecodeCompiler(this);
+          if (stmt.generator) fnCompiler.isGenerator = true;
           fnCompiler.compileFunctionBody(stmt.params, stmt.body.body);
           const fnBytecode = fnCompiler.finish(stmt.id.name);
           const fnIndex = this.addConstant(fnBytecode);
@@ -2642,9 +3572,62 @@ var jsmini = (() => {
           }
           break;
         }
+        case "SwitchStatement": {
+          this.compileExpression(stmt.discriminant);
+          const discSlot = this.declareLocal("__switch_disc__");
+          this.emit("StaLocal", discSlot);
+          this.emit("Pop");
+          this.loopStack.push({ label: stmt.__label__, breakPatches: [], continuePatches: [], continueTarget: -1 });
+          const jumpToBody = [];
+          let defaultJumpIdx = -1;
+          for (let i = 0; i < stmt.cases.length; i++) {
+            const c = stmt.cases[i];
+            if (c.test === null) {
+              defaultJumpIdx = i;
+              jumpToBody.push(-1);
+              continue;
+            }
+            this.emit("LdaLocal", discSlot);
+            this.compileExpression(c.test);
+            this.emit("StrictEqual");
+            jumpToBody.push(this.emit("JumpIfTrue", 0));
+          }
+          const jumpToDefaultOrEnd = this.emit("Jump", 0);
+          const bodyOffsets = [];
+          for (let i = 0; i < stmt.cases.length; i++) {
+            bodyOffsets.push(this.currentOffset());
+            for (const s of stmt.cases[i].consequent) {
+              this.compileStatement(s);
+            }
+          }
+          const switchEnd = this.currentOffset();
+          for (let i = 0; i < stmt.cases.length; i++) {
+            if (jumpToBody[i] >= 0) {
+              this.patch(jumpToBody[i], bodyOffsets[i]);
+            }
+          }
+          if (defaultJumpIdx >= 0) {
+            this.patch(jumpToDefaultOrEnd, bodyOffsets[defaultJumpIdx]);
+          } else {
+            this.patch(jumpToDefaultOrEnd, switchEnd);
+          }
+          const loop = this.loopStack.pop();
+          for (const bp of loop.breakPatches) this.patch(bp, switchEnd);
+          break;
+        }
+        case "DoWhileStatement": {
+          const loopStart = this.currentOffset();
+          this.loopStack.push({ label: stmt.__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
+          this.compileStatement(stmt.body);
+          this.compileExpression(stmt.test);
+          this.emit("JumpIfTrue", loopStart);
+          const loop = this.loopStack.pop();
+          for (const bp of loop.breakPatches) this.patch(bp, this.currentOffset());
+          break;
+        }
         case "WhileStatement": {
           const loopStart = this.currentOffset();
-          this.loopStack.push({ breakPatches: [], continueTarget: loopStart });
+          this.loopStack.push({ label: stmt.__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
           this.compileExpression(stmt.test);
           const exitJump = this.emit("JumpIfFalse", 0);
           this.compileStatement(stmt.body);
@@ -2668,7 +3651,7 @@ var jsmini = (() => {
             }
           }
           const loopStart = this.currentOffset();
-          this.loopStack.push({ breakPatches: [], continueTarget: -1 });
+          this.loopStack.push({ label: stmt.__label__, breakPatches: [], continuePatches: [], continueTarget: -1 });
           let exitJump = -1;
           if (stmt.test) {
             this.compileExpression(stmt.test);
@@ -2677,6 +3660,9 @@ var jsmini = (() => {
           this.compileStatement(stmt.body);
           const continueTarget = this.currentOffset();
           this.loopStack[this.loopStack.length - 1].continueTarget = continueTarget;
+          for (const cp of this.loopStack[this.loopStack.length - 1].continuePatches) {
+            this.patch(cp, continueTarget);
+          }
           if (stmt.update) {
             this.compileExpression(stmt.update);
             this.emit("Pop");
@@ -2717,12 +3703,14 @@ var jsmini = (() => {
           break;
         }
         case "ClassDeclaration": {
-          const ctorMethod = stmt.body.body.find((m) => m.kind === "constructor");
+          const instanceFields = stmt.body.body.filter((m) => m.type === "PropertyDefinition" && !m.static);
+          const ctorMethod = stmt.body.body.find((m) => m.type === "MethodDefinition" && m.kind === "constructor");
           if (ctorMethod) {
             const fnCompiler = new _BytecodeCompiler(this);
             fnCompiler.compileFunctionBody(ctorMethod.value.params, ctorMethod.value.body.body);
             const ctorFunc = fnCompiler.finish(stmt.id.name);
             ctorFunc.prototype = {};
+            if (instanceFields.length > 0) ctorFunc.__instanceFields = instanceFields;
             const ctorIdx = this.addConstant(ctorFunc);
             this.emit("LdaConst", ctorIdx);
           } else {
@@ -2730,21 +3718,74 @@ var jsmini = (() => {
             fnCompiler.compileFunctionBody([], []);
             const ctorFunc = fnCompiler.finish(stmt.id.name);
             ctorFunc.prototype = {};
+            if (instanceFields.length > 0) ctorFunc.__instanceFields = instanceFields;
             const ctorIdx = this.addConstant(ctorFunc);
             this.emit("LdaConst", ctorIdx);
           }
-          for (const method of stmt.body.body) {
-            if (method.kind === "method") {
-              this.emit("Dup");
-              const protoNameIdx = this.addConstant("prototype");
-              this.emitWithIC("GetProperty", protoNameIdx);
+          for (const member of stmt.body.body) {
+            if (member.type === "PropertyDefinition") continue;
+            if (member.kind === "constructor") continue;
+            const name2 = member.computed ? null : member.key.type === "Literal" ? String(member.key.value) : member.key.name;
+            if (member.kind === "method") {
+              if (member.static) {
+                this.emit("Dup");
+              } else {
+                this.emit("Dup");
+                this.emitWithIC("GetProperty", this.addConstant("prototype"));
+              }
+              if (member.computed) {
+                this.compileExpression(member.key);
+                const fnCompiler = new _BytecodeCompiler(this);
+                fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
+                this.emit("LdaConst", this.addConstant(fnCompiler.finish("<computed>")));
+                this.emit("SetPropertyComputed");
+              } else {
+                const fnCompiler = new _BytecodeCompiler(this);
+                fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
+                this.emit("LdaConst", this.addConstant(fnCompiler.finish(name2)));
+                this.emitWithIC("SetProperty", this.addConstant(name2));
+              }
+              this.emit("Pop");
+            } else if (member.kind === "get" || member.kind === "set") {
+              if (member.static) {
+                this.emit("Dup");
+              } else {
+                this.emit("Dup");
+                this.emitWithIC("GetProperty", this.addConstant("prototype"));
+              }
               const fnCompiler = new _BytecodeCompiler(this);
-              fnCompiler.compileFunctionBody(method.value.params, method.value.body.body);
-              const methodFunc = fnCompiler.finish(method.key.name);
-              const methodIdx = this.addConstant(methodFunc);
-              this.emit("LdaConst", methodIdx);
-              const methodNameIdx = this.addConstant(method.key.name);
-              this.emitWithIC("SetProperty", methodNameIdx);
+              fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
+              this.emit("LdaConst", this.addConstant(fnCompiler.finish(member.kind + " " + (name2 ?? "<computed>"))));
+              if (member.computed) {
+                this.compileExpression(member.key);
+                this.emit("SetPropertyComputed");
+              } else {
+                const nameIdx = this.addConstant(name2);
+                this.emit(member.kind === "get" ? "DefineGetter" : "DefineSetter", nameIdx);
+              }
+              this.emit("Pop");
+            }
+          }
+          for (const member of stmt.body.body) {
+            if (member.type === "PropertyDefinition" && member.static) {
+              const name2 = member.computed ? null : member.key.type === "Literal" ? String(member.key.value) : member.key.name;
+              this.emit("Dup");
+              if (member.computed) {
+                this.compileExpression(member.key);
+                if (member.value) {
+                  this.compileExpression(member.value);
+                } else {
+                  this.emit("LdaUndefined");
+                }
+                this.emit("SetPropertyComputed");
+              } else {
+                if (member.value) {
+                  this.compileExpression(member.value);
+                } else {
+                  this.emit("LdaUndefined");
+                }
+                this.emitWithIC("SetProperty", this.addConstant(name2));
+              }
               this.emit("Pop");
             }
           }
@@ -2760,54 +3801,55 @@ var jsmini = (() => {
         }
         case "BreakStatement": {
           const breakJump = this.emit("Jump", 0);
-          if (this.loopStack.length > 0) {
-            this.loopStack[this.loopStack.length - 1].breakPatches.push(breakJump);
-          }
+          const target = this.findLoop(stmt.label);
+          if (target) target.breakPatches.push(breakJump);
           break;
         }
         case "ContinueStatement": {
-          if (this.loopStack.length > 0) {
-            const loop = this.loopStack[this.loopStack.length - 1];
+          const loop = this.findLoop(stmt.label);
+          if (loop) {
             if (loop.continueTarget >= 0) {
               this.emit("Jump", loop.continueTarget);
             } else {
-              this.emit("Jump", 0);
+              loop.continuePatches.push(this.emit("Jump", 0));
             }
           }
           break;
         }
-        case "ForOfStatement": {
+        case "LabeledStatement": {
+          stmt.body.__label__ = stmt.label;
+          this.compileStatement(stmt.body);
+          break;
+        }
+        case "ForInStatement": {
           this.compileExpression(stmt.right);
-          const iterName = `__iter_${this.currentOffset()}`;
-          const iterIdx = this.addConstant(iterName);
-          this.emit("StaGlobal", iterIdx);
+          const objName = `__forin_obj_${this.currentOffset()}`;
+          const objIdx = this.addConstant(objName);
+          this.emit("StaGlobal", objIdx);
           this.emit("Pop");
-          const counterName = `__idx_${this.currentOffset()}`;
+          this.emit("LdaGlobal", objIdx);
+          this.emit("LdaGlobal", this.addConstant("Object"));
+          this.emitWithIC("GetProperty", this.addConstant("keys"));
+          this.emit("Call", 1);
+          const keysName = `__forin_keys_${this.currentOffset()}`;
+          const keysIdx = this.addConstant(keysName);
+          this.emit("StaGlobal", keysIdx);
+          this.emit("Pop");
+          const counterName = `__forin_idx_${this.currentOffset()}`;
           const counterIdx = this.addConstant(counterName);
-          const zeroIdx = this.addConstant(0);
-          this.emit("LdaConst", zeroIdx);
+          this.emit("LdaConst", this.addConstant(0));
           this.emit("StaGlobal", counterIdx);
           this.emit("Pop");
           const loopStart = this.currentOffset();
           this.emit("LdaGlobal", counterIdx);
-          this.emit("LdaGlobal", iterIdx);
+          this.emit("LdaGlobal", keysIdx);
           this.emitWithIC("GetProperty", this.addConstant("length"));
           this.emit("LessThan");
           const exitJump = this.emit("JumpIfFalse", 0);
-          this.emit("LdaGlobal", iterIdx);
+          this.emit("LdaGlobal", keysIdx);
           this.emit("LdaGlobal", counterIdx);
           this.emit("GetPropertyComputed");
-          if (stmt.left.declarations[0].id.type === "Identifier") {
-            const varName = stmt.left.declarations[0].id.name;
-            if (this.isFunction) {
-              const slot = this.resolveLocal(varName) ?? this.declareLocal(varName);
-              this.emit("StaLocal", slot);
-            } else {
-              const nameIdx = this.addConstant(varName);
-              this.emit("StaGlobal", nameIdx);
-            }
-            this.emit("Pop");
-          }
+          this.compileBindingTarget(stmt.left.declarations[0].id);
           this.compileStatement(stmt.body);
           this.emit("LdaGlobal", counterIdx);
           this.emit("LdaConst", this.addConstant(1));
@@ -2816,6 +3858,30 @@ var jsmini = (() => {
           this.emit("Pop");
           this.emit("Jump", loopStart);
           this.patch(exitJump, this.currentOffset());
+          break;
+        }
+        case "ForOfStatement": {
+          this.compileExpression(stmt.right);
+          this.emit("GetIterator");
+          const iterName = `__iter_${this.currentOffset()}`;
+          const iterIdx = this.addConstant(iterName);
+          this.emit("StaGlobal", iterIdx);
+          this.emit("Pop");
+          const loopStart = this.currentOffset();
+          this.loopStack.push({ label: stmt.__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
+          this.emit("LdaGlobal", iterIdx);
+          this.emit("IteratorNext");
+          this.emit("Dup");
+          this.emit("IteratorComplete");
+          const exitJump = this.emit("JumpIfTrue", 0);
+          this.emit("IteratorValue");
+          this.compileBindingTarget(stmt.left.declarations[0].id);
+          this.compileStatement(stmt.body);
+          this.emit("Jump", loopStart);
+          this.patch(exitJump, this.currentOffset());
+          this.emit("Pop");
+          const loop = this.loopStack.pop();
+          for (const bp of loop.breakPatches) this.patch(bp, this.currentOffset());
           break;
         }
         default:
@@ -2854,10 +3920,49 @@ var jsmini = (() => {
         }
         case "FunctionExpression": {
           const fnCompiler = new _BytecodeCompiler(this);
+          if (expr.generator) fnCompiler.isGenerator = true;
           fnCompiler.compileFunctionBody(expr.params, expr.body.body);
           const fnBytecode = fnCompiler.finish(expr.id?.name ?? "<anonymous>");
           const fnIndex = this.addConstant(fnBytecode);
           this.emit("LdaConst", fnIndex);
+          break;
+        }
+        case "ClassExpression": {
+          const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: "__anonymous__" } };
+          const instanceFields = fakeStmt.body.body.filter((m) => m.type === "PropertyDefinition" && !m.static);
+          const ctorMethod = fakeStmt.body.body.find((m) => m.type === "MethodDefinition" && m.kind === "constructor");
+          const fnCompiler = new _BytecodeCompiler(this);
+          if (ctorMethod) {
+            fnCompiler.compileFunctionBody(ctorMethod.value.params, ctorMethod.value.body.body);
+          } else {
+            fnCompiler.compileFunctionBody([], []);
+          }
+          const ctorFunc = fnCompiler.finish(fakeStmt.id.name);
+          ctorFunc.prototype = {};
+          if (instanceFields.length > 0) ctorFunc.__instanceFields = instanceFields;
+          this.emit("LdaConst", this.addConstant(ctorFunc));
+          for (const member of fakeStmt.body.body) {
+            if (member.type === "PropertyDefinition") continue;
+            if (member.kind === "constructor") continue;
+            const name2 = member.computed ? null : member.key.type === "Literal" ? String(member.key.value) : member.key.name;
+            if (member.kind === "method") {
+              this.emit("Dup");
+              if (!member.static) this.emitWithIC("GetProperty", this.addConstant("prototype"));
+              if (member.computed) {
+                this.compileExpression(member.key);
+                const mc = new _BytecodeCompiler(this);
+                mc.compileFunctionBody(member.value.params, member.value.body.body);
+                this.emit("LdaConst", this.addConstant(mc.finish("<computed>")));
+                this.emit("SetPropertyComputed");
+              } else {
+                const mc = new _BytecodeCompiler(this);
+                mc.compileFunctionBody(member.value.params, member.value.body.body);
+                this.emit("LdaConst", this.addConstant(mc.finish(name2)));
+                this.emitWithIC("SetProperty", this.addConstant(name2));
+              }
+              this.emit("Pop");
+            }
+          }
           break;
         }
         case "AssignmentExpression": {
@@ -2892,6 +3997,9 @@ var jsmini = (() => {
           this.compileExpression(expr.right);
           if (expr.left.type === "Identifier") {
             this.emitStore(expr.left.name);
+          } else if (expr.left.type === "ObjectPattern" || expr.left.type === "ArrayPattern") {
+            this.emit("Dup");
+            this.compileBindingTarget(expr.left);
           } else {
             throw new Error(`Unsupported assignment target: ${expr.left.type}`);
           }
@@ -2899,12 +4007,25 @@ var jsmini = (() => {
         }
         case "MemberExpression": {
           this.compileExpression(expr.object);
-          if (!expr.computed && expr.property.type === "Identifier") {
+          let optionalJump = -1;
+          if (expr.optional) {
+            this.emit("Dup");
+            this.emit("IsNullish");
+            optionalJump = this.emit("JumpIfTrue", 0);
+          }
+          if (!expr.computed && (expr.property.type === "Identifier" || expr.property.type === "PrivateIdentifier")) {
             const nameIdx = this.addConstant(expr.property.name);
             this.emitWithIC("GetProperty", nameIdx);
           } else {
             this.compileExpression(expr.property);
             this.emit("GetPropertyComputed");
+          }
+          if (optionalJump >= 0) {
+            const skipUndefined = this.emit("Jump", 0);
+            this.patch(optionalJump, this.currentOffset());
+            this.emit("Pop");
+            this.emit("LdaUndefined");
+            this.patch(skipUndefined, this.currentOffset());
           }
           break;
         }
@@ -2915,10 +4036,22 @@ var jsmini = (() => {
               continue;
             }
             this.emit("Dup");
-            this.compileExpression(prop.value);
-            const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
-            const nameIdx = this.addConstant(key);
-            this.emitWithIC("SetProperty", nameIdx);
+            if (prop.computed) {
+              this.compileExpression(prop.key);
+              this.compileExpression(prop.value);
+              this.emit("SetPropertyComputed");
+            } else {
+              this.compileExpression(prop.value);
+              const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+              const nameIdx = this.addConstant(key);
+              if (prop.kind === "get") {
+                this.emit("DefineGetter", nameIdx);
+              } else if (prop.kind === "set") {
+                this.emit("DefineSetter", nameIdx);
+              } else {
+                this.emitWithIC("SetProperty", nameIdx);
+              }
+            }
             this.emit("Pop");
           }
           break;
@@ -2977,6 +4110,13 @@ var jsmini = (() => {
             "*": "Mul",
             "/": "Div",
             "%": "Mod",
+            "**": "Exp",
+            "&": "BitAnd",
+            "|": "BitOr",
+            "^": "BitXor",
+            "<<": "ShiftLeft",
+            ">>": "ShiftRight",
+            ">>>": "UShiftRight",
             "==": "Equal",
             "===": "StrictEqual",
             "!=": "NotEqual",
@@ -3007,7 +4147,26 @@ var jsmini = (() => {
             this.emit("Pop");
             this.compileExpression(expr.right);
             this.patch(skipRight, this.currentOffset());
+          } else if (expr.operator === "??") {
+            this.emit("Dup");
+            this.emit("IsNullish");
+            const useRight = this.emit("JumpIfTrue", 0);
+            const skipRight = this.emit("Jump", 0);
+            this.patch(useRight, this.currentOffset());
+            this.emit("Pop");
+            this.compileExpression(expr.right);
+            this.patch(skipRight, this.currentOffset());
           }
+          break;
+        }
+        case "ConditionalExpression": {
+          this.compileExpression(expr.test);
+          const jumpToAlternate = this.emit("JumpIfFalse", 0);
+          this.compileExpression(expr.consequent);
+          const jumpToEnd = this.emit("Jump", 0);
+          this.patch(jumpToAlternate, this.currentOffset());
+          this.compileExpression(expr.alternate);
+          this.patch(jumpToEnd, this.currentOffset());
           break;
         }
         case "ArrowFunctionExpression": {
@@ -3022,6 +4181,15 @@ var jsmini = (() => {
           const fnBytecode = fnCompiler.finish("<arrow>");
           const fnIndex = this.addConstant(fnBytecode);
           this.emit("LdaConst", fnIndex);
+          break;
+        }
+        case "YieldExpression": {
+          if (expr.argument) {
+            this.compileExpression(expr.argument);
+          } else {
+            this.emit("LdaUndefined");
+          }
+          this.emit("Yield");
           break;
         }
         case "TemplateLiteral": {
@@ -3074,6 +4242,8 @@ var jsmini = (() => {
             this.compileExpression(expr.argument);
             if (expr.operator === "-") {
               this.emit("Negate");
+            } else if (expr.operator === "~") {
+              this.emit("BitNot");
             } else if (expr.operator === "!") {
               this.emit("LogicalNot");
             } else if (expr.operator === "typeof") {
@@ -3170,6 +4340,12 @@ var jsmini = (() => {
   }
 
   // src/vm/js-object.ts
+  function isAccessorDescriptor(val) {
+    return typeof val === "object" && val !== null && val.__accessor__ === true;
+  }
+  function createAccessorDescriptor() {
+    return { __accessor__: true };
+  }
   function createJSObject() {
     const obj = /* @__PURE__ */ Object.create(null);
     obj.__hc__ = getRootHC();
@@ -4431,8 +5607,21 @@ var jsmini = (() => {
     if (isJSString(value)) return value.length > 0;
     return !!value;
   }
+  function jsminiTypeof(val) {
+    if (isJSSymbol(val)) return "symbol";
+    if (isJSString(val)) return "string";
+    if (val === null) return "object";
+    if (typeof val === "object" && val !== null && ("bytecode" in val && "paramCount" in val || "__closure" in val)) return "function";
+    return typeof val;
+  }
   var THROWN_SENTINEL = /* @__PURE__ */ Symbol("thrown");
-  var VM = class {
+  var YieldSignal = class {
+    constructor(value) {
+      __publicField(this, "value");
+      this.value = value;
+    }
+  };
+  var VM = class _VM {
     constructor() {
       __publicField(this, "stack", []);
       __publicField(this, "sp", -1);
@@ -4550,6 +5739,129 @@ var jsmini = (() => {
     }
     createICSlots(func) {
       return Array.from({ length: func.icSlotCount || 0 }, createICSlot);
+    }
+    // GeneratorObject を作成
+    createGeneratorObject(func, locals, upvalueBoxes) {
+      const vm = new _VM();
+      vm.globals = this.globals;
+      vm.heap = this.heap;
+      vm.objectPrototype = this.objectPrototype;
+      vm.arrayPrototype = this.arrayPrototype;
+      vm.stringPrototype = this.stringPrototype;
+      const genObj = {
+        __generator__: true,
+        state: "suspended",
+        func,
+        locals: locals.slice(),
+        // コピー
+        pc: 0,
+        savedStack: [],
+        upvalueBoxes,
+        vm,
+        next: (value) => {
+          if (genObj.state === "completed") {
+            return { value: void 0, done: true };
+          }
+          genObj.state = "executing";
+          vm.sp = -1;
+          for (const v of genObj.savedStack) {
+            vm.push(v);
+          }
+          if (genObj.pc > 0) {
+            vm.push(value);
+          }
+          vm.frames.push({
+            func: genObj.func,
+            pc: genObj.pc,
+            locals: genObj.locals,
+            thisValue: void 0,
+            icSlots: vm.createICSlots(genObj.func),
+            upvalueBoxes: genObj.upvalueBoxes
+          });
+          try {
+            vm._runBaseFrameCount = vm.frames.length - 1;
+            const result = vm.run(vm.frames.length - 1);
+            genObj.state = "completed";
+            return { value: result, done: true };
+          } catch (e) {
+            if (e instanceof YieldSignal) {
+              genObj.state = "suspended";
+              const currentFrame = vm.frames[vm.frames.length - 1];
+              genObj.pc = currentFrame.pc;
+              genObj.locals = currentFrame.locals;
+              genObj.savedStack = [];
+              vm.frames.pop();
+              return { value: e.value, done: false };
+            }
+            genObj.state = "completed";
+            throw e;
+          }
+        },
+        return: (value) => {
+          genObj.state = "completed";
+          return { value, done: true };
+        },
+        "@@iterator": () => genObj
+      };
+      return genObj;
+    }
+    // 汎用の関数呼び出し (BytecodeFunction, closure, native function 対応)
+    callAny(fn, thisValue, args) {
+      if (typeof fn === "function") {
+        return fn.apply(thisValue, args);
+      }
+      if (typeof fn === "object" && fn !== null && "__closure" in fn) {
+        const closure = fn;
+        return this.callInternalWithBoxes(closure.func, thisValue, args, closure.capturedBoxes);
+      }
+      if (typeof fn === "object" && fn !== null && "bytecode" in fn) {
+        return this.callInternal(fn, thisValue, args);
+      }
+      throw new TypeError("Not a function");
+    }
+    callInternalWithBoxes(func, thisValue, args, boxes) {
+      const locals = new Array(func.localCount).fill(void 0);
+      for (let i = 0; i < args.length && i < func.paramCount; i++) {
+        locals[i] = args[i];
+      }
+      const savedSp = this.sp;
+      const baseFrameCount = this.frames.length;
+      this.frames.push({
+        func,
+        pc: 0,
+        locals,
+        thisValue,
+        icSlots: this.createICSlots(func),
+        upvalueBoxes: boxes
+      });
+      try {
+        this.run(baseFrameCount);
+      } catch (e) {
+        this.sp = savedSp;
+        const throwValue = e?.__thrown ? e.value : e;
+        if (this.unwindToHandler(throwValue)) return THROWN_SENTINEL;
+        throw e;
+      }
+      const hasResult = this.sp > savedSp;
+      const result = hasResult ? this.stack[this.sp] : void 0;
+      this.sp = savedSp;
+      return result;
+    }
+    // getter/setter 関数を呼び出すヘルパー
+    callGetterSetter(fn, thisValue, arg) {
+      const isClosure = typeof fn === "object" && fn !== null && fn.__closure;
+      const func = isClosure ? fn.func : fn;
+      const boxes = isClosure ? fn.capturedBoxes : [];
+      const vm = new _VM();
+      vm.globals = this.globals;
+      vm.heap = this.heap;
+      vm.objectPrototype = this.objectPrototype;
+      vm.arrayPrototype = this.arrayPrototype;
+      vm.stringPrototype = this.stringPrototype;
+      const locals = new Array(func.localCount).fill(void 0);
+      if (arg !== void 0) locals[0] = arg;
+      vm.frames.push({ func, pc: 0, locals, thisValue, icSlots: vm.createICSlots(func), upvalueBoxes: boxes });
+      return vm.run();
     }
     // 例外をフレームスタックをアンワインドしてハンドラを探す
     // minFrameCount より下のフレームは探さない (callInternal の境界)
@@ -4794,6 +6106,59 @@ var jsmini = (() => {
             this.push(l % r);
             break;
           }
+          case "Exp": {
+            const r = this.toPrimitive(this.pop());
+            if (r === THROWN_SENTINEL) continue;
+            const l = this.toPrimitive(this.pop());
+            if (l === THROWN_SENTINEL) continue;
+            this.push(l ** r);
+            break;
+          }
+          case "BitAnd": {
+            const r = this.pop();
+            const l = this.pop();
+            this.push(l & r);
+            break;
+          }
+          case "BitOr": {
+            const r = this.pop();
+            const l = this.pop();
+            this.push(l | r);
+            break;
+          }
+          case "BitXor": {
+            const r = this.pop();
+            const l = this.pop();
+            this.push(l ^ r);
+            break;
+          }
+          case "BitNot": {
+            this.push(~this.pop());
+            break;
+          }
+          case "ShiftLeft": {
+            const r = this.pop();
+            const l = this.pop();
+            this.push(l << r);
+            break;
+          }
+          case "ShiftRight": {
+            const r = this.pop();
+            const l = this.pop();
+            this.push(l >> r);
+            break;
+          }
+          case "UShiftRight": {
+            const r = this.pop();
+            const l = this.pop();
+            this.push(l >>> r);
+            break;
+          }
+          case "IsNullish": {
+            const val = this.pop();
+            this.push(val === null || val === void 0);
+            break;
+          }
           case "Negate": {
             const val = this.toPrimitive(this.pop());
             if (val === THROWN_SENTINEL) continue;
@@ -4809,8 +6174,19 @@ var jsmini = (() => {
               this.push(jsStringEquals(left, right));
             } else if (isJSString(left) || isJSString(right)) {
               this.push(false);
+            } else if (instr.op === "Equal") {
+              const l = this.toPrimitive(left);
+              if (l === THROWN_SENTINEL) {
+                continue;
+              }
+              const r = this.toPrimitive(right);
+              if (r === THROWN_SENTINEL) {
+                continue;
+              }
+              if (isJSString(l) && isJSString(r)) this.push(jsStringEquals(l, r));
+              else this.push(l == r);
             } else {
-              this.push(instr.op === "Equal" ? left == right : left === right);
+              this.push(left === right);
             }
             break;
           }
@@ -4822,8 +6198,19 @@ var jsmini = (() => {
               this.push(!jsStringEquals(left, right));
             } else if (isJSString(left) || isJSString(right)) {
               this.push(true);
+            } else if (instr.op === "NotEqual") {
+              const l = this.toPrimitive(left);
+              if (l === THROWN_SENTINEL) {
+                continue;
+              }
+              const r = this.toPrimitive(right);
+              if (r === THROWN_SENTINEL) {
+                continue;
+              }
+              if (isJSString(l) && isJSString(r)) this.push(!jsStringEquals(l, r));
+              else this.push(l != r);
             } else {
-              this.push(instr.op === "NotEqual" ? left != right : left !== right);
+              this.push(left !== right);
             }
             break;
           }
@@ -4971,14 +6358,56 @@ var jsmini = (() => {
             }
             break;
           }
+          case "DefineGetter":
+          case "DefineSetter": {
+            const fn = this.pop();
+            const obj = this.peek();
+            const name2 = constants[instr.operand];
+            if (isJSObject(obj)) {
+              const existing = getProperty2(obj, name2);
+              const desc = isAccessorDescriptor(existing) ? existing : createAccessorDescriptor();
+              if (instr.op === "DefineGetter") {
+                desc.get = fn;
+              } else {
+                desc.set = fn;
+              }
+              setProperty(obj, name2, desc);
+            } else {
+              const target = obj;
+              const existingDesc = Object.getOwnPropertyDescriptor(target, name2) ?? {};
+              const descriptor = {
+                get: existingDesc.get,
+                set: existingDesc.set,
+                configurable: true,
+                enumerable: true
+              };
+              const self = this;
+              if (instr.op === "DefineGetter") {
+                descriptor.get = function() {
+                  return self.callGetterSetter(fn, this, void 0);
+                };
+              } else {
+                descriptor.set = function(v) {
+                  self.callGetterSetter(fn, this, v);
+                };
+              }
+              Object.defineProperty(target, name2, descriptor);
+            }
+            break;
+          }
           case "SetPropertyAssign": {
             const obj = this.pop();
             const value = this.pop();
             const name2 = constants[instr.operand];
             if (isJSObject(obj)) {
-              setProperty(obj, name2, value);
-              const ic = instr.icSlot !== void 0 ? frame.icSlots[instr.icSlot] : null;
-              if (ic) icUpdate(ic, getHiddenClass(obj), name2);
+              const existing = getProperty2(obj, name2);
+              if (isAccessorDescriptor(existing) && existing.set) {
+                this.callGetterSetter(existing.set, obj, value);
+              } else {
+                setProperty(obj, name2, value);
+                const ic = instr.icSlot !== void 0 ? frame.icSlots[instr.icSlot] : null;
+                if (ic) icUpdate(ic, getHiddenClass(obj), name2);
+              }
             } else {
               obj[name2] = value;
             }
@@ -4987,20 +6416,41 @@ var jsmini = (() => {
           }
           case "GetProperty": {
             const obj = this.pop();
+            if (obj === null || obj === void 0) {
+              const name2 = constants[instr.operand];
+              const err = new TypeError(`Cannot read properties of ${obj} (reading '${name2}')`);
+              if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+              break;
+            }
             if (instr.icSlot !== void 0 && isJSObject(obj)) {
               const ic = frame.icSlots[instr.icSlot];
               const hc = getHiddenClass(obj);
               if (ic.cachedHC === hc && ic.cachedOffset >= 0) {
-                this.push(getSlots(obj)[ic.cachedOffset]);
+                const val2 = getSlots(obj)[ic.cachedOffset];
+                if (isAccessorDescriptor(val2)) {
+                  this.push(val2.get ? this.callGetterSetter(val2.get, obj, void 0) : void 0);
+                } else {
+                  this.push(val2);
+                }
                 break;
               }
               const name2 = constants[instr.operand];
               if (ic.state !== "polymorphic") icUpdate(ic, hc, name2);
-              this.push(getProperty2(obj, name2));
+              const val = getProperty2(obj, name2);
+              if (isAccessorDescriptor(val)) {
+                this.push(val.get ? this.callGetterSetter(val.get, obj, void 0) : void 0);
+              } else {
+                this.push(val);
+              }
             } else {
               const name2 = constants[instr.operand];
               if (isJSObject(obj)) {
-                this.push(getProperty2(obj, name2));
+                const val = getProperty2(obj, name2);
+                if (isAccessorDescriptor(val)) {
+                  this.push(val.get ? this.callGetterSetter(val.get, obj, void 0) : void 0);
+                } else {
+                  this.push(val);
+                }
               } else {
                 if (name2 === "prototype" && typeof obj === "object" && obj !== null && "bytecode" in obj && !obj.prototype) {
                   const proto = this.heap.allocate(createJSObject());
@@ -5021,7 +6471,7 @@ var jsmini = (() => {
           case "GetPropertyComputed": {
             const key = this.pop();
             const obj = this.pop();
-            const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
+            const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
             this.push(obj[keyStr]);
             break;
           }
@@ -5032,8 +6482,12 @@ var jsmini = (() => {
             if (Array.isArray(obj) && typeof key === "number") {
               setElement(obj, key, value);
             } else {
-              const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
-              obj[keyStr] = value;
+              const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
+              if (isJSObject(obj)) {
+                setProperty(obj, keyStr, value);
+              } else {
+                obj[keyStr] = value;
+              }
             }
             this.push(value);
             break;
@@ -5052,6 +6506,55 @@ var jsmini = (() => {
             break;
           }
           // in / instanceof
+          // Iterator protocol
+          case "GetIterator": {
+            const obj = this.pop();
+            if (Array.isArray(obj)) {
+              this.push({ __arrayIter__: true, arr: obj, idx: 0 });
+            } else if (isJSString(obj)) {
+              const str = jsStringToString(obj);
+              const chars = [...str].map((c) => internString(c));
+              this.push({ __arrayIter__: true, arr: chars, idx: 0 });
+            } else {
+              const iterFn = isJSObject(obj) ? getProperty2(obj, "@@iterator") : obj?.["@@iterator"];
+              if (!iterFn) throw new TypeError("obj is not iterable");
+              const iterator = this.callAny(iterFn, obj, []);
+              if (iterator === THROWN_SENTINEL) break;
+              this.push(iterator);
+            }
+            break;
+          }
+          case "IteratorNext": {
+            const iterator = this.pop();
+            if (iterator?.__arrayIter__) {
+              const ai = iterator;
+              if (ai.idx < ai.arr.length) {
+                this.push({ value: ai.arr[ai.idx], done: false });
+                ai.idx++;
+              } else {
+                this.push({ value: void 0, done: true });
+              }
+            } else {
+              const nextFn = isJSObject(iterator) ? getProperty2(iterator, "next") : iterator?.next;
+              if (!nextFn) throw new TypeError("iterator.next is not a function");
+              const result = this.callAny(nextFn, iterator, []);
+              if (result === THROWN_SENTINEL) break;
+              this.push(result);
+            }
+            break;
+          }
+          case "IteratorComplete": {
+            const result = this.pop();
+            const done = isJSObject(result) ? getProperty2(result, "done") : result?.done;
+            this.push(!!done);
+            break;
+          }
+          case "IteratorValue": {
+            const result = this.pop();
+            const value = isJSObject(result) ? getProperty2(result, "value") : result?.value;
+            this.push(value);
+            break;
+          }
           case "In": {
             const right = this.pop();
             const left = this.pop();
@@ -5082,9 +6585,7 @@ var jsmini = (() => {
           // typeof
           case "TypeOf": {
             const val = this.pop();
-            if (isJSString(val)) this.push(internString("string"));
-            else if (val === null) this.push(internString("object"));
-            else this.push(internString(typeof val));
+            this.push(internString(jsminiTypeof(val)));
             break;
           }
           case "TypeOfGlobal": {
@@ -5093,19 +6594,23 @@ var jsmini = (() => {
               this.push(internString("undefined"));
             } else {
               const val = this.globals.get(name2);
-              if (isJSString(val)) this.push(internString("string"));
-              else if (val === null) this.push(internString("object"));
-              else this.push(internString(typeof val));
+              this.push(internString(jsminiTypeof(val)));
             }
             break;
           }
           // 更新
-          case "Increment":
-            this.push(this.pop() + 1);
+          case "Increment": {
+            const v = this.toPrimitive(this.pop());
+            if (v === THROWN_SENTINEL) continue;
+            this.push(v + 1);
             break;
-          case "Decrement":
-            this.push(this.pop() - 1);
+          }
+          case "Decrement": {
+            const v = this.toPrimitive(this.pop());
+            if (v === THROWN_SENTINEL) continue;
+            this.push(v - 1);
             break;
+          }
           // throw
           case "Throw": {
             const throwValue = this.pop();
@@ -5138,22 +6643,31 @@ var jsmini = (() => {
             if (typeof callee === "function") {
               this.push(callee(...args));
             } else if (fn) {
-              if (this.feedback) this.feedback.recordCall(fn, args);
-              if (this.jit) {
-                const upvalueValues = closureBoxes.map((b) => b.value);
-                const jitResult = this.jit.tryCall(fn, args, upvalueValues);
-                if (jitResult !== null) {
-                  this.push(jitResult.result);
-                  break;
-                }
-              }
               const locals = new Array(fn.localCount).fill(void 0);
-              for (let i = 0; i < fn.paramCount; i++) {
-                locals[i] = args[i] ?? void 0;
+              if (fn.hasRestParam) {
+                const restIdx = fn.paramCount - 1;
+                for (let i = 0; i < restIdx; i++) locals[i] = args[i] ?? void 0;
+                locals[restIdx] = args.slice(restIdx);
+              } else {
+                for (let i = 0; i < fn.paramCount; i++) locals[i] = args[i] ?? void 0;
               }
-              this.frames.push({ func: fn, pc: 0, locals, thisValue: void 0, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
+              if (fn.isGenerator) {
+                const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
+                this.push(genObj);
+              } else {
+                if (this.feedback) this.feedback.recordCall(fn, args);
+                if (this.jit) {
+                  const upvalueValues = closureBoxes.map((b) => b.value);
+                  const jitResult = this.jit.tryCall(fn, args, upvalueValues);
+                  if (jitResult !== null) {
+                    this.push(jitResult.result);
+                    break;
+                  }
+                }
+                this.frames.push({ func: fn, pc: 0, locals, thisValue: void 0, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
+              }
             } else {
-              throw new Error("Not a function");
+              throw new TypeError("Not a function");
             }
             break;
           }
@@ -5201,7 +6715,7 @@ var jsmini = (() => {
               }
               this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: [] });
             } else {
-              throw new Error("Not a function");
+              throw new TypeError("Not a function");
             }
             break;
           }
@@ -5234,14 +6748,46 @@ var jsmini = (() => {
                 throw new Error(`Unknown native constructor: ${ctor.name}`);
               }
             } else if (ctor.bytecode) {
+              if (ctor.__instanceFields) {
+                for (const field of ctor.__instanceFields) {
+                  const name2 = field.key.name;
+                  let value = void 0;
+                  if (field.value) {
+                    if (field.value.type === "Literal") {
+                      value = field.value.value;
+                    } else {
+                      const idx = ctor.constants?.indexOf(field.value) ?? -1;
+                      if (idx < 0) {
+                      }
+                    }
+                  }
+                  if (isJSObject(newObj)) {
+                    setProperty(newObj, name2, value);
+                  } else {
+                    newObj[name2] = value;
+                  }
+                }
+              }
               const locals = new Array(ctor.localCount).fill(void 0);
               for (let i = 0; i < ctor.paramCount; i++) {
                 locals[i] = args[i] ?? void 0;
               }
               this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor), upvalueBoxes: [] });
               frame.__pendingNewObj = newObj;
+            } else if (ctor.__closure) {
+              const closure = ctor;
+              const fn = closure.func;
+              const locals = new Array(fn.localCount).fill(void 0);
+              for (let i = 0; i < fn.paramCount; i++) {
+                locals[i] = args[i] ?? void 0;
+              }
+              this.frames.push({ func: fn, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
+              frame.__pendingNewObj = newObj;
+            } else if (typeof ctor === "function") {
+              const result = new ctor(...args);
+              this.push(result);
             } else {
-              throw new Error("Not a constructor");
+              throw new TypeError("Not a constructor");
             }
             break;
           }
@@ -5266,6 +6812,12 @@ var jsmini = (() => {
               return returnValue;
             }
             break;
+          }
+          // Generator yield
+          case "Yield": {
+            const value = this.pop();
+            frame.pc = frame.pc;
+            throw new YieldSignal(value);
           }
           // スタック操作
           case "Pop":
@@ -5847,6 +7399,11 @@ var jsmini = (() => {
     vm.setGlobal("TypeError", TypeError);
     vm.setGlobal("SyntaxError", SyntaxError);
     vm.setGlobal("RangeError", RangeError);
+    vm.setGlobal("Boolean", Boolean);
+    vm.setGlobal("Number", Number);
+    vm.setGlobal("String", String);
+    vm.setGlobal("Array", Array);
+    vm.setGlobal("Function", Function);
     vm.setGlobal("isNaN", (v) => Number.isNaN(Number(v)));
     vm.setGlobal("isFinite", (v) => Number.isFinite(Number(v)));
     vm.setGlobal("parseInt", (s, radix) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
@@ -5858,31 +7415,21 @@ var jsmini = (() => {
       }
       return Object.keys(obj);
     };
-    vm.setGlobal("Object", {
-      keys: (obj) => jsObjKeys(obj).map((k) => internString(k)),
-      values: (obj) => jsObjKeys(obj).map((k) => getProperty2(obj, k)),
-      entries: (obj) => jsObjKeys(obj).map((k) => [internString(k), getProperty2(obj, k)]),
-      assign: (target, ...sources) => {
-        for (const src of sources) {
-          for (const k of jsObjKeys(src)) {
-            if (isJSObject(target)) {
-              setProperty(target, k, getProperty2(src, k));
-            } else {
-              target[k] = getProperty2(src, k);
-            }
-          }
-        }
-        return target;
-      },
-      create: (proto) => {
-        const obj = vm.heap.allocate(createJSObject());
-        if (proto !== null) setProperty(obj, "__proto__", proto);
-        return obj;
-      },
-      freeze: (obj) => obj,
-      // 最小限: freeze は no-op
-      prototype: vm.objectPrototype
-    });
+    const ObjectWrapper = function(...args) {
+      return new Object(...args);
+    };
+    ObjectWrapper.keys = (obj) => jsObjKeys(obj).map((k) => internString(k));
+    ObjectWrapper.values = (obj) => jsObjKeys(obj).map((k) => getProperty2(obj, k));
+    ObjectWrapper.entries = (obj) => jsObjKeys(obj).map((k) => [internString(k), getProperty2(obj, k)]);
+    ObjectWrapper.assign = Object.assign;
+    ObjectWrapper.create = (proto) => {
+      const obj = vm.heap.allocate(createJSObject());
+      if (proto !== null) setProperty(obj, "__proto__", proto);
+      return obj;
+    };
+    ObjectWrapper.freeze = (obj) => obj;
+    ObjectWrapper.prototype = vm.objectPrototype;
+    vm.setGlobal("Object", ObjectWrapper);
     vm.setGlobal("Math", {
       floor: Math.floor,
       ceil: Math.ceil,
@@ -5924,6 +7471,15 @@ var jsmini = (() => {
     };
     vm.setGlobal("console", consoleObj);
     vm.setGlobal("Error", { __nativeConstructor: true, name: "Error" });
+    const SymbolFn = (desc) => {
+      const d = desc !== void 0 ? isJSString(desc) ? jsStringToString(desc) : String(desc) : "";
+      return createSymbol(d);
+    };
+    SymbolFn.iterator = SYMBOL_ITERATOR;
+    SymbolFn.toPrimitive = SYMBOL_TO_PRIMITIVE;
+    SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
+    SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
+    vm.setGlobal("Symbol", SymbolFn);
     if (options.collectFeedback || options.jit) {
       vm.feedback = new FeedbackCollector();
     }
