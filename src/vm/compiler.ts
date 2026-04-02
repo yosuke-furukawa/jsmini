@@ -23,6 +23,7 @@ class BytecodeCompiler {
   // ループスタック: break/continue のジャンプ先パッチ用
   private loopStack: { label?: string; breakPatches: number[]; continuePatches: number[]; continueTarget: number }[] = [];
   private icSlotCount = 0;
+  private hasRestParam = false;
   private upvalues: { name: string; parentSlot: number }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
@@ -154,6 +155,7 @@ class BytecodeCompiler {
       name,
       paramCount: this.paramCount,
       localCount: this.localCount,
+      hasRestParam: this.hasRestParam,
       bytecode: this.bytecode,
       constants: this.constants,
       handlers: this.handlers,
@@ -311,6 +313,7 @@ class BytecodeCompiler {
         }
       } else if (param.type === "RestElement") {
         this.declareLocal(param.argument.name);
+        this.hasRestParam = true;
       } else if (param.type === "ArrayPattern" || param.type === "ObjectPattern") {
         const slot = this.localCount++;
         destructureParams.push({ slot, pattern: param });

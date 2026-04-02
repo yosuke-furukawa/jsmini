@@ -696,27 +696,25 @@ export function parse(source: string): Program {
     let i = pos + 1; // LeftParen の次
     // () => のケース
     if (tokens[i]?.type === "RightParen" && tokens[i + 1]?.type === "Arrow") return true;
-    // (ident) => or (ident, ident, ...) => のケース
-    while (i < tokens.length) {
-      if (tokens[i]?.type !== "Identifier") return false;
-      i++;
-      if (tokens[i]?.type === "RightParen") {
+    // 括弧のネスト深度を追跡して ) => を探す
+    let depth = 1;
+    while (i < tokens.length && depth > 0) {
+      const t = tokens[i]?.type;
+      if (t === "LeftParen" || t === "LeftBracket" || t === "LeftBrace") depth++;
+      else if (t === "RightParen" || t === "RightBracket" || t === "RightBrace") depth--;
+      if (depth === 0) {
         return tokens[i + 1]?.type === "Arrow";
       }
-      if (tokens[i]?.type === "Comma") {
-        i++;
-        continue;
-      }
-      return false;
+      i++;
     }
     return false;
   }
 
   // アロー関数のパラメータリストをパース
-  function parseArrowParams(): { type: "Identifier"; name: string }[] {
+  function parseArrowParams(): any[] {
     eat("LeftParen");
     resetParamState();
-    const params: { type: "Identifier"; name: string }[] = [];
+    const params: any[] = [];
     if (current().type !== "RightParen") {
       params.push(parseParam());
       while (current().type === "Comma") {
@@ -729,7 +727,7 @@ export function parse(source: string): Program {
   }
 
   // アロー関数の本体をパース
-  function parseArrowBody(params: { type: "Identifier"; name: string }[]): Expression {
+  function parseArrowBody(params: any[]): Expression {
     if (current().type === "LeftBrace") {
       const body = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
       return { type: "ArrowFunctionExpression", params, body, expression: false };

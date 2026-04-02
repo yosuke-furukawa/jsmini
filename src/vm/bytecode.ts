@@ -121,6 +121,7 @@ export type BytecodeFunction = {
   name: string;
   paramCount: number;
   localCount: number;
+  hasRestParam?: boolean;  // 最後のパラメータが ...rest
   bytecode: Instruction[];
   constants: unknown[];
   handlers: ExceptionHandler[];

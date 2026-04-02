@@ -360,6 +360,11 @@ const cases: [string, string][] = [
   ["obj default", "var {a = 10, b = 20} = {a: 1}; a + b;"],
   ["array default", "var [x = 5, y = 6] = [1]; x + y;"],
 
+  // rest params
+  ["function rest param", "function f(a, ...rest) { return rest.length; } f(1, 2, 3);"],
+  ["arrow rest param", "var f = (...args) => args.length; f(1, 2, 3, 4);"],
+  ["destructuring arrow", "var f = ({a, b}) => a + b; f({a: 1, b: 2});"],
+
 ];
 
 describe("VM 互換テスト: evaluate vs vmEvaluate", () => {

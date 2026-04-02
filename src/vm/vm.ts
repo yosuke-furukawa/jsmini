@@ -936,8 +936,17 @@ export class VM {
               }
             }
             const locals = new Array(fn.localCount).fill(undefined);
-            for (let i = 0; i < fn.paramCount; i++) {
-              locals[i] = args[i] ?? undefined;
+            if (fn.hasRestParam) {
+              // rest param: 最後のパラメータに余剰引数を配列化
+              const restIdx = fn.paramCount - 1;
+              for (let i = 0; i < restIdx; i++) {
+                locals[i] = args[i] ?? undefined;
+              }
+              locals[restIdx] = args.slice(restIdx);
+            } else {
+              for (let i = 0; i < fn.paramCount; i++) {
+                locals[i] = args[i] ?? undefined;
+              }
             }
             this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
           } else {
