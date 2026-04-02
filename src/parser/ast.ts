@@ -21,6 +21,7 @@ export type Statement =
   | ForStatement
   | ForOfStatement
   | DoWhileStatement
+  | ForInStatement
   | SwitchStatement
   | BlockStatement;
 
@@ -149,6 +150,13 @@ export type ForStatement = {
 
 export type ForOfStatement = {
   type: "ForOfStatement";
+  left: VariableDeclaration;
+  right: Expression;
+  body: Statement;
+};
+
+export type ForInStatement = {
+  type: "ForInStatement";
   left: VariableDeclaration;
   right: Expression;
   body: Statement;

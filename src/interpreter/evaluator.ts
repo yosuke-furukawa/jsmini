@@ -461,6 +461,27 @@ function evalStatement(stmt: Statement, env: Environment): unknown {
       }
       return result;
     }
+    case "ForInStatement": {
+      const obj = evalExpression(stmt.right, env);
+      if (obj === null || obj === undefined) return undefined;
+      const keys = typeof obj === "object" ? Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")) : [];
+      for (const key of keys) {
+        const varName = stmt.left.declarations[0].id.name;
+        if (stmt.left.kind === "var") {
+          try { env.set(varName, internString(key)); } catch { env.define(varName, internString(key)); }
+        } else {
+          env.define(varName, internString(key));
+        }
+        try {
+          evalStatement(stmt.body, env);
+        } catch (e) {
+          if (e instanceof BreakSignal) break;
+          if (e instanceof ContinueSignal) continue;
+          throw e;
+        }
+      }
+      return undefined;
+    }
     case "DoWhileStatement": {
       outer_dowhile: do {
         try {

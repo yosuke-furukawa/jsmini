@@ -282,6 +282,20 @@ export function parse(source: string): Program {
       const kind = kindToken.value as "var" | "let" | "const";
       const id = parseBindingPattern();
 
+      // for...in
+      if (current().type === "In") {
+        eat("In");
+        const right = parseExpression();
+        eat("RightParen");
+        const body = parseStatement();
+        const left: any = {
+          type: "VariableDeclaration",
+          declarations: [{ type: "VariableDeclarator", id, init: null }],
+          kind,
+        };
+        return { type: "ForInStatement", left, right, body };
+      }
+
       // for...of
       if (current().type === "Of") {
         eat("Of");

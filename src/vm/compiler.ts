@@ -616,6 +616,61 @@ class BytecodeCompiler {
         break;
       }
 
+      case "ForInStatement": {
+        // for (var k in obj) — Object.keys(obj) をイテレート
+        // Object.keys を呼んで配列を取得し、for-of と同じパターンでループ
+        this.compileExpression(stmt.right);
+        // Object.keys(obj) を呼ぶ: LdaGlobal "Object" → GetProperty "keys" → Call
+        // 簡易: Object.keys は globals に登録されてるので LdaGlobal + GetProperty + Call
+        // もっと簡易: ForIn 専用オペコードを使う代わりに、
+        // obj をスタックに残して ForIn opcode で keys 配列に変換
+        // → 既存の仕組みで: obj を temp に保存、keys を取得、for-of ループ
+        const objName = `__forin_obj_${this.currentOffset()}`;
+        const objIdx = this.addConstant(objName);
+        this.emit("StaGlobal", objIdx);
+        this.emit("Pop");
+        // Object.keys(obj) を呼ぶ
+        this.emit("LdaGlobal", objIdx);
+        this.emit("LdaGlobal", this.addConstant("Object"));
+        this.emitWithIC("GetProperty", this.addConstant("keys"));
+        // CallMethod: this=Object, arg=obj
+        // → 実際は Call で Object.keys(obj)
+        // スタック: [obj, keys_fn] → Call 1 → keys_fn(obj)
+        this.emit("Call", 1);
+        // 結果は keys 配列。for-of と同じパターン
+        const keysName = `__forin_keys_${this.currentOffset()}`;
+        const keysIdx = this.addConstant(keysName);
+        this.emit("StaGlobal", keysIdx);
+        this.emit("Pop");
+        const counterName = `__forin_idx_${this.currentOffset()}`;
+        const counterIdx = this.addConstant(counterName);
+        this.emit("LdaConst", this.addConstant(0));
+        this.emit("StaGlobal", counterIdx);
+        this.emit("Pop");
+        const loopStart = this.currentOffset();
+        this.emit("LdaGlobal", counterIdx);
+        this.emit("LdaGlobal", keysIdx);
+        this.emitWithIC("GetProperty", this.addConstant("length"));
+        this.emit("LessThan");
+        const exitJump = this.emit("JumpIfFalse", 0);
+        // k = keys[i]
+        this.emit("LdaGlobal", keysIdx);
+        this.emit("LdaGlobal", counterIdx);
+        this.emit("GetPropertyComputed");
+        this.compileBindingTarget(stmt.left.declarations[0].id);
+        // body
+        this.compileStatement(stmt.body);
+        // i++
+        this.emit("LdaGlobal", counterIdx);
+        this.emit("LdaConst", this.addConstant(1));
+        this.emit("Add");
+        this.emit("StaGlobal", counterIdx);
+        this.emit("Pop");
+        this.emit("Jump", loopStart);
+        this.patch(exitJump, this.currentOffset());
+        break;
+      }
+
       case "ForOfStatement": {
         // 配列を取得して GetIterator 的な処理
         // 簡易: 配列の各要素をループ
