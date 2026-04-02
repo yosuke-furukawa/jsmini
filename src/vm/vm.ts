@@ -39,6 +39,29 @@ type CallFrame = {
   upvalueBoxes: UpvalueBox[];  // キャプチャされた変数のボックス
 };
 
+// Generator の中断状態
+type GeneratorState = "suspended" | "executing" | "completed";
+
+type GeneratorObject = {
+  __generator__: true;
+  state: GeneratorState;
+  func: BytecodeFunction;
+  locals: unknown[];
+  pc: number;
+  savedStack: unknown[];  // yield 時のスタック状態
+  upvalueBoxes: UpvalueBox[];
+  vm: VM;  // 実行に使う VM インスタンス
+  next: (value?: unknown) => { value: unknown; done: boolean };
+  return: (value?: unknown) => { value: unknown; done: boolean };
+  "@@iterator": () => GeneratorObject;
+};
+
+// Yield で VM ループを抜けるためのシグナル
+class YieldSignal {
+  value: unknown;
+  constructor(value: unknown) { this.value = value; }
+}
+
 // スタックベースの Bytecode VM
 export class VM {
   private stack: unknown[] = [];
@@ -192,6 +215,78 @@ export class VM {
 
   private createICSlots(func: BytecodeFunction): ICSlot[] {
     return Array.from({ length: func.icSlotCount || 0 }, createICSlot);
+  }
+
+  // GeneratorObject を作成
+  private createGeneratorObject(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[]): GeneratorObject {
+    const vm = new VM();
+    vm.globals = this.globals;
+    vm.heap = this.heap;
+    vm.objectPrototype = this.objectPrototype;
+    vm.arrayPrototype = this.arrayPrototype;
+    vm.stringPrototype = this.stringPrototype;
+
+    const genObj: GeneratorObject = {
+      __generator__: true,
+      state: "suspended",
+      func,
+      locals: locals.slice(), // コピー
+      pc: 0,
+      savedStack: [],
+      upvalueBoxes,
+      vm,
+      next: (value?: unknown) => {
+        if (genObj.state === "completed") {
+          return { value: undefined, done: true };
+        }
+        genObj.state = "executing";
+        // フレームを復元
+        vm.sp = -1;
+        // 前回の yield で保存したスタックを復元
+        for (const v of genObj.savedStack) {
+          vm.push(v);
+        }
+        // next(value) の値をスタックに push（初回以外）
+        if (genObj.pc > 0) {
+          vm.push(value); // yield 式の結果として使われる
+        }
+        vm.frames.push({
+          func: genObj.func,
+          pc: genObj.pc,
+          locals: genObj.locals,
+          thisValue: undefined,
+          icSlots: vm.createICSlots(genObj.func),
+          upvalueBoxes: genObj.upvalueBoxes,
+        });
+        try {
+          vm._runBaseFrameCount = vm.frames.length - 1;
+          const result = vm.run(vm.frames.length - 1);
+          // 正常終了 = return or 関数末尾
+          genObj.state = "completed";
+          return { value: result, done: true };
+        } catch (e) {
+          if (e instanceof YieldSignal) {
+            // yield で中断: 状態を保存
+            genObj.state = "suspended";
+            const currentFrame = vm.frames[vm.frames.length - 1];
+            genObj.pc = currentFrame.pc;
+            genObj.locals = currentFrame.locals;
+            // スタックを保存（現在のフレームのベースから）
+            genObj.savedStack = [];
+            vm.frames.pop();
+            return { value: e.value, done: false };
+          }
+          genObj.state = "completed";
+          throw e;
+        }
+      },
+      return: (value?: unknown) => {
+        genObj.state = "completed";
+        return { value, done: true };
+      },
+      "@@iterator": () => genObj,
+    };
+    return genObj;
   }
 
   // 汎用の関数呼び出し (BytecodeFunction, closure, native function 対応)
@@ -1023,31 +1118,27 @@ export class VM {
             // ネイティブ関数 (isNaN, parseInt, Math.floor 等)
             this.push((callee as Function)(...args));
           } else if (fn) {
-            // 型フィードバック記録
-            if (this.feedback) this.feedback.recordCall(fn, args);
-            // JIT: Wasm キャッシュがあればそちらで実行
-            if (this.jit) {
-              const upvalueValues = closureBoxes.map(b => b.value);
-              const jitResult = this.jit.tryCall(fn, args, upvalueValues);
-              if (jitResult !== null) {
-                this.push(jitResult.result);
-                break;
-              }
-            }
             const locals = new Array(fn.localCount).fill(undefined);
             if (fn.hasRestParam) {
-              // rest param: 最後のパラメータに余剰引数を配列化
               const restIdx = fn.paramCount - 1;
-              for (let i = 0; i < restIdx; i++) {
-                locals[i] = args[i] ?? undefined;
-              }
+              for (let i = 0; i < restIdx; i++) locals[i] = args[i] ?? undefined;
               locals[restIdx] = args.slice(restIdx);
             } else {
-              for (let i = 0; i < fn.paramCount; i++) {
-                locals[i] = args[i] ?? undefined;
-              }
+              for (let i = 0; i < fn.paramCount; i++) locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
+            if (fn.isGenerator) {
+              // Generator: フレームを push せず、GeneratorObject を返す
+              const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
+              this.push(genObj);
+            } else {
+              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.jit) {
+                const upvalueValues = closureBoxes.map(b => b.value);
+                const jitResult = this.jit.tryCall(fn, args, upvalueValues);
+                if (jitResult !== null) { this.push(jitResult.result); break; }
+              }
+              this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
+            }
           } else {
             throw new TypeError("Not a function");
           }
@@ -1208,6 +1299,14 @@ export class VM {
             return returnValue;
           }
           break;
+        }
+
+        // Generator yield
+        case "Yield": {
+          const value = this.pop();
+          // pc は次の命令を指すようにインクリメント済み（run ループで）
+          frame.pc = frame.pc; // 現在の pc を保持（run ループが ++ した後）
+          throw new YieldSignal(value);
         }
 
         // スタック操作

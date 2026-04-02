@@ -427,6 +427,12 @@ const vmOnlyCases: [string, string, unknown][] = [
 
   // Object.keys
   ["Object.keys", "Object.keys({x:1, y:2}).length;", 2],
+
+  // Generator
+  ["generator basic", "function* g() { yield 1; yield 2; yield 3; } var it = g(); it.next().value + it.next().value + it.next().value;", 6],
+  ["generator for-of", "function* range(n) { for (var i = 0; i < n; i = i + 1) yield i; } var s = 0; for (var x of range(5)) s = s + x; s;", 10],
+  ["generator next(value)", "function* e() { var x = yield 1; return x; } var g = e(); g.next(); g.next(42).value;", 42],
+  ["generator done", "function* g() { yield 1; } var it = g(); it.next().done === false && it.next().done === true;", true],
 ];
 
 describe("VM プロトタイプチェーン + ビルトイン", () => {

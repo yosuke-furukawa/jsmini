@@ -99,7 +99,10 @@ export type Opcode =
   // スタック操作
   | "Pop"             // スタックトップを捨てる
   | "Dup"             // スタックトップを複製
-  | "Return";         // 関数から戻る (スタックトップが戻り値)
+  | "Return"          // 関数から戻る (スタックトップが戻り値)
+
+  // Generator
+  | "Yield";          // pop value, suspend generator, push received value on resume
 
 // 1つの命令
 export type Instruction = {
@@ -128,6 +131,7 @@ export type BytecodeFunction = {
   paramCount: number;
   localCount: number;
   hasRestParam?: boolean;  // 最後のパラメータが ...rest
+  isGenerator?: boolean;   // function* で定義されたか
   bytecode: Instruction[];
   constants: unknown[];
   handlers: ExceptionHandler[];

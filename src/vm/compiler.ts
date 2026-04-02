@@ -24,6 +24,7 @@ class BytecodeCompiler {
   private loopStack: { label?: string; breakPatches: number[]; continuePatches: number[]; continueTarget: number }[] = [];
   private icSlotCount = 0;
   private hasRestParam = false;
+  private isGenerator = false;
   private upvalues: { name: string; parentSlot: number }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
@@ -156,6 +157,7 @@ class BytecodeCompiler {
       paramCount: this.paramCount,
       localCount: this.localCount,
       hasRestParam: this.hasRestParam,
+      isGenerator: this.isGenerator,
       bytecode: this.bytecode,
       constants: this.constants,
       handlers: this.handlers,
@@ -371,6 +373,7 @@ class BytecodeCompiler {
 
       case "FunctionDeclaration": {
         const fnCompiler = new BytecodeCompiler(this);
+        if ((stmt as any).generator) fnCompiler.isGenerator = true;
         fnCompiler.compileFunctionBody(stmt.params, stmt.body.body);
         const fnBytecode = fnCompiler.finish(stmt.id.name);
         const fnIndex = this.addConstant(fnBytecode);
@@ -901,6 +904,7 @@ class BytecodeCompiler {
 
       case "FunctionExpression": {
         const fnCompiler = new BytecodeCompiler(this);
+        if ((expr as any).generator) fnCompiler.isGenerator = true;
         fnCompiler.compileFunctionBody(expr.params, expr.body.body);
         const fnBytecode = fnCompiler.finish(expr.id?.name ?? "<anonymous>");
         const fnIndex = this.addConstant(fnBytecode);
@@ -1177,6 +1181,16 @@ class BytecodeCompiler {
         const fnBytecode = fnCompiler.finish("<arrow>");
         const fnIndex = this.addConstant(fnBytecode);
         this.emit("LdaConst", fnIndex);
+        break;
+      }
+
+      case "YieldExpression": {
+        if ((expr as any).argument) {
+          this.compileExpression((expr as any).argument);
+        } else {
+          this.emit("LdaUndefined");
+        }
+        this.emit("Yield");
         break;
       }
 
