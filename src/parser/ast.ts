@@ -20,6 +20,9 @@ export type Statement =
   | WhileStatement
   | ForStatement
   | ForOfStatement
+  | DoWhileStatement
+  | ForInStatement
+  | SwitchStatement
   | BlockStatement;
 
 export type ExpressionStatement = {
@@ -131,6 +134,12 @@ export type WhileStatement = {
   body: Statement;
 };
 
+export type DoWhileStatement = {
+  type: "DoWhileStatement";
+  test: Expression;
+  body: Statement;
+};
+
 export type ForStatement = {
   type: "ForStatement";
   init: VariableDeclaration | Expression | null;
@@ -146,9 +155,28 @@ export type ForOfStatement = {
   body: Statement;
 };
 
+export type ForInStatement = {
+  type: "ForInStatement";
+  left: VariableDeclaration;
+  right: Expression;
+  body: Statement;
+};
+
 export type BlockStatement = {
   type: "BlockStatement";
   body: Statement[];
+};
+
+export type SwitchStatement = {
+  type: "SwitchStatement";
+  discriminant: Expression;
+  cases: SwitchCase[];
+};
+
+export type SwitchCase = {
+  type: "SwitchCase";
+  test: Expression | null; // null = default
+  consequent: Statement[];
 };
 
 export type Expression =
@@ -168,7 +196,15 @@ export type Expression =
   | LogicalExpression
   | UnaryExpression
   | UpdateExpression
-  | AssignmentExpression;
+  | AssignmentExpression
+  | ConditionalExpression;
+
+export type ConditionalExpression = {
+  type: "ConditionalExpression";
+  test: Expression;
+  consequent: Expression;
+  alternate: Expression;
+};
 
 export type UpdateExpression = {
   type: "UpdateExpression";

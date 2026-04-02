@@ -16,8 +16,14 @@ export class ThrowSignal {
   }
 }
 
-export class BreakSignal {}
-export class ContinueSignal {}
+export class BreakSignal {
+  label: string | null;
+  constructor(label: string | null = null) { this.label = label; }
+}
+export class ContinueSignal {
+  label: string | null;
+  constructor(label: string | null = null) { this.label = label; }
+}
 
 // 関数オブジェクトの内部表現
 export const JS_FUNCTION_BRAND = Symbol("JSFunction");
@@ -72,10 +78,13 @@ export function getProperty(obj: JSObject, key: string): unknown {
 // Pattern から束縛される変数名を全て収集する (BoundNames)
 export function collectBoundNames(pattern: any): string[] {
   if (pattern.type === "Identifier") return [pattern.name];
+  if (pattern.type === "RestElement") return collectBoundNames(pattern.argument);
+  if (pattern.type === "AssignmentPattern") return collectBoundNames(pattern.left);
   if (pattern.type === "ObjectPattern") {
     const names: string[] = [];
     for (const prop of pattern.properties) {
-      names.push(...collectBoundNames(prop.value));
+      if (prop.type === "RestElement") names.push(...collectBoundNames(prop.argument));
+      else names.push(...collectBoundNames(prop.value));
     }
     return names;
   }
@@ -95,6 +104,7 @@ export function bindPattern(
   value: unknown,
   env: Environment,
   kind: "var" | "let" | "const",
+  defaultResolver?: (expr: any) => unknown,
 ): void {
   if (pattern.type === "Identifier") {
     if (kind === "const") {
@@ -107,17 +117,36 @@ export function bindPattern(
     }
   } else if (pattern.type === "ObjectPattern") {
     const obj = value as Record<string, unknown>;
+    const boundKeys: string[] = [];
     for (const prop of pattern.properties) {
-      const propValue = obj ? getProperty(obj as JSObject, prop.key.name) : undefined;
-      bindPattern(prop.value, propValue, env, kind);
+      if (prop.type === "RestElement") {
+        const rest: Record<string, unknown> = {};
+        if (obj) {
+          for (const k of Object.keys(obj)) {
+            if (!boundKeys.includes(k) && k !== "__proto__") rest[k] = obj[k];
+          }
+        }
+        bindPattern(prop.argument, rest, env, kind, defaultResolver);
+      } else {
+        boundKeys.push(prop.key.name);
+        const propValue = obj ? getProperty(obj as JSObject, prop.key.name) : undefined;
+        bindPattern(prop.value, propValue, env, kind, defaultResolver);
+      }
     }
   } else if (pattern.type === "ArrayPattern") {
     const arr = value as unknown[];
     for (let i = 0; i < pattern.elements.length; i++) {
-      if (pattern.elements[i]) {
-        bindPattern(pattern.elements[i], arr?.[i], env, kind);
+      const el = pattern.elements[i];
+      if (!el) continue;
+      if (el.type === "RestElement") {
+        bindPattern(el.argument, arr?.slice(i) ?? [], env, kind, defaultResolver);
+        break;
       }
+      bindPattern(el, arr?.[i], env, kind, defaultResolver);
     }
+  } else if (pattern.type === "AssignmentPattern") {
+    const val = (value === undefined && defaultResolver) ? defaultResolver(pattern.right) : value;
+    bindPattern(pattern.left, val, env, kind, defaultResolver);
   }
 }
 
@@ -127,16 +156,32 @@ export function assignPattern(pattern: any, value: unknown, env: Environment): v
     env.set(pattern.name, value);
   } else if (pattern.type === "ObjectPattern") {
     const obj = value as Record<string, unknown>;
+    const boundKeys: string[] = [];
     for (const prop of pattern.properties) {
-      const propValue = obj ? getProperty(obj as JSObject, prop.key.name) : undefined;
-      assignPattern(prop.value, propValue, env);
+      if (prop.type === "RestElement") {
+        const rest: Record<string, unknown> = {};
+        if (obj) {
+          for (const k of Object.keys(obj)) {
+            if (!boundKeys.includes(k) && k !== "__proto__") rest[k] = obj[k];
+          }
+        }
+        assignPattern(prop.argument, rest, env);
+      } else {
+        boundKeys.push(prop.key.name);
+        const propValue = obj ? getProperty(obj as JSObject, prop.key.name) : undefined;
+        assignPattern(prop.value, propValue, env);
+      }
     }
   } else if (pattern.type === "ArrayPattern") {
     const arr = value as unknown[];
     for (let i = 0; i < pattern.elements.length; i++) {
-      if (pattern.elements[i]) {
-        assignPattern(pattern.elements[i], arr?.[i], env);
+      const el = pattern.elements[i];
+      if (!el) continue;
+      if (el.type === "RestElement") {
+        assignPattern(el.argument, arr?.slice(i) ?? [], env);
+        break;
       }
+      assignPattern(el, arr?.[i], env);
     }
   }
 }

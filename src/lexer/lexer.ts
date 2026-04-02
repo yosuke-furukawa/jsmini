@@ -29,6 +29,11 @@ Object.assign(KEYWORDS, {
   of: "Of",
   in: "In",
   instanceof: "Instanceof",
+  do: "Do",
+  switch: "Switch",
+  case: "Case",
+  default: "Default",
+  yield: "Yield",
   // undefined は予約語ではないのでキーワードに含めない
 });
 
@@ -89,14 +94,25 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // 数値リテラル
+    // 数値リテラル (0x, 0b, 0o 対応)
     if (isDigit(ch)) {
       const start = pos;
       const startCol = column;
-      while (pos < source.length && isDigit(peek())) advance();
-      if (peek() === "." && isDigit(peek(1))) {
-        advance(); // '.'
+      if (ch === "0" && (peek(1) === "x" || peek(1) === "X")) {
+        advance(); advance(); // skip '0x'
+        while (pos < source.length && /[0-9a-fA-F]/.test(peek())) advance();
+      } else if (ch === "0" && (peek(1) === "b" || peek(1) === "B")) {
+        advance(); advance(); // skip '0b'
+        while (pos < source.length && (peek() === "0" || peek() === "1")) advance();
+      } else if (ch === "0" && (peek(1) === "o" || peek(1) === "O")) {
+        advance(); advance(); // skip '0o'
+        while (pos < source.length && /[0-7]/.test(peek())) advance();
+      } else {
         while (pos < source.length && isDigit(peek())) advance();
+        if (peek() === "." && isDigit(peek(1))) {
+          advance(); // '.'
+          while (pos < source.length && isDigit(peek())) advance();
+        }
       }
       pushToken("Number", source.slice(start, pos), startCol);
       continue;
@@ -138,13 +154,43 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // 識別子・キーワード
-    if (isAlpha(ch)) {
-      const start = pos;
+    // 識別子・キーワード (unicode escape 対応)
+    if (isAlpha(ch) || (ch === "\\" && peek(1) === "u")) {
       const startCol = column;
-      while (pos < source.length && isAlphaNumeric(peek())) advance();
-      const word = source.slice(start, pos);
+      let word = "";
+      while (pos < source.length) {
+        if (peek() === "\\" && peek(1) === "u") {
+          advance(); advance(); // skip \u
+          if (peek() === "{") {
+            // \u{XXXX} 形式
+            advance(); // skip {
+            let hex = "";
+            while (pos < source.length && peek() !== "}") hex += advance();
+            if (pos < source.length) advance(); // skip }
+            word += String.fromCodePoint(parseInt(hex, 16));
+          } else {
+            // \uXXXX 形式
+            let hex = "";
+            for (let j = 0; j < 4 && pos < source.length; j++) hex += advance();
+            word += String.fromCharCode(parseInt(hex, 16));
+          }
+        } else if (isAlphaNumeric(peek())) {
+          word += advance();
+        } else {
+          break;
+        }
+      }
       pushToken(KEYWORDS[word] ?? "Identifier", word, startCol);
+      continue;
+    }
+
+    // Private identifier: #name
+    if (ch === "#" && isAlpha(peek(1))) {
+      const startCol = column;
+      advance(); // skip #
+      const start = pos;
+      while (pos < source.length && isAlphaNumeric(peek())) advance();
+      pushToken("PrivateIdentifier", "#" + source.slice(start, pos), startCol);
       continue;
     }
 
@@ -215,9 +261,33 @@ export function tokenize(source: string): Token[] {
       pushToken("PipePipe", "||", startCol);
       pos += 2; column += 2; continue;
     }
+    if (ch === ">" && peek(1) === ">" && peek(2) === ">") {
+      pushToken("UnsignedShiftRight", ">>>", startCol);
+      pos += 3; column += 3; continue;
+    }
+    if (ch === "<" && peek(1) === "<") {
+      pushToken("ShiftLeft", "<<", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === ">" && peek(1) === ">") {
+      pushToken("ShiftRight", ">>", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "*" && peek(1) === "*") {
+      pushToken("StarStar", "**", startCol);
+      pos += 2; column += 2; continue;
+    }
     if (ch === "." && peek(1) === "." && peek(2) === ".") {
       pushToken("DotDotDot", "...", startCol);
       pos += 3; column += 3; continue;
+    }
+    if (ch === "?" && peek(1) === ".") {
+      pushToken("QuestionDot", "?.", startCol);
+      pos += 2; column += 2; continue;
+    }
+    if (ch === "?" && peek(1) === "?") {
+      pushToken("QuestionQuestion", "??", startCol);
+      pos += 2; column += 2; continue;
     }
 
     // 波括弧: テンプレートリテラルのネスト管理のため特別扱い
@@ -244,9 +314,10 @@ export function tokenize(source: string): Token[] {
     const singleCharMap: Record<string, TokenType> = {
       "+": "Plus", "-": "Minus", "*": "Star", "/": "Slash", "%": "Percent",
       "=": "Equals", "!": "Bang", "<": "Less", ">": "Greater",
+      "&": "Ampersand", "|": "Pipe", "^": "Caret", "~": "Tilde",
       "(": "LeftParen", ")": "RightParen",
       "[": "LeftBracket", "]": "RightBracket",
-      ":": "Colon", ".": "Dot", ",": "Comma",
+      ":": "Colon", "?": "Question", ".": "Dot", ",": "Comma",
       ";": "Semicolon",
     };
 

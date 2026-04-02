@@ -7,6 +7,21 @@ import { type HiddenClass, getRootHC, transition, lookupOffset } from "./hidden-
 const HC_KEY = "__hc__";
 const SLOTS_KEY = "__slots__";
 
+// getter/setter アクセサディスクリプタ
+export type AccessorDescriptor = {
+  __accessor__: true;
+  get?: unknown; // BytecodeFunction or closure
+  set?: unknown;
+};
+
+export function isAccessorDescriptor(val: unknown): val is AccessorDescriptor {
+  return typeof val === "object" && val !== null && (val as any).__accessor__ === true;
+}
+
+export function createAccessorDescriptor(): AccessorDescriptor {
+  return { __accessor__: true };
+}
+
 export type JSObjectInternal = Record<string, unknown> & {
   __hc__: HiddenClass;
   __slots__: unknown[];

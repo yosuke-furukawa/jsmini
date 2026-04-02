@@ -35,6 +35,10 @@ export type TokenType =
   | "Extends"          // extends
   | "Super"            // super
   | "Of"               // of
+  | "Do"               // do
+  | "Switch"           // switch
+  | "Case"             // case
+  | "Default"          // default
   // undefined は予約語ではないのでキーワードに含めない
   // Operators
   | "Plus"             // +
@@ -64,6 +68,16 @@ export type TokenType =
   | "PercentEquals"    // %=
   | "AmpersandAmpersand" // &&
   | "PipePipe"         // ||
+  | "Ampersand"        // &
+  | "Pipe"             // |
+  | "Caret"            // ^
+  | "Tilde"            // ~
+  | "ShiftLeft"        // <<
+  | "ShiftRight"       // >>
+  | "UnsignedShiftRight" // >>>
+  | "StarStar"         // **
+  | "QuestionDot"      // ?.
+  | "QuestionQuestion" // ??
   // Delimiters
   | "LeftParen"        // (
   | "RightParen"       // )
@@ -73,9 +87,13 @@ export type TokenType =
   | "RightBracket"     // ]
   | "DotDotDot"        // ...
   | "Colon"            // :
+  | "Question"         // ?
   | "Dot"              // .
   | "Comma"            // ,
   | "Semicolon"        // ;
+  | "Yield"             // yield
+  // Private identifier
+  | "PrivateIdentifier"  // #name
   // Special
   | "EOF";
 

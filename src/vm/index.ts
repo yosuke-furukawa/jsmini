@@ -4,6 +4,7 @@ import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
 import { isJSString, jsStringToString, internString, createSeqString } from "./js-string.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass } from "./js-object.js";
+import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
 import { Heap } from "./heap.js";
 export { disassemble } from "./bytecode.js";
 
@@ -138,6 +139,11 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   vm.setGlobal("TypeError", TypeError);
   vm.setGlobal("SyntaxError", SyntaxError);
   vm.setGlobal("RangeError", RangeError);
+  vm.setGlobal("Boolean", Boolean);
+  vm.setGlobal("Number", Number);
+  vm.setGlobal("String", String);
+  vm.setGlobal("Array", Array);
+  vm.setGlobal("Function", Function);
 
   // グローバル関数
   vm.setGlobal("isNaN", (v: unknown) => Number.isNaN(Number(v)));
@@ -154,31 +160,20 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return Object.keys(obj as Record<string, unknown>);
   };
 
-  // Object
-  vm.setGlobal("Object", {
-    keys: (obj: unknown) => jsObjKeys(obj).map(k => internString(k)),
-    values: (obj: unknown) => jsObjKeys(obj).map(k => jsObjGet(obj as any, k)),
-    entries: (obj: unknown) => jsObjKeys(obj).map(k => [internString(k), jsObjGet(obj as any, k)]),
-    assign: (target: unknown, ...sources: unknown[]) => {
-      for (const src of sources) {
-        for (const k of jsObjKeys(src)) {
-          if (isJSObject(target)) {
-            jsObjSet(target, k, jsObjGet(src as any, k));
-          } else {
-            (target as Record<string, unknown>)[k] = jsObjGet(src as any, k);
-          }
-        }
-      }
-      return target;
-    },
-    create: (proto: unknown) => {
-      const obj = vm.heap.allocate(createJSObject());
-      if (proto !== null) jsObjSet(obj, "__proto__", proto);
-      return obj;
-    },
-    freeze: (obj: unknown) => obj, // 最小限: freeze は no-op
-    prototype: vm.objectPrototype,
-  });
+  // Object: ネイティブ Object をラップ (new Object() + 静的メソッド)
+  const ObjectWrapper: any = function(...args: unknown[]) { return new Object(...args); };
+  ObjectWrapper.keys = (obj: unknown) => jsObjKeys(obj).map(k => internString(k));
+  ObjectWrapper.values = (obj: unknown) => jsObjKeys(obj).map(k => jsObjGet(obj as any, k));
+  ObjectWrapper.entries = (obj: unknown) => jsObjKeys(obj).map(k => [internString(k), jsObjGet(obj as any, k)]);
+  ObjectWrapper.assign = Object.assign;
+  ObjectWrapper.create = (proto: unknown) => {
+    const obj = vm.heap.allocate(createJSObject());
+    if (proto !== null) jsObjSet(obj, "__proto__", proto);
+    return obj;
+  };
+  ObjectWrapper.freeze = (obj: unknown) => obj;
+  ObjectWrapper.prototype = vm.objectPrototype;
+  vm.setGlobal("Object", ObjectWrapper);
 
   // Math
   vm.setGlobal("Math", {
@@ -218,6 +213,16 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   };
   vm.setGlobal("console", consoleObj);
   vm.setGlobal("Error", { __nativeConstructor: true, name: "Error" });
+  // Symbol: 自前実装 (wrapper オブジェクト)
+  const SymbolFn: any = (desc?: unknown) => {
+    const d = desc !== undefined ? (isJSString(desc) ? jsStringToString(desc) : String(desc)) : "";
+    return createSymbol(d);
+  };
+  SymbolFn.iterator = SYMBOL_ITERATOR;
+  SymbolFn.toPrimitive = SYMBOL_TO_PRIMITIVE;
+  SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
+  SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
+  vm.setGlobal("Symbol", SymbolFn);
 
   // フィードバック収集 (JIT 有効時は自動で有効)
   if (options.collectFeedback || options.jit) {

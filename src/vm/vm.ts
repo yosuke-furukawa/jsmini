@@ -2,8 +2,9 @@ import type { BytecodeFunction, Instruction } from "./bytecode.js";
 import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
-import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots } from "./js-object.js";
+import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots, isAccessorDescriptor, createAccessorDescriptor } from "./js-object.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "./js-string.js";
+import { isJSSymbol } from "./js-symbol.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 import { Heap } from "./heap.js";
 import { compileMultiSync } from "../jit/wasm-compiler.js";
@@ -12,6 +13,15 @@ import { compileMultiSync } from "../jit/wasm-compiler.js";
 function isTruthy(value: unknown): boolean {
   if (isJSString(value)) return value.length > 0;
   return !!value;
+}
+
+// jsmini の typeof: Symbol は "@@symbol_" プレフィックスの文字列
+function jsminiTypeof(val: unknown): string {
+  if (isJSSymbol(val)) return "symbol";
+  if (isJSString(val)) return "string";
+  if (val === null) return "object";
+  if (typeof val === "object" && val !== null && ("bytecode" in val && "paramCount" in val || "__closure" in val)) return "function";
+  return typeof val;
 }
 
 // toPrimitive/callInternal 内で例外が unwindToHandler で処理された場合の sentinel
@@ -28,6 +38,29 @@ type CallFrame = {
   icSlots: ICSlot[];
   upvalueBoxes: UpvalueBox[];  // キャプチャされた変数のボックス
 };
+
+// Generator の中断状態
+type GeneratorState = "suspended" | "executing" | "completed";
+
+type GeneratorObject = {
+  __generator__: true;
+  state: GeneratorState;
+  func: BytecodeFunction;
+  locals: unknown[];
+  pc: number;
+  savedStack: unknown[];  // yield 時のスタック状態
+  upvalueBoxes: UpvalueBox[];
+  vm: VM;  // 実行に使う VM インスタンス
+  next: (value?: unknown) => { value: unknown; done: boolean };
+  return: (value?: unknown) => { value: unknown; done: boolean };
+  "@@iterator": () => GeneratorObject;
+};
+
+// Yield で VM ループを抜けるためのシグナル
+class YieldSignal {
+  value: unknown;
+  constructor(value: unknown) { this.value = value; }
+}
 
 // スタックベースの Bytecode VM
 export class VM {
@@ -182,6 +215,136 @@ export class VM {
 
   private createICSlots(func: BytecodeFunction): ICSlot[] {
     return Array.from({ length: func.icSlotCount || 0 }, createICSlot);
+  }
+
+  // GeneratorObject を作成
+  private createGeneratorObject(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[]): GeneratorObject {
+    const vm = new VM();
+    vm.globals = this.globals;
+    vm.heap = this.heap;
+    vm.objectPrototype = this.objectPrototype;
+    vm.arrayPrototype = this.arrayPrototype;
+    vm.stringPrototype = this.stringPrototype;
+
+    const genObj: GeneratorObject = {
+      __generator__: true,
+      state: "suspended",
+      func,
+      locals: locals.slice(), // コピー
+      pc: 0,
+      savedStack: [],
+      upvalueBoxes,
+      vm,
+      next: (value?: unknown) => {
+        if (genObj.state === "completed") {
+          return { value: undefined, done: true };
+        }
+        genObj.state = "executing";
+        // フレームを復元
+        vm.sp = -1;
+        // 前回の yield で保存したスタックを復元
+        for (const v of genObj.savedStack) {
+          vm.push(v);
+        }
+        // next(value) の値をスタックに push（初回以外）
+        if (genObj.pc > 0) {
+          vm.push(value); // yield 式の結果として使われる
+        }
+        vm.frames.push({
+          func: genObj.func,
+          pc: genObj.pc,
+          locals: genObj.locals,
+          thisValue: undefined,
+          icSlots: vm.createICSlots(genObj.func),
+          upvalueBoxes: genObj.upvalueBoxes,
+        });
+        try {
+          vm._runBaseFrameCount = vm.frames.length - 1;
+          const result = vm.run(vm.frames.length - 1);
+          // 正常終了 = return or 関数末尾
+          genObj.state = "completed";
+          return { value: result, done: true };
+        } catch (e) {
+          if (e instanceof YieldSignal) {
+            // yield で中断: 状態を保存
+            genObj.state = "suspended";
+            const currentFrame = vm.frames[vm.frames.length - 1];
+            genObj.pc = currentFrame.pc;
+            genObj.locals = currentFrame.locals;
+            // スタックを保存（現在のフレームのベースから）
+            genObj.savedStack = [];
+            vm.frames.pop();
+            return { value: e.value, done: false };
+          }
+          genObj.state = "completed";
+          throw e;
+        }
+      },
+      return: (value?: unknown) => {
+        genObj.state = "completed";
+        return { value, done: true };
+      },
+      "@@iterator": () => genObj,
+    };
+    return genObj;
+  }
+
+  // 汎用の関数呼び出し (BytecodeFunction, closure, native function 対応)
+  private callAny(fn: unknown, thisValue: unknown, args: unknown[]): unknown {
+    if (typeof fn === "function") {
+      return (fn as Function).apply(thisValue, args);
+    }
+    if (typeof fn === "object" && fn !== null && "__closure" in (fn as any)) {
+      const closure = fn as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
+      return this.callInternalWithBoxes(closure.func, thisValue, args, closure.capturedBoxes);
+    }
+    if (typeof fn === "object" && fn !== null && "bytecode" in (fn as any)) {
+      return this.callInternal(fn as BytecodeFunction, thisValue, args);
+    }
+    throw new TypeError("Not a function");
+  }
+
+  private callInternalWithBoxes(func: BytecodeFunction, thisValue: unknown, args: unknown[], boxes: UpvalueBox[]): unknown {
+    const locals = new Array(func.localCount).fill(undefined);
+    for (let i = 0; i < args.length && i < func.paramCount; i++) {
+      locals[i] = args[i];
+    }
+    const savedSp = this.sp;
+    const baseFrameCount = this.frames.length;
+    this.frames.push({
+      func, pc: 0, locals, thisValue,
+      icSlots: this.createICSlots(func),
+      upvalueBoxes: boxes,
+    });
+    try {
+      this.run(baseFrameCount);
+    } catch (e: any) {
+      this.sp = savedSp;
+      const throwValue = e?.__thrown ? e.value : e;
+      if (this.unwindToHandler(throwValue)) return THROWN_SENTINEL;
+      throw e;
+    }
+    const hasResult = this.sp > savedSp;
+    const result = hasResult ? this.stack[this.sp] : undefined;
+    this.sp = savedSp;
+    return result;
+  }
+
+  // getter/setter 関数を呼び出すヘルパー
+  callGetterSetter(fn: unknown, thisValue: unknown, arg: unknown): unknown {
+    const isClosure = typeof fn === "object" && fn !== null && (fn as any).__closure;
+    const func = isClosure ? (fn as any).func as BytecodeFunction : fn as BytecodeFunction;
+    const boxes: UpvalueBox[] = isClosure ? (fn as any).capturedBoxes : [];
+    const vm = new VM();
+    vm.globals = this.globals;
+    vm.heap = this.heap;
+    vm.objectPrototype = this.objectPrototype;
+    vm.arrayPrototype = this.arrayPrototype;
+    vm.stringPrototype = this.stringPrototype;
+    const locals = new Array(func.localCount).fill(undefined);
+    if (arg !== undefined) locals[0] = arg; // setter の引数
+    vm.frames.push({ func, pc: 0, locals, thisValue, icSlots: vm.createICSlots(func), upvalueBoxes: boxes });
+    return vm.run();
   }
 
   // 例外をフレームスタックをアンワインドしてハンドラを探す
@@ -436,6 +599,24 @@ export class VM {
           this.push((l as number) % (r as number));
           break;
         }
+        case "Exp": {
+          const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
+          const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
+          this.push((l as number) ** (r as number));
+          break;
+        }
+        case "BitAnd": { const r = this.pop(); const l = this.pop(); this.push((l as number) & (r as number)); break; }
+        case "BitOr": { const r = this.pop(); const l = this.pop(); this.push((l as number) | (r as number)); break; }
+        case "BitXor": { const r = this.pop(); const l = this.pop(); this.push((l as number) ^ (r as number)); break; }
+        case "BitNot": { this.push(~(this.pop() as number)); break; }
+        case "ShiftLeft": { const r = this.pop(); const l = this.pop(); this.push((l as number) << (r as number)); break; }
+        case "ShiftRight": { const r = this.pop(); const l = this.pop(); this.push((l as number) >> (r as number)); break; }
+        case "UShiftRight": { const r = this.pop(); const l = this.pop(); this.push((l as number) >>> (r as number)); break; }
+        case "IsNullish": {
+          const val = this.pop();
+          this.push(val === null || val === undefined);
+          break;
+        }
         case "Negate": {
           const val = this.toPrimitive(this.pop());
           if (val === THROWN_SENTINEL) continue;
@@ -452,8 +633,14 @@ export class VM {
             this.push(jsStringEquals(left, right));
           } else if (isJSString(left) || isJSString(right)) {
             this.push(false);
+          } else if (instr.op === "Equal") {
+            // == は ToPrimitive で型変換してから比較
+            const l = this.toPrimitive(left); if (l === THROWN_SENTINEL) { continue; }
+            const r = this.toPrimitive(right); if (r === THROWN_SENTINEL) { continue; }
+            if (isJSString(l) && isJSString(r)) this.push(jsStringEquals(l, r));
+            else this.push(l == r);
           } else {
-            this.push(instr.op === "Equal" ? left == right : left === right);
+            this.push(left === right);
           }
           break;
         }
@@ -465,8 +652,13 @@ export class VM {
             this.push(!jsStringEquals(left, right));
           } else if (isJSString(left) || isJSString(right)) {
             this.push(true);
+          } else if (instr.op === "NotEqual") {
+            const l = this.toPrimitive(left); if (l === THROWN_SENTINEL) { continue; }
+            const r = this.toPrimitive(right); if (r === THROWN_SENTINEL) { continue; }
+            if (isJSString(l) && isJSString(r)) this.push(!jsStringEquals(l, r));
+            else this.push(l != r);
           } else {
-            this.push(instr.op === "NotEqual" ? left != right : left !== right);
+            this.push(left !== right);
           }
           break;
         }
@@ -617,14 +809,59 @@ export class VM {
           }
           break;
         }
+        case "DefineGetter":
+        case "DefineSetter": {
+          const fn = this.pop(); // getter/setter 関数 (BytecodeFunction or closure)
+          const obj = this.peek();
+          const name = constants[instr.operand!] as string;
+          if (isJSObject(obj)) {
+            // JSObject: AccessorDescriptor をスロットに格納
+            const existing = jsObjGet(obj, name);
+            const desc = isAccessorDescriptor(existing) ? existing : createAccessorDescriptor();
+            if (instr.op === "DefineGetter") {
+              desc.get = fn;
+            } else {
+              desc.set = fn;
+            }
+            jsObjSet(obj, name, desc);
+          } else {
+            // plain object: Object.defineProperty を使用
+            const target = obj as Record<string, unknown>;
+            const existingDesc = Object.getOwnPropertyDescriptor(target, name) ?? {};
+            const descriptor: PropertyDescriptor = {
+              get: existingDesc.get,
+              set: existingDesc.set,
+              configurable: true,
+              enumerable: true,
+            };
+            const self = this;
+            if (instr.op === "DefineGetter") {
+              descriptor.get = function(this: unknown) {
+                return self.callGetterSetter(fn, this, undefined);
+              };
+            } else {
+              descriptor.set = function(this: unknown, v: unknown) {
+                self.callGetterSetter(fn, this, v);
+              };
+            }
+            Object.defineProperty(target, name, descriptor);
+          }
+          break;
+        }
+
         case "SetPropertyAssign": {
           const obj = this.pop();
           const value = this.pop();
           const name = constants[instr.operand!] as string;
           if (isJSObject(obj)) {
-            jsObjSet(obj, name, value);
-            const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
-            if (ic) icUpdate(ic, getHiddenClass(obj), name);
+            const existing = jsObjGet(obj, name);
+            if (isAccessorDescriptor(existing) && existing.set) {
+              this.callGetterSetter(existing.set, obj, value);
+            } else {
+              jsObjSet(obj, name, value);
+              const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
+              if (ic) icUpdate(ic, getHiddenClass(obj), name);
+            }
           } else {
             (obj as Record<string, unknown>)[name] = value;
           }
@@ -633,22 +870,41 @@ export class VM {
         }
         case "GetProperty": {
           const obj = this.pop();
+          if (obj === null || obj === undefined) {
+            const name = constants[instr.operand!] as string;
+            const err = new TypeError(`Cannot read properties of ${obj} (reading '${name}')`);
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
           if (instr.icSlot !== undefined && isJSObject(obj)) {
             const ic = frame.icSlots[instr.icSlot];
             const hc = getHiddenClass(obj);
             if (ic.cachedHC === hc && ic.cachedOffset >= 0) {
-              // IC ヒット: slots[offset] を直接アクセス (関数呼び出しなし)
-              this.push(getSlots(obj)[ic.cachedOffset]);
+              const val = getSlots(obj)[ic.cachedOffset];
+              if (isAccessorDescriptor(val)) {
+                this.push(val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined);
+              } else {
+                this.push(val);
+              }
               break;
             }
-            // IC ミス or prototype 参照 → フルパス + IC 更新
             const name = constants[instr.operand!] as string;
             if (ic.state !== "polymorphic") icUpdate(ic, hc, name);
-            this.push(jsObjGet(obj, name));
+            const val = jsObjGet(obj, name);
+            if (isAccessorDescriptor(val)) {
+              this.push(val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined);
+            } else {
+              this.push(val);
+            }
           } else {
             const name = constants[instr.operand!] as string;
             if (isJSObject(obj)) {
-              this.push(jsObjGet(obj, name));
+              const val = jsObjGet(obj, name);
+              if (isAccessorDescriptor(val)) {
+                this.push(val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined);
+              } else {
+                this.push(val);
+              }
             } else {
               // BytecodeFunction の prototype を遅延作成
               if (name === "prototype" && typeof obj === "object" && obj !== null && "bytecode" in obj && !(obj as any).prototype) {
@@ -671,7 +927,7 @@ export class VM {
         case "GetPropertyComputed": {
           const key = this.pop();
           const obj = this.pop() as Record<string, unknown>;
-          const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
+          const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
           this.push(obj[keyStr]);
           break;
         }
@@ -682,8 +938,12 @@ export class VM {
           if (Array.isArray(obj) && typeof key === "number") {
             setElement(obj, key, value);
           } else {
-            const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
-            obj[keyStr] = value;
+            const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
+            if (isJSObject(obj)) {
+              jsObjSet(obj, keyStr, value);
+            } else {
+              obj[keyStr] = value;
+            }
           }
           this.push(value);
           break;
@@ -704,6 +964,60 @@ export class VM {
         }
 
         // in / instanceof
+        // Iterator protocol
+        case "GetIterator": {
+          const obj = this.pop();
+          if (Array.isArray(obj)) {
+            this.push({ __arrayIter__: true, arr: obj, idx: 0 });
+          } else if (isJSString(obj)) {
+            // 文字列イテレータ: 1文字ずつ返す
+            const str = jsStringToString(obj);
+            const chars = [...str].map(c => internString(c));
+            this.push({ __arrayIter__: true, arr: chars, idx: 0 });
+          } else {
+            // @@iterator を取得
+            const iterFn = isJSObject(obj) ? jsObjGet(obj, "@@iterator") : (obj as any)?.["@@iterator"];
+            if (!iterFn) throw new TypeError("obj is not iterable");
+            const iterator = this.callAny(iterFn, obj, []);
+            if (iterator === THROWN_SENTINEL) break;
+            this.push(iterator);
+          }
+          break;
+        }
+        case "IteratorNext": {
+          const iterator = this.pop();
+          if ((iterator as any)?.__arrayIter__) {
+            const ai = iterator as { arr: unknown[]; idx: number };
+            if (ai.idx < ai.arr.length) {
+              this.push({ value: ai.arr[ai.idx], done: false });
+              ai.idx++;
+            } else {
+              this.push({ value: undefined, done: true });
+            }
+          } else {
+            const nextFn = isJSObject(iterator) ? jsObjGet(iterator, "next") : (iterator as any)?.next;
+            if (!nextFn) throw new TypeError("iterator.next is not a function");
+            const result = this.callAny(nextFn, iterator, []);
+            if (result === THROWN_SENTINEL) break;
+            this.push(result);
+          }
+          break;
+        }
+        case "IteratorComplete": {
+          // pop result, push result.done
+          const result = this.pop();
+          const done = isJSObject(result) ? jsObjGet(result, "done") : (result as any)?.done;
+          this.push(!!done);
+          break;
+        }
+        case "IteratorValue": {
+          // pop result, push result.value
+          const result = this.pop();
+          const value = isJSObject(result) ? jsObjGet(result, "value") : (result as any)?.value;
+          this.push(value);
+          break;
+        }
+
         case "In": {
           const right = this.pop() as Record<string, unknown>;
           const left = this.pop();
@@ -734,9 +1048,7 @@ export class VM {
         // typeof
         case "TypeOf": {
           const val = this.pop();
-          if (isJSString(val)) this.push(internString("string"));
-          else if (val === null) this.push(internString("object"));
-          else this.push(internString(typeof val));
+          this.push(internString(jsminiTypeof(val)));
           break;
         }
 
@@ -746,20 +1058,24 @@ export class VM {
             this.push(internString("undefined"));
           } else {
             const val = this.globals.get(name);
-            if (isJSString(val)) this.push(internString("string"));
-            else if (val === null) this.push(internString("object"));
-            else this.push(internString(typeof val));
+            this.push(internString(jsminiTypeof(val)));
           }
           break;
         }
 
         // 更新
-        case "Increment":
-          this.push((this.pop() as number) + 1);
+        case "Increment": {
+          const v = this.toPrimitive(this.pop());
+          if (v === THROWN_SENTINEL) continue;
+          this.push((v as number) + 1);
           break;
-        case "Decrement":
-          this.push((this.pop() as number) - 1);
+        }
+        case "Decrement": {
+          const v = this.toPrimitive(this.pop());
+          if (v === THROWN_SENTINEL) continue;
+          this.push((v as number) - 1);
           break;
+        }
 
         // throw
         case "Throw": {
@@ -802,24 +1118,29 @@ export class VM {
             // ネイティブ関数 (isNaN, parseInt, Math.floor 等)
             this.push((callee as Function)(...args));
           } else if (fn) {
-            // 型フィードバック記録
-            if (this.feedback) this.feedback.recordCall(fn, args);
-            // JIT: Wasm キャッシュがあればそちらで実行
-            if (this.jit) {
-              const upvalueValues = closureBoxes.map(b => b.value);
-              const jitResult = this.jit.tryCall(fn, args, upvalueValues);
-              if (jitResult !== null) {
-                this.push(jitResult.result);
-                break;
-              }
-            }
             const locals = new Array(fn.localCount).fill(undefined);
-            for (let i = 0; i < fn.paramCount; i++) {
-              locals[i] = args[i] ?? undefined;
+            if (fn.hasRestParam) {
+              const restIdx = fn.paramCount - 1;
+              for (let i = 0; i < restIdx; i++) locals[i] = args[i] ?? undefined;
+              locals[restIdx] = args.slice(restIdx);
+            } else {
+              for (let i = 0; i < fn.paramCount; i++) locals[i] = args[i] ?? undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
+            if (fn.isGenerator) {
+              // Generator: フレームを push せず、GeneratorObject を返す
+              const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
+              this.push(genObj);
+            } else {
+              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.jit) {
+                const upvalueValues = closureBoxes.map(b => b.value);
+                const jitResult = this.jit.tryCall(fn, args, upvalueValues);
+                if (jitResult !== null) { this.push(jitResult.result); break; }
+              }
+              this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
+            }
           } else {
-            throw new Error("Not a function");
+            throw new TypeError("Not a function");
           }
           break;
         }
@@ -867,7 +1188,7 @@ export class VM {
             }
             this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: [] });
           } else {
-            throw new Error("Not a function");
+            throw new TypeError("Not a function");
           }
           break;
         }
@@ -904,6 +1225,30 @@ export class VM {
               throw new Error(`Unknown native constructor: ${ctor.name}`);
             }
           } else if (ctor.bytecode) {
+            // インスタンスフィールドの初期化
+            if (ctor.__instanceFields) {
+              for (const field of ctor.__instanceFields as any[]) {
+                const name = field.key.name as string;
+                let value: unknown = undefined;
+                if (field.value) {
+                  if (field.value.type === "Literal") {
+                    value = field.value.value;
+                  } else {
+                    // 複雑な式は ExecExpr で評価
+                    const idx = ctor.constants?.indexOf(field.value) ?? -1;
+                    if (idx < 0) {
+                      // constants に追加して ExecExpr で評価
+                      // 簡易実装: undefined のまま
+                    }
+                  }
+                }
+                if (isJSObject(newObj)) {
+                  jsObjSet(newObj, name, value);
+                } else {
+                  (newObj as Record<string, unknown>)[name] = value;
+                }
+              }
+            }
             // BytecodeFunction
             const locals = new Array(ctor.localCount).fill(undefined);
             for (let i = 0; i < ctor.paramCount; i++) {
@@ -911,8 +1256,22 @@ export class VM {
             }
             this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor), upvalueBoxes: [] });
             (frame as any).__pendingNewObj = newObj;
+          } else if (ctor.__closure) {
+            // クロージャ
+            const closure = ctor as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
+            const fn = closure.func;
+            const locals = new Array(fn.localCount).fill(undefined);
+            for (let i = 0; i < fn.paramCount; i++) {
+              locals[i] = args[i] ?? undefined;
+            }
+            this.frames.push({ func: fn, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
+            (frame as any).__pendingNewObj = newObj;
+          } else if (typeof ctor === "function") {
+            // ネイティブコンストラクタ (Object, Boolean, Number, etc.)
+            const result = new ctor(...args);
+            this.push(result);
           } else {
-            throw new Error("Not a constructor");
+            throw new TypeError("Not a constructor");
           }
           break;
         }
@@ -940,6 +1299,14 @@ export class VM {
             return returnValue;
           }
           break;
+        }
+
+        // Generator yield
+        case "Yield": {
+          const value = this.pop();
+          // pc は次の命令を指すようにインクリメント済み（run ループで）
+          frame.pc = frame.pc; // 現在の pc を保持（run ループが ++ した後）
+          throw new YieldSignal(value);
         }
 
         // スタック操作

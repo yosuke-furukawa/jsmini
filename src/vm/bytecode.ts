@@ -15,6 +15,15 @@ export type Opcode =
   | "Mul"             // pop 2つ、乗算して push
   | "Div"             // pop 2つ、除算して push
   | "Mod"             // pop 2つ、剰余して push
+  | "Exp"             // pop 2つ、べき乗して push
+  | "BitAnd"          // pop 2つ、ビットAND
+  | "BitOr"           // pop 2つ、ビットOR
+  | "BitXor"          // pop 2つ、ビットXOR
+  | "BitNot"          // pop 1つ、ビットNOT
+  | "ShiftLeft"       // pop 2つ、左シフト
+  | "ShiftRight"      // pop 2つ、右シフト(符号あり)
+  | "UShiftRight"     // pop 2つ、右シフト(符号なし)
+  | "IsNullish"       // pop 1つ、null/undefined なら true を push
   | "Negate"          // pop 1つ、符号反転して push
 
   // 比較
@@ -37,6 +46,8 @@ export type Opcode =
   | "StaLocal"        // StaLocal <slot> — スタックトップをローカル変数に格納 (pop しない)
   | "LdaUpvalue"      // LdaUpvalue <index> — キャプチャされた外部変数を push
   | "StaUpvalue"      // StaUpvalue <index> — スタックトップをキャプチャ変数に格納 (pop しない)
+  | "DefineGetter"    // DefineGetter <nameIndex> — pop getter func, peek obj, define getter
+  | "DefineSetter"    // DefineSetter <nameIndex> — pop setter func, peek obj, define setter
 
   // オブジェクト / 配列
   | "CreateObject"    // 空オブジェクトを push
@@ -52,6 +63,12 @@ export type Opcode =
   // in / instanceof
   | "In"              // pop right, pop left, push (left in right)
   | "Instanceof"      // pop right, pop left, push (left instanceof right)
+
+  // iterator protocol
+  | "GetIterator"      // pop obj, call obj[@@iterator](), push iterator
+  | "IteratorNext"     // pop iterator, call iterator.next(), push result, push iterator
+  | "IteratorComplete" // pop result, push result.done
+  | "IteratorValue"    // pop result, push result.value
 
   // typeof / throw
   | "TypeOf"          // pop 1つ、typeof 文字列を push
@@ -82,7 +99,10 @@ export type Opcode =
   // スタック操作
   | "Pop"             // スタックトップを捨てる
   | "Dup"             // スタックトップを複製
-  | "Return";         // 関数から戻る (スタックトップが戻り値)
+  | "Return"          // 関数から戻る (スタックトップが戻り値)
+
+  // Generator
+  | "Yield";          // pop value, suspend generator, push received value on resume
 
 // 1つの命令
 export type Instruction = {
@@ -110,6 +130,8 @@ export type BytecodeFunction = {
   name: string;
   paramCount: number;
   localCount: number;
+  hasRestParam?: boolean;  // 最後のパラメータが ...rest
+  isGenerator?: boolean;   // function* で定義されたか
   bytecode: Instruction[];
   constants: unknown[];
   handlers: ExceptionHandler[];

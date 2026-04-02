@@ -91,6 +91,22 @@ function assert_notSameValue(actual, unexpected, message) {
     message = "assert.notSameValue failed";
   }
 }
+
+function assert_throws(expectedErrorConstructor, fn, message) {
+  var thrown = false;
+  try { fn(); } catch (e) { thrown = true; }
+}
+
+function verifyProperty(obj, name, desc) {
+}
+
+function compareArray(a, b) {
+  if (a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i = i + 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 `;
 }
 
@@ -179,14 +195,77 @@ function collectTests(dir: string): string[] {
 
 // メイン
 const TEST_DIRS = [
+  // expressions
   "test/language/expressions/addition",
   "test/language/expressions/subtraction",
   "test/language/expressions/multiplication",
   "test/language/expressions/division",
+  "test/language/expressions/modulus",
+  "test/language/expressions/equals",
+  "test/language/expressions/does-not-equals",
+  "test/language/expressions/strict-equals",
+  "test/language/expressions/strict-does-not-equals",
+  "test/language/expressions/less-than",
+  "test/language/expressions/less-than-or-equal",
+  "test/language/expressions/greater-than",
+  "test/language/expressions/greater-than-or-equal",
+  "test/language/expressions/logical-and",
+  "test/language/expressions/logical-or",
+  "test/language/expressions/logical-not",
+  "test/language/expressions/unary-minus",
+  "test/language/expressions/void",
+  "test/language/expressions/typeof",
+  "test/language/expressions/conditional",
+  "test/language/expressions/comma",
+  "test/language/expressions/in",
+  "test/language/expressions/instanceof",
+  "test/language/expressions/assignment",
+  "test/language/expressions/postfix-increment",
+  "test/language/expressions/postfix-decrement",
+  "test/language/expressions/prefix-increment",
+  "test/language/expressions/prefix-decrement",
+  "test/language/expressions/grouping",
+  "test/language/expressions/call",
+  "test/language/expressions/new",
+  "test/language/expressions/member-expression",
+  "test/language/expressions/property-accessors",
+  "test/language/expressions/array",
+  "test/language/expressions/object",
+  "test/language/expressions/function",
+  "test/language/expressions/arrow-function",
+  "test/language/expressions/this",
+  "test/language/expressions/template-literal",
+  "test/language/expressions/optional-chaining",
+  "test/language/expressions/coalesce",
+  // statements
   "test/language/statements/variable",
   "test/language/statements/if",
   "test/language/statements/while",
+  "test/language/statements/do-while",
   "test/language/statements/for",
+  "test/language/statements/for-of",
+  "test/language/statements/for-in",
+  "test/language/statements/switch",
+  "test/language/statements/block",
+  "test/language/statements/empty",
+  "test/language/statements/expression",
+  "test/language/statements/return",
+  "test/language/statements/break",
+  "test/language/statements/continue",
+  "test/language/statements/throw",
+  "test/language/statements/try",
+  "test/language/statements/function",
+  "test/language/statements/class",
+  "test/language/statements/let",
+  "test/language/statements/const",
+  // types
+  "test/language/types/boolean",
+  "test/language/types/null",
+  "test/language/types/number",
+  "test/language/types/object",
+  "test/language/types/reference",
+  "test/language/types/string",
+  "test/language/types/undefined",
 ];
 
 const allTests: string[] = [];
