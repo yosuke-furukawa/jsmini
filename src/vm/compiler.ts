@@ -1249,6 +1249,31 @@ class BytecodeCompiler {
       }
 
       case "UnaryExpression": {
+        if (expr.operator === "void") {
+          this.compileExpression(expr.argument);
+          this.emit("Pop");
+          this.emit("LdaUndefined");
+          break;
+        }
+        if (expr.operator === "delete") {
+          if (expr.argument.type === "MemberExpression") {
+            this.compileExpression(expr.argument.object);
+            if (expr.argument.computed) {
+              this.compileExpression(expr.argument.property);
+              this.emit("DeletePropertyComputed");
+            } else {
+              const name = expr.argument.property.type === "Identifier"
+                ? expr.argument.property.name : String((expr.argument.property as any).value);
+              this.emit("DeleteProperty", this.addConstant(name));
+            }
+          } else {
+            // delete on non-member always returns true
+            this.compileExpression(expr.argument);
+            this.emit("Pop");
+            this.emit("LdaConst", this.addConstant(true));
+          }
+          break;
+        }
         if (expr.operator === "typeof" && expr.argument.type === "Identifier") {
           // typeof 未定義変数は ReferenceError にせず "undefined" を返す
           const name = expr.argument.name;

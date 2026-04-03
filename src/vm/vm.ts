@@ -1052,6 +1052,31 @@ export class VM {
           break;
         }
 
+        case "DeleteProperty": {
+          const obj = this.pop();
+          const name = constants[instr.operand!] as string;
+          if (isJSObject(obj)) {
+            jsObjSet(obj, name, undefined);
+            delete obj[name];
+          } else if (obj && typeof obj === "object") {
+            delete (obj as Record<string, unknown>)[name];
+          }
+          this.push(true);
+          break;
+        }
+        case "DeletePropertyComputed": {
+          const key = this.pop();
+          const obj = this.pop();
+          const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
+          if (isJSObject(obj)) {
+            jsObjSet(obj, keyStr, undefined);
+            delete (obj as any)[keyStr];
+          } else if (obj && typeof obj === "object") {
+            delete (obj as Record<string, unknown>)[keyStr];
+          }
+          this.push(true);
+          break;
+        }
         case "In": {
           const right = this.pop() as Record<string, unknown>;
           const left = this.pop();

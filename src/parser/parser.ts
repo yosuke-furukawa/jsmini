@@ -597,7 +597,7 @@ export function parse(source: string): Program {
     "While", "For", "Function", "Return", "Break", "Continue",
     "Typeof", "Throw", "Try", "Catch", "Finally", "New", "This",
     "Class", "Extends", "Super", "Of", "In", "Instanceof",
-    "Do", "Switch", "Case", "Default", "Yield",
+    "Do", "Switch", "Case", "Default", "Delete", "Void", "Yield",
   ]);
 
   function parsePropertyKey(): { type: "Identifier"; name: string } {
@@ -914,8 +914,8 @@ export function parse(source: string): Program {
       const argument = parseUnary();
       return { type: "UpdateExpression", operator, argument: argument as any, prefix: true };
     }
-    if (current().type === "Typeof") {
-      const operator = eat("Typeof").value;
+    if (current().type === "Typeof" || current().type === "Delete" || current().type === "Void") {
+      const operator = eat(current().type).value;
       const argument = parseUnary();
       return { type: "UnaryExpression", operator, prefix: true, argument };
     }

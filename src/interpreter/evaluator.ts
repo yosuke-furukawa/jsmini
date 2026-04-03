@@ -1320,6 +1320,23 @@ function* evalUnaryExpression(
     return internString(typeof value);
   }
 
+  if (expr.operator === "delete") {
+    if (expr.argument.type === "MemberExpression") {
+      const obj = yield* evalExpression(expr.argument.object, env);
+      const key = yield* resolveMemberKey(expr.argument, env);
+      if (obj && typeof obj === "object") {
+        delete (obj as Record<string, unknown>)[key];
+      }
+      return true;
+    }
+    return true;
+  }
+
+  if (expr.operator === "void") {
+    yield* evalExpression(expr.argument, env);
+    return undefined;
+  }
+
   const argument = yield* evalExpression(expr.argument, env);
   switch (expr.operator) {
     case "!": return !isTruthy(argument);
