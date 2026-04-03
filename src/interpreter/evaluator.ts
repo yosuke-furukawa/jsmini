@@ -85,6 +85,7 @@ export type StepInfo = {
 type EvalOptions = {
   console?: ConsoleOptions;
   onStep?: (info: StepInfo) => void;
+  globals?: Record<string, unknown>;
 };
 
 export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): unknown {
@@ -195,6 +196,13 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
   env.defineReadOnly("Symbol", SymbolFn);
+
+  // 外部から渡されたグローバル変数を注入 (VM eval フォールバック用)
+  if (options.globals) {
+    for (const [k, v] of Object.entries(options.globals)) {
+      if (!env.hasOwn(k)) env.define(k, v);
+    }
+  }
 
   // eval: indirect eval (グローバルスコープで実行)
   env.defineReadOnly("eval", (code: unknown) => {

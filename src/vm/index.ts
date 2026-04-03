@@ -6,6 +6,7 @@ import { isJSString, jsStringToString, internString, createSeqString } from "./j
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass } from "./js-object.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
 import { Heap } from "./heap.js";
+import { evaluate } from "../interpreter/evaluator.js";
 export { disassemble } from "./bytecode.js";
 
 type ConsoleOptions = {
@@ -405,10 +406,16 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
   vm.setGlobal("Symbol", SymbolFn);
 
-  // eval: indirect eval (グローバルスコープで実行)
+  // eval: TW にフォールバック (VM のグローバル変数を TW env に注入)
   vm.setGlobal("eval", (code: unknown) => {
-    const s = isJSString(code) ? jsStringToString(code) : String(code);
-    return vmEvaluate(s, options);
+    if (typeof code !== "string" && !isJSString(code)) return code;
+    const s = isJSString(code) ? jsStringToString(code) : code as string;
+    // TW の evaluate を呼ぶが、VM のグローバルを globals オプションで渡す
+    const globals: Record<string, unknown> = {};
+    for (const [k, v] of vm.globals) {
+      globals[k] = v;
+    }
+    return evaluate(s, { globals });
   });
 
   // フィードバック収集 (JIT 有効時は自動で有効)
