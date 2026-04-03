@@ -223,40 +223,45 @@ class BytecodeCompiler {
       }
       this.emit("Pop"); // obj を捨てる
     } else if (id.type === "ArrayPattern") {
-      // stack: arr → 各要素を取り出す
+      // stack: iterable → GetIterator → temp global に保存 → 1要素ずつ取り出す
+      this.emit("GetIterator");
+      const iterName = `__dstr_iter_${this.currentOffset()}`;
+      const iterIdx = this.addConstant(iterName);
+      this.emit("StaGlobal", iterIdx);    // iterator を保存
+      this.emit("Pop");                   // stack を空に
       for (let i = 0; i < id.elements.length; i++) {
         const el = id.elements[i];
-        if (!el) continue;
-        if (el.type === "RestElement") {
-          // [...rest]: arr.slice(i)
-          // stack: [arr(orig)]
-          // CallMethod(1) needs: [i, arr, slice]
-          this.emit("LdaConst", this.addConstant(i));  // arr, i
-          this.emit("Dup");                             // arr, i, i  (dummy, need arr)
-          this.emit("Pop");                             // arr, i
-          // arr is below i — we need arr on top to get slice
-          // Use temp global to save arr
-          const tmpName = `__rest_arr_${this.currentOffset()}`;
-          const tmpIdx = this.addConstant(tmpName);
-          this.emit("Pop");                             // arr (removed i)
-          this.emit("Dup");                             // arr, arr
-          this.emit("StaGlobal", tmpIdx);               // arr, arr (saved to global)
-          this.emit("Pop");                             // arr
-          // Now build CallMethod stack: i, arr, slice
-          this.emit("LdaConst", this.addConstant(i));   // arr, i
-          this.emit("LdaGlobal", tmpIdx);               // arr, i, arr
-          this.emit("Dup");                             // arr, i, arr, arr
-          this.emitWithIC("GetProperty", this.addConstant("slice")); // arr, i, arr, slice
-          this.emit("CallMethod", 1);                   // arr, result
-          this.compileBindingTarget(el.argument);        // arr (result consumed)
-          break;
+        if (!el) {
+          // elision: iterator を進めるが値は捨てる
+          this.emit("LdaGlobal", iterIdx);
+          this.emit("IteratorNext");
+          this.emit("Pop");
+          continue;
         }
-        this.emit("Dup"); // arr を残す
-        this.emit("LdaConst", this.addConstant(i));
-        this.emit("GetPropertyComputed");
-        this.compileBindingTarget(el);
+        if (el.type === "RestElement") {
+          // [...rest]: 残り全部を配列に集める
+          this.emit("CreateArray", 0);      // stack: restArr
+          const loopStart = this.currentOffset();
+          this.emit("LdaGlobal", iterIdx);  // stack: restArr, iterator
+          this.emit("IteratorNext");        // stack: restArr, result
+          this.emit("Dup");                 // stack: restArr, result, result
+          this.emit("IteratorComplete");    // stack: restArr, result, done
+          const exitJump = this.emit("JumpIfTrue", 0);
+          this.emit("IteratorValue");       // stack: restArr, value
+          this.emit("ArrayPush");           // stack: restArr
+          const backJump = this.emit("Jump", 0);
+          this.patch(backJump, loopStart);
+          this.patch(exitJump, this.currentOffset());
+          this.emit("Pop");                 // pop result (done=true)
+          // stack: restArr
+          this.compileBindingTarget(el.argument);
+          return;
+        }
+        this.emit("LdaGlobal", iterIdx);   // stack: iterator
+        this.emit("IteratorNext");         // stack: result
+        this.emit("IteratorValue");        // stack: value
+        this.compileBindingTarget(el);     // stack: (empty)
       }
-      this.emit("Pop"); // arr を捨てる
     } else if (id.type === "AssignmentPattern") {
       // stack: value → value が undefined ならデフォルト値を使う
       this.emit("Dup");
