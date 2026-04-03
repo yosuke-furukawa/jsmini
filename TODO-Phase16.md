@@ -17,20 +17,20 @@
 
 ## ステップ
 
-### 16-1: IR データ構造
+### 16-1: IR データ構造 ✅
 
-- [ ] 16-1a: `src/ir/types.ts` — Block, Op, PhiOp, IRType, IROpcode
-- [ ] 16-1b: `src/ir/printer.ts` — IR の文字列ダンプ (`--print-ir`)
-- [ ] 16-1c: テスト
+- [x] 16-1a: `src/ir/types.ts` — Block, Op, PhiOp, IRType, IROpcode + ヘルパー関数
+- [x] 16-1b: `src/ir/printer.ts` — IR の文字列ダンプ (printIR)
+- [x] 16-1c: テスト (10 tests)
 
-### 16-2: Bytecode → IR 変換
+### 16-2: Bytecode → IR 変換 ✅
 
-- [ ] 16-2a: `src/ir/builder.ts` — SSA Builder
+- [x] 16-2a: `src/ir/builder.ts` — SSA Builder
   - ブロック境界の特定 (ジャンプ先分析)
   - 抽象スタック模擬実行 → SSA 値生成
-  - Phi ノード挿入
-- [ ] 16-2b: fibonacci, for-loop の IR ダンプ確認
-- [ ] 16-2c: テスト
+  - Phi ノード挿入 (ブロック出口ローカル状態比較)
+- [x] 16-2b: fibonacci, for-loop の IR ダンプ確認
+- [x] 16-2c: テスト (5 tests)
 
 ### 16-3: Constant Folding + DCE
 
