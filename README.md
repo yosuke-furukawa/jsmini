@@ -123,6 +123,18 @@ Source Code
 - ビルトイン自前実装: Array/Boolean/Number/String/Function コンストラクタを JSObject ベースで再実装
 - VM/TW の test262 差: 284件 → 66件 (ネイティブ委譲の除去)
 
+### Phase 15 — 構文対応拡大
+
+- Generator メソッド (`*method()` in object/class)
+- `arguments` オブジェクト、`delete` / `void` 演算子
+- `Function.name` プロパティ + 名前推論
+- `Function.prototype.call` / `apply` / `bind`
+- `eval()` (indirect + direct strict mode)
+- 空文 (`;`)、先頭ドット小数 (`.1`)、tagged template literals
+- 配列分割代入の Iterator Protocol 対応
+- test262 ハーネス正直化 (assert.throws 型チェック)
+- test262: 41% → 52%
+
 ## パフォーマンス比較
 
 V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run bench`):
@@ -145,11 +157,11 @@ V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run 
 
 | エンジン | Pass | Fail | Skip | Total | Pass Rate |
 |----------|------|------|------|-------|-----------|
-| Tree-Walking | 3,680 | 5,267 | 1,750 | 10,697 | **41.1%** |
-| Bytecode VM | 3,746 | 5,201 | 1,750 | 10,697 | **41.9%** |
+| Tree-Walking | 4,664 | 4,283 | 1,750 | 10,697 | **52.1%** |
+| Bytecode VM | 4,584 | 4,363 | 1,750 | 10,697 | **51.2%** |
 
 *Skip は module/async/noStrict。test262/test/language/ 配下 69 ディレクトリ (10,697 テスト) で実行。*
-*Phase 14 でビルトインを自前実装し、VM/TW 差を 284件 → 66件に削減 (VM: 44.3% → 41.9%)。*
+*Phase 15 で assert ハーネスを正直化 (偽 PASS を排除) した上で 52% に到達。*
 
 ## セットアップ
 
@@ -282,6 +294,7 @@ src/
 - [x] **Phase 12** — プロトタイプチェーン
 - [x] **Phase 13** — 構文拡大 + Generator (test262: 44.3%)
 - [x] **Phase 14** — WasmGC Array + ビルトイン自前実装 (quicksort JIT 5.4x, VM/TW差 284→66件)
+- [x] **Phase 15** — 構文対応拡大 (test262: 41% → 52%, assert ハーネス正直化)
 
 詳細は [PLAN.md](./PLAN.md) を参照。
 
@@ -291,6 +304,7 @@ src/
 - [LEARN-JIT.md](./LEARN-JIT.md) — JIT: 再帰の Wasm 内完結で 1309x、per-call JIT の限界
 - [LEARN-syntax-expansion.md](./LEARN-syntax-expansion.md) — 構文拡大: Generator の TW/VM 対比、Iterator Protocol、Symbol 自前実装
 - [LEARN-Phase14.md](./LEARN-Phase14.md) — WasmGC Array + ビルトイン自前実装
+- [LEARN-Phase15.md](./LEARN-Phase15.md) — 構文対応拡大 + test262 ハーネス正直化 + V8 の歴史
 - [BENCHMARK.md](./BENCHMARK.md) — 全ベンチマーク結果
 - [RESEARCH-WHY-BYTECODE-IS-SLOW.md](./RESEARCH-WHY-BYTECODE-IS-SLOW.md) — なぜ Object VM は TW より遅いのか
 
