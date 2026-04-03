@@ -23,6 +23,8 @@ type VMOptions = {
   jitThreshold?: number;
   maxSteps?: number;
   onStep?: () => void;
+  useIR?: boolean;
+  globals?: Record<string, unknown>;
 };
 
 export type VMResult = {
@@ -427,6 +429,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   if (options.jit && vm.feedback) {
     vm.jit = new JitManager(vm.feedback, {
       threshold: options.jitThreshold ?? 100,
+      useIR: options.useIR,
     });
     if (options.traceTier) vm.jit.traceTier = true;
   }

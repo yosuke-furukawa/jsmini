@@ -5,9 +5,13 @@ import type { WasmNumericType } from "./feedback.js";
 import { getElementKind, isTrackedArray } from "../vm/js-array.js";
 import { isJSString, getInternId, getStringById } from "../vm/js-string.js";
 import { isJSObject, getSlots } from "../vm/js-object.js";
+import { buildIR } from "../ir/builder.js";
+import { optimize } from "../ir/optimize.js";
+import { compileIRToWasm } from "../ir/codegen.js";
 
 export type JitOptions = {
   threshold: number;
+  useIR?: boolean;
 };
 
 type CachedWasm = {
@@ -36,10 +40,12 @@ export class JitManager {
   deoptLog: string[] = [];
   tierLog: string[] = [];
   traceTier = false;
+  useIR = false;
 
   constructor(feedback: FeedbackCollector, options: JitOptions) {
     this.feedback = feedback;
     this.threshold = options.threshold;
+    this.useIR = options.useIR ?? false;
   }
 
   // VM から関数を登録 (グローバル関数の追跡)
@@ -111,7 +117,12 @@ export class JitManager {
     if (arrayArgIndices.length > 0) {
       compiled = this.compileWithRelatedFuncs(func, spec, arrayArgIndices);
       if (compiled) compiled.stringArgIndices = stringArgIndices;
-    } else {
+    } else if (this.useIR) {
+      // IR パス: bytecode → IR → optimize → Wasm
+      compiled = this.compileViaIR(func, spec, stringArgIndices);
+    }
+    // IR パスが失敗 or useIR=false → direct パス
+    if (!compiled && arrayArgIndices.length === 0) {
       const wasmFn = compileToWasmSync(func, spec);
       if (wasmFn) {
         compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
@@ -127,6 +138,20 @@ export class JitManager {
 
     this.logTier(func, "Bytecode VM", callCount);
     return null;
+  }
+
+  private compileViaIR(func: BytecodeFunction, spec: WasmNumericType, stringArgIndices: number[]): CachedWasm | null {
+    try {
+      const ir = buildIR(func);
+      optimize(ir);
+      const result = compileIRToWasm(ir);
+      if (!result) return null;
+      const wasmFn = (result.instance.exports as any)[ir.name] as (...args: number[]) => number;
+      if (!wasmFn) return null;
+      return { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
+    } catch {
+      return null; // IR コンパイル失敗 → フォールバック
+    }
   }
 
   private compileWithRelatedFuncs(

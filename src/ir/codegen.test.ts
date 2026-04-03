@@ -1,0 +1,97 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { compile } from "../vm/compiler.js";
+import { buildIR } from "./builder.js";
+import { printIR } from "./printer.js";
+import { optimize } from "./optimize.js";
+import { compileIRToWasm } from "./codegen.js";
+
+function getFirstFunction(source: string) {
+  const script = compile(source);
+  for (const c of script.constants) {
+    if (typeof c === "object" && c !== null && "bytecode" in (c as any)) {
+      return c as any;
+    }
+  }
+  return script;
+}
+
+function irPipeline(source: string): { result: number; optimizedIR: string } | null {
+  const func = getFirstFunction(source);
+  const ir = buildIR(func);
+
+  console.log("=== before optimize ===");
+  console.log(printIR(ir));
+
+  optimize(ir);
+
+  const optimizedIR = printIR(ir);
+  console.log("=== after optimize ===");
+  console.log(optimizedIR);
+
+  const compiled = compileIRToWasm(ir);
+  if (!compiled) return null;
+
+  const wasmFunc = (compiled.instance.exports as any)[ir.name];
+  return { result: wasmFunc(), optimizedIR };
+}
+
+describe("IR → Wasm codegen", () => {
+  it("constant expression: return 2 + 3", () => {
+    const r = irPipeline("function f() { return 2 + 3; }");
+    assert.ok(r !== null, "should compile to wasm");
+    assert.equal(r!.result, 5);
+    // IR は Const(5) に畳み込まれてるはず
+    assert.ok(r!.optimizedIR.includes("Const(5)"));
+  });
+
+  it("nested: return (1 + 2) * (3 + 4)", () => {
+    const r = irPipeline("function f() { return (1 + 2) * (3 + 4); }");
+    assert.ok(r !== null);
+    assert.equal(r!.result, 21);
+    assert.ok(r!.optimizedIR.includes("Const(21)"));
+  });
+
+  it("parameters: add(a, b)", () => {
+    const func = getFirstFunction("function add(a, b) { return a + b; }");
+    const ir = buildIR(func);
+    optimize(ir);
+    console.log(printIR(ir));
+
+    const compiled = compileIRToWasm(ir);
+    assert.ok(compiled !== null);
+
+    const wasmAdd = (compiled!.instance.exports as any).add;
+    assert.equal(wasmAdd(3, 4), 7);
+    assert.equal(wasmAdd(100, 200), 300);
+    assert.equal(wasmAdd(-5, 10), 5);
+  });
+
+  it("comparison + constant fold: 3 < 5", () => {
+    const r = irPipeline("function f() { return 3 < 5; }");
+    assert.ok(r !== null);
+    assert.equal(r!.result, 1); // true = 1
+  });
+
+  it("mixed: return (10 - 3) * 2 + 1", () => {
+    const r = irPipeline("function f() { return (10 - 3) * 2 + 1; }");
+    assert.ok(r !== null);
+    assert.equal(r!.result, 15);
+    assert.ok(r!.optimizedIR.includes("Const(15)"));
+  });
+
+  it("parameter arithmetic: f(x) = x * 2 + 1", () => {
+    const func = getFirstFunction("function f(x) { return x * 2 + 1; }");
+    const ir = buildIR(func);
+    optimize(ir);
+    console.log(printIR(ir));
+
+    const compiled = compileIRToWasm(ir);
+    assert.ok(compiled !== null);
+
+    const wasmF = (compiled!.instance.exports as any).f;
+    assert.equal(wasmF(5), 11);
+    assert.equal(wasmF(0), 1);
+    assert.equal(wasmF(10), 21);
+  });
+});
