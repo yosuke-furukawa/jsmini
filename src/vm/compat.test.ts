@@ -433,6 +433,11 @@ const vmOnlyCases: [string, string, unknown][] = [
   ["generator for-of", "function* range(n) { for (var i = 0; i < n; i = i + 1) yield i; } var s = 0; for (var x of range(5)) s = s + x; s;", 10],
   ["generator next(value)", "function* e() { var x = yield 1; return x; } var g = e(); g.next(); g.next(42).value;", 42],
   ["generator done", "function* g() { yield 1; } var it = g(); it.next().done === false && it.next().done === true;", true],
+
+  // Generator method (Phase 15)
+  ["generator method in object", "var obj = { *gen() { yield 1; yield 2; } }; var g = obj.gen(); g.next().value + g.next().value;", 3],
+  ["generator method in class", "class C { *gen() { yield 10; yield 20; } } var c = new C(); var g = c.gen(); g.next().value + g.next().value;", 30],
+  ["generator method computed", 'var key = "g"; var obj = { *[key]() { yield 99; } }; obj.g().next().value;', 99],
 ];
 
 describe("VM プロトタイプチェーン + ビルトイン", () => {

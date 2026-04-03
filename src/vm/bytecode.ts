@@ -70,6 +70,10 @@ export type Opcode =
   | "IteratorComplete" // pop result, push result.done
   | "IteratorValue"    // pop result, push result.value
 
+  // delete
+  | "DeleteProperty"         // pop obj, delete obj[name], push true
+  | "DeletePropertyComputed" // pop key, pop obj, delete obj[key], push true
+
   // typeof / throw
   | "TypeOf"          // pop 1つ、typeof 文字列を push
   | "TypeOfGlobal"    // operand=名前index, 未定義なら "undefined" を push (ReferenceError にしない)

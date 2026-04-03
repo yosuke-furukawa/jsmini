@@ -289,6 +289,21 @@ export class VM {
     return genObj;
   }
 
+  private isBytecodeCallable(obj: unknown): boolean {
+    return typeof obj === "object" && obj !== null && ("bytecode" in obj || "__closure" in obj);
+  }
+
+  private setArguments(fn: BytecodeFunction, locals: unknown[], args: unknown[]): void {
+    // arguments スロットはパラメータの直後 (コンパイラで declareLocal("arguments") した位置)
+    const argSlot = fn.paramCount;
+    if (argSlot < fn.localCount) {
+      const argsObj = Object.create(null);
+      for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+      argsObj.length = args.length;
+      locals[argSlot] = argsObj;
+    }
+  }
+
   // 汎用の関数呼び出し (BytecodeFunction, closure, native function 対応)
   private callAny(fn: unknown, thisValue: unknown, args: unknown[]): unknown {
     if (typeof fn === "function") {
@@ -433,7 +448,14 @@ export class VM {
     for (const name of ["valueOf", "toString"]) {
       // JSObject (Hidden Class) の場合は jsObjGet、それ以外は普通のプロパティアクセス
       const method = isJSObject(value) ? jsObjGet(value, name) : obj[name];
-      if (method && typeof method === "object" && "bytecode" in (method as any)) {
+      if (typeof method === "function") {
+        // ネイティブ関数 (e.g. new String() の valueOf/toString)
+        methodFound = true;
+        const result = (method as Function).call(value);
+        if (result === null || result === undefined || typeof result !== "object" || isJSString(result)) {
+          return result;
+        }
+      } else if (method && typeof method === "object" && "bytecode" in (method as any)) {
         methodFound = true;
         const result = this.callInternal(method as BytecodeFunction, value, []);
         if (result === THROWN_SENTINEL) return THROWN_SENTINEL;
@@ -917,6 +939,25 @@ export class VM {
                 this.push(this.arrayPrototype[name]);
               } else if (isJSString(obj) && name in this.stringPrototype) {
                 this.push(this.stringPrototype[name]);
+              } else if (this.isBytecodeCallable(obj) && (name === "call" || name === "apply" || name === "bind")) {
+                // BytecodeFunction / closure の .call / .apply / .bind
+                const self = this;
+                const callable = obj;
+                if (name === "call") {
+                  this.push(function(this: unknown, ...callArgs: unknown[]) {
+                    return self.callFunction(callable, callArgs[0], callArgs.slice(1));
+                  });
+                } else if (name === "apply") {
+                  this.push(function(this: unknown, thisArg: unknown, argsArray?: unknown[]) {
+                    return self.callFunction(callable, thisArg, Array.isArray(argsArray) ? argsArray : []);
+                  });
+                } else {
+                  this.push(function(this: unknown, thisArg: unknown, ...boundArgs: unknown[]) {
+                    return function(...args: unknown[]) {
+                      return self.callFunction(callable, thisArg, [...boundArgs, ...args]);
+                    };
+                  });
+                }
               } else {
                 this.push((obj as Record<string, unknown>)[name]);
               }
@@ -928,7 +969,11 @@ export class VM {
           const key = this.pop();
           const obj = this.pop() as Record<string, unknown>;
           const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
-          this.push(obj[keyStr]);
+          if (isJSObject(obj)) {
+            this.push(jsObjGet(obj, keyStr));
+          } else {
+            this.push(obj[keyStr]);
+          }
           break;
         }
         case "SetPropertyComputed": {
@@ -1018,6 +1063,31 @@ export class VM {
           break;
         }
 
+        case "DeleteProperty": {
+          const obj = this.pop();
+          const name = constants[instr.operand!] as string;
+          if (isJSObject(obj)) {
+            jsObjSet(obj, name, undefined);
+            delete obj[name];
+          } else if (obj && typeof obj === "object") {
+            delete (obj as Record<string, unknown>)[name];
+          }
+          this.push(true);
+          break;
+        }
+        case "DeletePropertyComputed": {
+          const key = this.pop();
+          const obj = this.pop();
+          const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
+          if (isJSObject(obj)) {
+            jsObjSet(obj, keyStr, undefined);
+            delete (obj as any)[keyStr];
+          } else if (obj && typeof obj === "object") {
+            delete (obj as Record<string, unknown>)[keyStr];
+          }
+          this.push(true);
+          break;
+        }
         case "In": {
           const right = this.pop() as Record<string, unknown>;
           const left = this.pop();
@@ -1126,6 +1196,8 @@ export class VM {
             } else {
               for (let i = 0; i < fn.paramCount; i++) locals[i] = i < args.length ? args[i] : undefined;
             }
+            // arguments オブジェクト: パラメータの直後のスロット
+            this.setArguments(fn, locals, args);
             if (fn.isGenerator) {
               // Generator: フレームを push せず、GeneratorObject を返す
               const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
@@ -1163,30 +1235,40 @@ export class VM {
             // クロージャオブジェクト
             const closure = method as { func: BytecodeFunction; capturedBoxes: UpvalueBox[] };
             const fn = closure.func;
-            if (this.feedback) this.feedback.recordCall(fn, args);
-            // JIT: thisObj を追加引数として渡す
-            if (this.jit) {
-              const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
-              if (jitResult !== null) { this.push(jitResult.result); break; }
-            }
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = i < args.length ? args[i] : undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
+            this.setArguments(fn, locals, args);
+            if (fn.isGenerator) {
+              const genObj = this.createGeneratorObject(fn, locals, closure.capturedBoxes);
+              this.push(genObj);
+            } else {
+              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.jit) {
+                const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
+                if (jitResult !== null) { this.push(jitResult.result); break; }
+              }
+              this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
+            }
           } else if (typeof method === "object" && method !== null && "bytecode" in method) {
             const fn = method as BytecodeFunction;
-            if (this.feedback) this.feedback.recordCall(fn, args);
-            // JIT: thisObj を追加引数として渡す
-            if (this.jit) {
-              const jitResult = this.jit.tryCall(fn, args, [], thisObj);
-              if (jitResult !== null) { this.push(jitResult.result); break; }
-            }
             const locals = new Array(fn.localCount).fill(undefined);
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = i < args.length ? args[i] : undefined;
             }
-            this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: [] });
+            this.setArguments(fn, locals, args);
+            if (fn.isGenerator) {
+              const genObj = this.createGeneratorObject(fn, locals, []);
+              this.push(genObj);
+            } else {
+              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.jit) {
+                const jitResult = this.jit.tryCall(fn, args, [], thisObj);
+                if (jitResult !== null) { this.push(jitResult.result); break; }
+              }
+              this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: [] });
+            }
           } else {
             throw new TypeError("Not a function");
           }

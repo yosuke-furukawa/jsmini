@@ -85,6 +85,7 @@ export type StepInfo = {
 type EvalOptions = {
   console?: ConsoleOptions;
   onStep?: (info: StepInfo) => void;
+  globals?: Record<string, unknown>;
 };
 
 export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): unknown {
@@ -102,7 +103,15 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   env.defineReadOnly("RangeError", RangeError);
   env.defineReadOnly("Boolean", Boolean);
   env.defineReadOnly("Number", Number);
-  env.defineReadOnly("String", String);
+  // String: JSString を受け取れるカスタムコンストラクタ
+  const StringCtor = function(this: any, v?: unknown) {
+    const s = isJSString(v) ? jsStringToString(v) : (v === undefined ? "" : String(v));
+    if (new.target) return new String(s);
+    return internString(s);
+  } as unknown as StringConstructor;
+  StringCtor.fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
+  (StringCtor as any).prototype = String.prototype;
+  env.defineReadOnly("String", StringCtor);
   env.defineReadOnly("Array", Array);
   env.defineReadOnly("Function", Function);
 
@@ -188,6 +197,19 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
   env.defineReadOnly("Symbol", SymbolFn);
 
+  // 外部から渡されたグローバル変数を注入 (VM eval フォールバック用)
+  if (options.globals) {
+    for (const [k, v] of Object.entries(options.globals)) {
+      if (!env.hasOwn(k)) env.define(k, v);
+    }
+  }
+
+  // eval: indirect eval (グローバルスコープで実行)
+  env.defineReadOnly("eval", (code: unknown) => {
+    const s = isJSString(code) ? jsStringToString(code) : String(code);
+    return evaluate(s, options);
+  });
+
   _currentOnStep = onStep;
   try {
     const gen = evalProgram(ast, env);
@@ -267,6 +289,7 @@ function hoistFunctionDeclarations(stmts: Statement[], env: Environment): void {
     if (stmt.type === "FunctionDeclaration") {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
+        name: stmt.id.name,
         params: stmt.params,
         body: stmt.body,
         closure: env,
@@ -301,6 +324,7 @@ function evalBlockSync(body: Statement[], env: Environment): unknown {
 function classKeyName(key: any, computed?: boolean, env?: Environment): string {
   if (computed && env) {
     const val = exhaustGen(evalExpression(key, env));
+    if (isJSSymbol(val)) return val.key;
     return isJSString(val) ? jsStringToString(val) : String(val);
   }
   if (key.type === "Literal") return String(key.value);
@@ -318,9 +342,11 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
 
   // コンストラクタ関数を作成
   let ctorFn: JSFunction;
+  const className = stmt.id.name;
   if (ctorMethod) {
     ctorFn = {
       [JS_FUNCTION_BRAND]: true,
+      name: className,
       params: ctorMethod.value.params,
       body: ctorMethod.value.body,
       closure: env,
@@ -330,6 +356,7 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
   } else if (superClass) {
     ctorFn = {
       [JS_FUNCTION_BRAND]: true,
+      name: className,
       params: superClass.params,
       body: superClass.body,
       closure: superClass.closure,
@@ -339,6 +366,7 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
   } else {
     ctorFn = {
       [JS_FUNCTION_BRAND]: true,
+      name: className,
       params: [],
       body: { type: "BlockStatement", body: [] },
       closure: env,
@@ -362,15 +390,18 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
       if (member.kind === "constructor") continue; // constructor は ctorFn 自体
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
+        name,
         params: member.value.params,
         body: member.value.body,
         closure: env,
         prototype: {},
       };
+      if ((member.value as any).generator) (fn as any).isGenerator = true;
       (target as any)[name] = fn;
     } else if (member.kind === "get" || member.kind === "set") {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
+        name: `${member.kind} ${name}`,
         params: member.value.params,
         body: member.value.body,
         closure: env,
@@ -459,6 +490,10 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
     case "VariableDeclaration": {
       for (const decl of stmt.declarations) {
         const value = decl.init ? yield* evalExpression(decl.init, env) : undefined;
+        // 変数名から関数の name を推論: var f = function() {} → f.name === "f"
+        if (decl.id.type === "Identifier" && isJSFunction(value) && !value.name) {
+          value.name = decl.id.name;
+        }
         if (decl.id.type === "Identifier" && stmt.kind === "var" && !decl.init) {
           // var 再宣言（初期化なし）の no-op 処理
           const varEnv = env.findVarScope();
@@ -645,15 +680,19 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
     case "ForOfStatement": {
       const lbl = (stmt as any).__label__ as string | undefined;
       const rawIterable = yield* evalExpression(stmt.right, env);
-      // iterator プロトコル: "@@iterator" キーがあれば使う、なければ配列として扱う
+      // iterator プロトコル: "@@iterator" or Symbol.iterator キーがあれば使う、なければ配列として扱う
       let iterable: unknown[];
       const iterKey = "@@iterator";
-      const iterFn = typeof rawIterable === "object" && rawIterable !== null
+      let iterFn = typeof rawIterable === "object" && rawIterable !== null
         ? getProperty(rawIterable as JSObject, iterKey) ?? (rawIterable as any)[iterKey]
         : undefined;
+      // ネイティブ Symbol.iterator もチェック (new Range() 等)
+      if (!iterFn && typeof rawIterable === "object" && rawIterable !== null && typeof (rawIterable as any)[Symbol.iterator] === "function") {
+        iterFn = (rawIterable as any)[Symbol.iterator].bind(rawIterable);
+      }
       if (iterFn && (isJSFunction(iterFn) || typeof iterFn === "function")) {
         const iterator = isJSFunction(iterFn)
-          ? yield* evalCallWithJSFunction(iterFn, [], env)
+          ? yield* evalCallWithJSFunction(iterFn, [], env, rawIterable)
           : (iterFn as Function).call(rawIterable);
         iterable = [];
         for (let step = 0; step < 10000; step++) {
@@ -731,6 +770,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
     case "FunctionExpression": {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
+        name: expr.id?.name ?? "",
         params: expr.params,
         body: expr.body,
         closure: env,
@@ -756,6 +796,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
     case "ArrowFunctionExpression": {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
+        name: "",
         params: expr.params,
         body: expr.expression
           ? { type: "BlockStatement", body: [{ type: "ReturnStatement", argument: expr.body as Expression }] }
@@ -778,6 +819,26 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         }
       }
       return result;
+    }
+    case "TaggedTemplateExpression": {
+      const tag = yield* evalExpression((expr as any).tag, env);
+      const quasi = (expr as any).quasi;
+      // strings 配列 (cooked) + raw プロパティ
+      const strings = quasi.quasis.map((q: any) => q.value.cooked);
+      (strings as any).raw = quasi.quasis.map((q: any) => q.value.raw);
+      // 式の値を評価
+      const values: unknown[] = [];
+      for (const e of quasi.expressions) {
+        values.push(yield* evalExpression(e, env));
+      }
+      // tag(strings, ...values) を呼び出す
+      if (typeof tag === "function") {
+        return (tag as Function)(strings, ...values);
+      }
+      if (isJSFunction(tag)) {
+        return yield* evalCallWithJSFunction(tag, [strings, ...values], env);
+      }
+      throw new TypeError("tag is not a function");
     }
     case "SequenceExpression": {
       let result: unknown = undefined;
@@ -818,7 +879,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
           if (source) Object.assign(obj, source);
         } else {
           const rawKey = prop.computed ? yield* evalExpression(prop.key, env) : undefined;
-          const key = prop.computed ? (isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey)) : (prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value));
+          const key = prop.computed ? (isJSSymbol(rawKey) ? rawKey.key : isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey)) : (prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value));
 
           if (prop.kind === "get" || prop.kind === "set") {
             const fnValue = yield* evalExpression(prop.value, env);
@@ -857,7 +918,10 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
             descriptor.enumerable = true;
             Object.defineProperty(obj, key, descriptor);
           } else {
-            obj[key] = yield* evalExpression(prop.value, env);
+            const val = yield* evalExpression(prop.value, env);
+            // メソッド省略記法: 関数の name を設定
+            if (isJSFunction(val) && !val.name) val.name = key;
+            obj[key] = val;
           }
         }
       }
@@ -1038,13 +1102,20 @@ function* bindParam(param: any, value: unknown, env: Environment, evalEnv: Envir
   }
 }
 
-function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment): Generator<unknown, unknown, unknown> {
+function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment, overrideThis?: unknown): Generator<unknown, unknown, unknown> {
   if (!isJSFunction(fn)) return undefined;
   const jsFn = fn;
 
   // Generator function: return generator object instead of executing
   if ((jsFn as any).isGenerator) {
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
+    if (overrideThis !== undefined) fnEnv.setThis(overrideThis);
+    if (!jsFn.isArrow) {
+      const argsObj = Object.create(null);
+      for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+      argsObj.length = args.length;
+      fnEnv.define("arguments", argsObj);
+    }
     for (let i = 0; i < jsFn.params.length; i++) {
       const param = jsFn.params[i];
       if (param.type === "RestElement") {
@@ -1069,6 +1140,14 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment)
   }
 
   const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
+  if (overrideThis !== undefined) fnEnv.setThis(overrideThis);
+  // arguments オブジェクト (アロー関数以外)
+  if (!jsFn.isArrow) {
+    const argsObj = Object.create(null);
+    for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+    argsObj.length = args.length;
+    fnEnv.define("arguments", argsObj);
+  }
   for (let i = 0; i < jsFn.params.length; i++) {
     const param = jsFn.params[i];
     if (param.type === "RestElement") {
@@ -1099,6 +1178,35 @@ function* evalCallExpression(
     thisValue = yield* evalExpression(expr.callee.object, env);
     const key = yield* resolveMemberKey(expr.callee, env);
     fn = getProperty(thisValue as JSObject, key);
+    // JSFunction の .call / .apply / .bind
+    if (fn === undefined && isJSFunction(thisValue)) {
+      const jsFnObj = thisValue;
+      if (key === "call") {
+        const callArgs = yield* evalArguments(expr.arguments, env);
+        const [callThis, ...rest] = callArgs;
+        return yield* evalCallWithJSFunction(jsFnObj, rest, env, callThis);
+      } else if (key === "apply") {
+        const applyArgs = yield* evalArguments(expr.arguments, env);
+        const [applyThis, argsArray] = applyArgs;
+        const rest = Array.isArray(argsArray) ? argsArray : [];
+        return yield* evalCallWithJSFunction(jsFnObj, rest, env, applyThis);
+      } else if (key === "bind") {
+        const bindArgs = yield* evalArguments(expr.arguments, env);
+        const [bindThis, ...boundArgs] = bindArgs;
+        const bound: JSFunction = {
+          [JS_FUNCTION_BRAND]: true,
+          name: `bound ${jsFnObj.name ?? ""}`,
+          params: jsFnObj.params,
+          body: jsFnObj.body,
+          closure: jsFnObj.closure,
+          isArrow: jsFnObj.isArrow,
+          prototype: jsFnObj.prototype,
+          __boundThis: bindThis,
+          __boundArgs: boundArgs,
+        };
+        return bound;
+      }
+    }
     // JSString のメソッド: ネイティブ文字列メソッドに委譲
     if (fn === undefined && isJSString(thisValue)) {
       const str = jsStringToString(thisValue);
@@ -1118,6 +1226,23 @@ function* evalCallExpression(
   }
 
   const args = yield* evalArguments(expr.arguments, env);
+
+  // direct eval: eval("code") — 呼び出し元のスコープで実行 (strict mode: var は eval スコープに閉じる)
+  if (expr.callee.type === "Identifier" && expr.callee.name === "eval" && typeof fn === "function") {
+    const code = args[0];
+    if (typeof code !== "string" && !isJSString(code)) return code; // 文字列以外はそのまま返す
+    const s = isJSString(code) ? jsStringToString(code) : code as string;
+    const ast = parse(s);
+    // eval 専用スコープ (親 = 呼び出し元の env)。var は eval スコープに閉じる (strict mode)
+    const evalEnv = new Environment(env, true); // isFunctionScope=true で var を閉じ込める
+    const gen = evalProgram(ast, evalEnv);
+    let result: unknown;
+    while (true) {
+      const r = gen.next();
+      if (r.done) { result = r.value; break; }
+    }
+    return result;
+  }
 
   // super() 呼び出し: 親コンストラクタを現在の this で実行
   if (expr.callee.type === "Identifier" && expr.callee.name === "__super__" && isJSFunction(fn)) {
@@ -1148,13 +1273,15 @@ function* evalCallExpression(
   // ネイティブ関数 (console.log 等)
   if (typeof fn === "function") {
     // コールバック系メソッド: jsmini 関数を呼べるようにラップ
-    if (thisValue !== undefined && args.some(a => isJSFunction(a))) {
-      const wrappedArgs = args.map(a =>
-        isJSFunction(a) ? (...nativeArgs: unknown[]) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env)) : a
-      );
+    const wrappedArgs = args.some(a => isJSFunction(a))
+      ? args.map(a =>
+          isJSFunction(a) ? (...nativeArgs: unknown[]) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env)) : a
+        )
+      : args;
+    if (thisValue !== undefined) {
       return (fn as Function).apply(thisValue, wrappedArgs);
     }
-    return (fn as Function)(...args);
+    return (fn as Function)(...wrappedArgs);
   }
 
   if (!isJSFunction(fn)) {
@@ -1172,6 +1299,10 @@ function* evalCallExpression(
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
     if (!jsFn.isArrow) {
       fnEnv.setThis(thisValue);
+      const argsObj = Object.create(null);
+      for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+      argsObj.length = args.length;
+      fnEnv.define("arguments", argsObj);
     }
     for (let i = 0; i < jsFn.params.length; i++) {
       const param = jsFn.params[i];
@@ -1206,6 +1337,10 @@ function* evalCallExpression(
   const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
   if (!jsFn.isArrow) {
     fnEnv.setThis(thisValue);
+    const argsObj = Object.create(null);
+    for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+    argsObj.length = args.length;
+    fnEnv.define("arguments", argsObj);
   }
 
   // 仮引数に実引数をバインド（分割代入 + レスト対応）
@@ -1260,6 +1395,23 @@ function* evalUnaryExpression(
     if (value === null) return internString("object");
     if (isJSFunction(value)) return internString("function");
     return internString(typeof value);
+  }
+
+  if (expr.operator === "delete") {
+    if (expr.argument.type === "MemberExpression") {
+      const obj = yield* evalExpression(expr.argument.object, env);
+      const key = yield* resolveMemberKey(expr.argument, env);
+      if (obj && typeof obj === "object") {
+        delete (obj as Record<string, unknown>)[key];
+      }
+      return true;
+    }
+    return true;
+  }
+
+  if (expr.operator === "void") {
+    yield* evalExpression(expr.argument, env);
+    return undefined;
   }
 
   const argument = yield* evalExpression(expr.argument, env);

@@ -37,6 +37,11 @@ export function parse(source: string): Program {
 
   // Statement | Declaration — ブロック内やトップレベルで使う
   function parseStatementOrDeclaration(): Statement {
+    // 空文: ;
+    if (current().type === "Semicolon") {
+      eat("Semicolon");
+      return { type: "EmptyStatement" } as any;
+    }
     if (isDeclarationStart()) {
       return parseDeclaration();
     }
@@ -193,6 +198,14 @@ export function parse(source: string): Program {
 
       let key: any;
       let computed = false;
+      let isGenerator = false;
+
+      // generator method: class C { *gen() {} }
+      if (current().type === "Star") {
+        eat("Star");
+        isGenerator = true;
+      }
+
       if (current().type === "LeftBracket") {
         eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
       } else if (current().type === "PrivateIdentifier") {
@@ -238,7 +251,7 @@ export function parse(source: string): Program {
       }
 
       // メソッド
-      if (current().type === "LeftParen") {
+      if (current().type === "LeftParen" || isGenerator) {
         const kind = !computed && key.type !== "PrivateIdentifier" && key.name === "constructor" ? "constructor" : "method";
         eat("LeftParen");
         resetParamState();
@@ -249,7 +262,7 @@ export function parse(source: string): Program {
         }
         eat("RightParen");
         const mbody = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
-        body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody }, kind, computed, static: isStatic });
+        body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody, generator: isGenerator } as any, kind, computed, static: isStatic });
         continue;
       }
 
@@ -584,7 +597,7 @@ export function parse(source: string): Program {
     "While", "For", "Function", "Return", "Break", "Continue",
     "Typeof", "Throw", "Try", "Catch", "Finally", "New", "This",
     "Class", "Extends", "Super", "Of", "In", "Instanceof",
-    "Do", "Switch", "Case", "Default", "Yield",
+    "Do", "Switch", "Case", "Default", "Delete", "Void", "Yield",
   ]);
 
   function parsePropertyKey(): { type: "Identifier"; name: string } {
@@ -901,8 +914,8 @@ export function parse(source: string): Program {
       const argument = parseUnary();
       return { type: "UpdateExpression", operator, argument: argument as any, prefix: true };
     }
-    if (current().type === "Typeof") {
-      const operator = eat("Typeof").value;
+    if (current().type === "Typeof" || current().type === "Delete" || current().type === "Void") {
+      const operator = eat(current().type).value;
       const argument = parseUnary();
       return { type: "UnaryExpression", operator, prefix: true, argument };
     }
@@ -972,6 +985,16 @@ export function parse(source: string): Program {
         const property = parseExpression();
         eat("RightBracket");
         expr = { type: "MemberExpression", object: expr, property, computed: true };
+      } else if (current().type === "NoSubstitutionTemplate" || current().type === "TemplateHead") {
+        // Tagged template literal: tag`...`
+        let quasi: any;
+        if (current().type === "NoSubstitutionTemplate") {
+          const tok = eat("NoSubstitutionTemplate");
+          quasi = { type: "TemplateLiteral", quasis: [{ type: "TemplateElement", value: { raw: tok.value, cooked: tok.value }, tail: true }], expressions: [] };
+        } else {
+          quasi = parseTemplateLiteral();
+        }
+        expr = { type: "TaggedTemplateExpression", tag: expr, quasi } as any;
       } else {
         break;
       }
@@ -1118,6 +1141,13 @@ export function parse(source: string): Program {
       let key: any;
       let propKind: "init" | "get" | "set" = "init";
       let computed = false;
+      let isGenerator = false;
+
+      // generator method: { *foo() {} }
+      if (current().type === "Star") {
+        eat("Star");
+        isGenerator = true;
+      }
 
       // computed property: [expr]
       if (current().type === "LeftBracket") {
@@ -1166,8 +1196,8 @@ export function parse(source: string): Program {
         );
       }
       let value: Expression;
-      if (current().type === "LeftParen") {
-        // メソッド省略記法: { foo() {} }
+      if (current().type === "LeftParen" || isGenerator) {
+        // メソッド省略記法: { foo() {} } or { *foo() {} }
         eat("LeftParen");
         resetParamState();
         const params: any[] = [];
@@ -1177,7 +1207,7 @@ export function parse(source: string): Program {
         }
         eat("RightParen");
         const body = parseBlockStatement();
-        value = { type: "FunctionExpression", id: null, params, body } as any;
+        value = { type: "FunctionExpression", id: null, params, body, generator: isGenerator } as any;
       } else if (current().type === "Colon") {
         eat("Colon");
         value = parseAssignment();

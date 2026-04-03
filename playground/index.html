@@ -268,6 +268,10 @@ main {
     <option value="string-methods">String Methods</option>
     <option value="closure">Closure</option>
     <option value="json">JSON</option>
+    <option value="generator">Generator</option>
+    <option value="symbol-iterator">Symbol / Iterator</option>
+    <option value="destructuring">Destructuring</option>
+    <option value="modern-syntax">Modern Syntax</option>
   </select>
   <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
     <option value="tree-walking">Tree-Walking</option>
@@ -662,27 +666,24 @@ console.log("Math.max(1,2,3): " + Math.max(1, 2, 3));
 console.log("parseInt('42'): " + parseInt("42"));
 console.log("parseFloat('3.14'): " + parseFloat("3.14"));
 console.log("isNaN(NaN): " + isNaN(NaN));`,
-};
 
-// ========== CodeMirror setup ==========
-const defaultCode = `// jsmini playground - Phase 3 demo
+  demo: `// jsmini Full Demo — Phase 1-15
 
 // Phase 1: var, function, if/else, for, console.log
 var x = 10;
 function double(n) { return n * 2; }
-console.log(double(x));
+console.log("double(10) =", double(x));
 
 // Phase 2: let/const, object, array, try/catch, typeof
 let point = { x: 1, y: 2 };
 const nums = [10, 20, 30];
-console.log(point.x + point.y);
-console.log(nums.length);
-console.log(typeof point);
+console.log("point:", point.x + point.y);
+console.log("typeof:", typeof point);
 
 try {
   throw new Error("oops");
 } catch (e) {
-  console.log(e.message);
+  console.log("caught:", e.message);
 }
 
 // Phase 3: arrow, template literal, class, for...of, destructuring
@@ -690,29 +691,278 @@ const add = (a, b) => a + b;
 console.log(\`add(3,4) = \${add(3, 4)}\`);
 
 class Counter {
-  constructor(start) {
-    this.count = start;
-  }
-  increment() {
-    this.count = this.count + 1;
-    return this.count;
-  }
+  constructor(start) { this.count = start; }
+  increment() { this.count = this.count + 1; return this.count; }
 }
-
 const c = new Counter(0);
-console.log(c.increment());
-console.log(c.increment());
+console.log("counter:", c.increment(), c.increment());
 
-const arr = [1, 2, 3];
 let sum = 0;
-for (const n of arr) {
-  sum = sum + n;
-}
-console.log(\`sum = \${sum}\`);
+for (const n of [1, 2, 3, 4, 5]) { sum += n; }
+console.log("sum:", sum);
 
 const { x: px, y: py } = point;
 console.log(\`point: (\${px}, \${py})\`);
-`;
+
+// Phase 13: Generator + Symbol
+function* range(n) {
+  for (var i = 0; i < n; i++) yield i;
+}
+var r = [];
+for (var v of range(5)) r.push(v);
+console.log("range(5):", r);
+
+// Phase 14: delete, void
+var obj = { a: 1, b: 2, c: 3 };
+delete obj.b;
+console.log("after delete:", obj.a, obj.b, obj.c);
+console.log("void 0:", void 0);
+
+// Phase 15: arguments, eval, tagged template
+function showArgs() {
+  console.log("arguments:", arguments.length, arguments[0], arguments[1]);
+}
+showArgs(42, "hello");
+
+console.log("eval:", eval("1 + 2 + 3"));
+
+function highlight(strings, ...values) {
+  var result = "";
+  for (var i = 0; i < strings.length; i++) {
+    result += strings[i];
+    if (i < values.length) result += "[" + values[i] + "]";
+  }
+  return result;
+}
+var name = "jsmini";
+var ver = 15;
+console.log(highlight\`Engine: \${name} Phase: \${ver}\`);`,
+
+  generator: `// Generator — Phase 13
+
+// Basic generator
+function* count(n) {
+  for (var i = 1; i <= n; i++) {
+    yield i;
+  }
+}
+
+var gen = count(5);
+console.log(gen.next()); // { value: 1, done: false }
+console.log(gen.next()); // { value: 2, done: false }
+
+// for...of with generator
+var sum = 0;
+for (var n of count(10)) {
+  sum += n;
+}
+console.log("sum 1-10:", sum);
+
+// Generator method in object
+var obj = {
+  *fibonacci() {
+    var a = 0;
+    var b = 1;
+    while (true) {
+      yield a;
+      var tmp = a;
+      a = b;
+      b = tmp + b;
+    }
+  }
+};
+
+var fib = obj.fibonacci();
+var first10 = [];
+for (var i = 0; i < 10; i++) {
+  first10.push(fib.next().value);
+}
+console.log("fibonacci:", first10);
+
+// Generator method in class
+class NumberList {
+  constructor(items) {
+    this.items = items;
+  }
+  *generate() {
+    for (var i = 0; i < this.items.length; i++) {
+      yield this.items[i];
+    }
+  }
+}
+var list = new NumberList([10, 20, 30]);
+var iter = list.generate();
+console.log("class gen:", iter.next(), iter.next(), iter.next());
+
+// next(value) — bidirectional communication
+function* echo() {
+  var x = yield "ready";
+  yield "got: " + x;
+}
+var e = echo();
+console.log(e.next());       // { value: "ready", done: false }
+console.log(e.next("hello")); // { value: "got: hello", done: false }`,
+
+  "symbol-iterator": `// Symbol + Iterator Protocol — Phase 13
+
+// Custom iterable with @@iterator
+var myRange = {
+  from: 1,
+  to: 5,
+};
+myRange["@@iterator"] = function() {
+  var current = myRange.from;
+  var last = myRange.to;
+  return {
+    next: function() {
+      if (current <= last) {
+        return { value: current++, done: false };
+      }
+      return { value: undefined, done: true };
+    },
+    "@@iterator": function() { return this; }
+  };
+};
+
+// for...of uses iterator protocol
+var result = [];
+for (var n of myRange) {
+  result.push(n);
+}
+console.log("myRange:", result);
+
+// Generator as iterator
+function* gen() { yield 10; yield 20; yield 30; }
+var [first, ...rest] = gen();
+console.log("first:", first, "rest:", rest);
+
+// Symbol basics
+var s1 = Symbol("mySymbol");
+var s2 = Symbol("mySymbol");
+console.log("same description, different symbol:", s1 !== s2);
+console.log("typeof Symbol:", typeof s1);
+
+// Symbol as property key
+var key = Symbol("secret");
+var obj = {};
+obj[key] = 42;
+console.log("symbol key:", obj[key]);`,
+
+  destructuring: `// Destructuring — Phase 3 + 15
+
+// Array destructuring
+var [a, b, c] = [1, 2, 3];
+console.log("array:", a, b, c);
+
+// With rest
+var [head, ...tail] = [10, 20, 30, 40];
+console.log("rest:", head, tail);
+
+// Elision (skip elements)
+var [, second, , fourth] = [1, 2, 3, 4];
+console.log("elision:", second, fourth);
+
+// Object destructuring
+var { name, age } = { name: "Alice", age: 30 };
+console.log("object:", name, age);
+
+// Nested destructuring
+var { a: { b: deep } } = { a: { b: 42 } };
+console.log("nested:", deep);
+
+// Default values
+var { x = 10, y = 20 } = { x: 5 };
+console.log("defaults:", x, y);
+
+// Function parameter destructuring
+function greet({ name, greeting = "Hello" }) {
+  console.log(greeting + ", " + name + "!");
+}
+greet({ name: "World" });
+greet({ name: "jsmini", greeting: "Hi" });
+
+// Destructuring with iterator (generator)
+function* range(n) {
+  for (var i = 0; i < n; i++) yield i;
+}
+var [x, y, z] = range(5);
+console.log("from generator:", x, y, z);
+
+// for-of with destructuring
+var pairs = [[1, "a"], [2, "b"], [3, "c"]];
+for (var [num, letter] of pairs) {
+  console.log(num + " => " + letter);
+}`,
+
+  "modern-syntax": `// Modern Syntax — Phase 13-15
+
+// Optional chaining
+var user = { profile: { name: "Alice" } };
+console.log("optional:", user.profile?.name);
+console.log("optional null:", user.address?.city);
+
+// Nullish coalescing
+var val = null;
+console.log("??:", val ?? "default");
+console.log("??:", 0 ?? "default");
+
+// Computed property names
+var key = "hello";
+var obj = { [key]: "world", [1 + 1]: "two" };
+console.log("computed:", obj.hello, obj[2]);
+
+// Getter / Setter
+var person = {
+  _name: "Bob",
+  get name() { return this._name; },
+  set name(v) { this._name = v; }
+};
+console.log("getter:", person.name);
+person.name = "Carol";
+console.log("setter:", person.name);
+
+// Bitwise operations
+console.log("bit ops:", 5 & 3, 5 | 3, 5 ^ 3, ~0, 1 << 4);
+
+// Tagged template literal
+function upper(strings, ...values) {
+  var result = "";
+  for (var i = 0; i < strings.length; i++) {
+    result += strings[i];
+    if (i < values.length) result += String(values[i]).toUpperCase();
+  }
+  return result;
+}
+var name = "world";
+console.log(upper\`hello \${name}!\`);
+
+// delete / void
+var obj = { a: 1, b: 2 };
+delete obj.a;
+console.log("delete:", obj.a, obj.b);
+console.log("void:", void "ignored");
+
+// Function.name
+var fn = function() {};
+var arrow = () => {};
+console.log("names:", fn.name, arrow.name);
+
+// arguments
+function showArgs() {
+  var arr = [];
+  for (var i = 0; i < arguments.length; i++) {
+    arr.push(arguments[i]);
+  }
+  return arr;
+}
+console.log("arguments:", showArgs(1, 2, 3));
+
+// eval
+console.log("eval:", eval("10 * 20 + 3"));`,
+};
+
+// ========== CodeMirror setup ==========
+const defaultCode = PRESETS.demo;
 
 const runKeymap = Prec.highest(keymap.of([{
   key: "Mod-Enter",

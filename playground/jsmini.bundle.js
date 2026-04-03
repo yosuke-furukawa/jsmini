@@ -76,6 +76,8 @@ var jsmini = (() => {
     switch: "Switch",
     case: "Case",
     default: "Default",
+    delete: "Delete",
+    void: "Void",
     yield: "Yield"
     // undefined は予約語ではないのでキーワードに含めない
   });
@@ -360,10 +362,32 @@ var jsmini = (() => {
         column += 3;
         continue;
       }
-      if (ch === "?" && peek(1) === ".") {
+      if (ch === "?" && peek(1) === "." && !(peek(2) >= "0" && peek(2) <= "9")) {
         pushToken("QuestionDot", "?.", startCol);
         pos += 2;
         column += 2;
+        continue;
+      }
+      if (ch === "." && peek(1) >= "0" && peek(1) <= "9") {
+        let num = ".";
+        advance();
+        while (pos < source.length && source[pos] >= "0" && source[pos] <= "9") {
+          num += source[pos];
+          advance();
+        }
+        if (pos < source.length && (source[pos] === "e" || source[pos] === "E")) {
+          num += source[pos];
+          advance();
+          if (pos < source.length && (source[pos] === "+" || source[pos] === "-")) {
+            num += source[pos];
+            advance();
+          }
+          while (pos < source.length && source[pos] >= "0" && source[pos] <= "9") {
+            num += source[pos];
+            advance();
+          }
+        }
+        pushToken("Number", num, startCol);
         continue;
       }
       if (ch === "?" && peek(1) === "?") {
@@ -531,6 +555,10 @@ var jsmini = (() => {
       return current().type === "Let" || current().type === "Const" || current().type === "Function" || current().type === "Class";
     }
     function parseStatementOrDeclaration() {
+      if (current().type === "Semicolon") {
+        eat("Semicolon");
+        return { type: "EmptyStatement" };
+      }
       if (isDeclarationStart()) {
         return parseDeclaration();
       }
@@ -664,6 +692,11 @@ var jsmini = (() => {
         }
         let key;
         let computed = false;
+        let isGenerator = false;
+        if (current().type === "Star") {
+          eat("Star");
+          isGenerator = true;
+        }
         if (current().type === "LeftBracket") {
           eat("LeftBracket");
           key = parseAssignment();
@@ -710,7 +743,7 @@ var jsmini = (() => {
           body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody }, kind, computed, static: isStatic });
           continue;
         }
-        if (current().type === "LeftParen") {
+        if (current().type === "LeftParen" || isGenerator) {
           const kind = !computed && key.type !== "PrivateIdentifier" && key.name === "constructor" ? "constructor" : "method";
           eat("LeftParen");
           resetParamState();
@@ -724,7 +757,7 @@ var jsmini = (() => {
           }
           eat("RightParen");
           const mbody = parseBlockStatement();
-          body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody }, kind, computed, static: isStatic });
+          body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody, generator: isGenerator }, kind, computed, static: isStatic });
           continue;
         }
         let fieldValue = null;
@@ -1037,6 +1070,8 @@ var jsmini = (() => {
       "Switch",
       "Case",
       "Default",
+      "Delete",
+      "Void",
       "Yield"
     ]);
     function parsePropertyKey() {
@@ -1290,8 +1325,8 @@ var jsmini = (() => {
         const argument = parseUnary();
         return { type: "UpdateExpression", operator: operator2, argument, prefix: true };
       }
-      if (current().type === "Typeof") {
-        const operator2 = eat("Typeof").value;
+      if (current().type === "Typeof" || current().type === "Delete" || current().type === "Void") {
+        const operator2 = eat(current().type).value;
         const argument = parseUnary();
         return { type: "UnaryExpression", operator: operator2, prefix: true, argument };
       }
@@ -1353,6 +1388,15 @@ var jsmini = (() => {
           const property = parseExpression();
           eat("RightBracket");
           expr = { type: "MemberExpression", object: expr, property, computed: true };
+        } else if (current().type === "NoSubstitutionTemplate" || current().type === "TemplateHead") {
+          let quasi;
+          if (current().type === "NoSubstitutionTemplate") {
+            const tok = eat("NoSubstitutionTemplate");
+            quasi = { type: "TemplateLiteral", quasis: [{ type: "TemplateElement", value: { raw: tok.value, cooked: tok.value }, tail: true }], expressions: [] };
+          } else {
+            quasi = parseTemplateLiteral();
+          }
+          expr = { type: "TaggedTemplateExpression", tag: expr, quasi };
         } else {
           break;
         }
@@ -1483,6 +1527,11 @@ var jsmini = (() => {
         let key;
         let propKind = "init";
         let computed = false;
+        let isGenerator = false;
+        if (current().type === "Star") {
+          eat("Star");
+          isGenerator = true;
+        }
         if (current().type === "LeftBracket") {
           eat("LeftBracket");
           key = parseAssignment();
@@ -1533,7 +1582,7 @@ var jsmini = (() => {
           );
         }
         let value;
-        if (current().type === "LeftParen") {
+        if (current().type === "LeftParen" || isGenerator) {
           eat("LeftParen");
           resetParamState();
           const params = [];
@@ -1546,7 +1595,7 @@ var jsmini = (() => {
           }
           eat("RightParen");
           const body = parseBlockStatement();
-          value = { type: "FunctionExpression", id: null, params, body };
+          value = { type: "FunctionExpression", id: null, params, body, generator: isGenerator };
         } else if (current().type === "Colon") {
           eat("Colon");
           value = parseAssignment();
@@ -1789,15 +1838,41 @@ var jsmini = (() => {
         }
       }
     } else if (pattern.type === "ArrayPattern") {
-      const arr = value;
-      for (let i = 0; i < pattern.elements.length; i++) {
-        const el = pattern.elements[i];
-        if (!el) continue;
-        if (el.type === "RestElement") {
-          bindPattern(el.argument, arr?.slice(i) ?? [], env, kind, defaultResolver);
-          break;
+      const iterable = value;
+      const iterFn = iterable != null && typeof iterable[Symbol.iterator] === "function" ? () => iterable[Symbol.iterator]() : iterable != null && typeof iterable?.["@@iterator"] === "function" ? () => iterable["@@iterator"]() : null;
+      if (iterFn) {
+        const iterator = iterFn();
+        for (let i = 0; i < pattern.elements.length; i++) {
+          const el = pattern.elements[i];
+          if (!el) {
+            iterator.next();
+            continue;
+          }
+          if (el.type === "RestElement") {
+            const rest = [];
+            let r2 = iterator.next();
+            while (r2 && !r2.done) {
+              rest.push(r2.value);
+              r2 = iterator.next();
+            }
+            bindPattern(el.argument, rest, env, kind, defaultResolver);
+            return;
+          }
+          const r = iterator.next();
+          const val = r && !r.done ? r.value : void 0;
+          bindPattern(el, val, env, kind, defaultResolver);
         }
-        bindPattern(el, arr?.[i], env, kind, defaultResolver);
+      } else {
+        const arr = iterable;
+        for (let i = 0; i < pattern.elements.length; i++) {
+          const el = pattern.elements[i];
+          if (!el) continue;
+          if (el.type === "RestElement") {
+            bindPattern(el.argument, arr?.slice(i) ?? [], env, kind, defaultResolver);
+            break;
+          }
+          bindPattern(el, arr?.[i], env, kind, defaultResolver);
+        }
       }
     } else if (pattern.type === "AssignmentPattern") {
       const val = value === void 0 && defaultResolver ? defaultResolver(pattern.right) : value;
@@ -2017,7 +2092,14 @@ var jsmini = (() => {
     env.defineReadOnly("RangeError", RangeError);
     env.defineReadOnly("Boolean", Boolean);
     env.defineReadOnly("Number", Number);
-    env.defineReadOnly("String", String);
+    const StringCtor = function(v) {
+      const s = isJSString(v) ? jsStringToString(v) : v === void 0 ? "" : String(v);
+      if (new.target) return new String(s);
+      return internString(s);
+    };
+    StringCtor.fromCharCode = (...codes) => internString(String.fromCharCode(...codes));
+    StringCtor.prototype = String.prototype;
+    env.defineReadOnly("String", StringCtor);
     env.defineReadOnly("Array", Array);
     env.defineReadOnly("Function", Function);
     env.defineReadOnly("isNaN", (v) => Number.isNaN(Number(v)));
@@ -2100,6 +2182,15 @@ var jsmini = (() => {
     SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
     SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
     env.defineReadOnly("Symbol", SymbolFn);
+    if (options.globals) {
+      for (const [k, v] of Object.entries(options.globals)) {
+        if (!env.hasOwn(k)) env.define(k, v);
+      }
+    }
+    env.defineReadOnly("eval", (code) => {
+      const s = isJSString(code) ? jsStringToString(code) : String(code);
+      return evaluate(s, options);
+    });
     _currentOnStep = onStep;
     try {
       const gen = evalProgram(ast, env);
@@ -2177,6 +2268,7 @@ var jsmini = (() => {
       if (stmt.type === "FunctionDeclaration") {
         const fn = {
           [JS_FUNCTION_BRAND]: true,
+          name: stmt.id.name,
           params: stmt.params,
           body: stmt.body,
           closure: env,
@@ -2206,6 +2298,7 @@ var jsmini = (() => {
   function classKeyName(key, computed, env) {
     if (computed && env) {
       const val = exhaustGen(evalExpression(key, env));
+      if (isJSSymbol(val)) return val.key;
       return isJSString(val) ? jsStringToString(val) : String(val);
     }
     if (key.type === "Literal") return String(key.value);
@@ -2216,9 +2309,11 @@ var jsmini = (() => {
     const ctorMethod = stmt.body.body.find((m) => m.type === "MethodDefinition" && m.kind === "constructor");
     const instanceFields = stmt.body.body.filter((m) => m.type === "PropertyDefinition" && !m.static);
     let ctorFn;
+    const className = stmt.id.name;
     if (ctorMethod) {
       ctorFn = {
         [JS_FUNCTION_BRAND]: true,
+        name: className,
         params: ctorMethod.value.params,
         body: ctorMethod.value.body,
         closure: env,
@@ -2228,6 +2323,7 @@ var jsmini = (() => {
     } else if (superClass) {
       ctorFn = {
         [JS_FUNCTION_BRAND]: true,
+        name: className,
         params: superClass.params,
         body: superClass.body,
         closure: superClass.closure,
@@ -2237,6 +2333,7 @@ var jsmini = (() => {
     } else {
       ctorFn = {
         [JS_FUNCTION_BRAND]: true,
+        name: className,
         params: [],
         body: { type: "BlockStatement", body: [] },
         closure: env,
@@ -2255,15 +2352,18 @@ var jsmini = (() => {
         if (member.kind === "constructor") continue;
         const fn = {
           [JS_FUNCTION_BRAND]: true,
+          name: name2,
           params: member.value.params,
           body: member.value.body,
           closure: env,
           prototype: {}
         };
+        if (member.value.generator) fn.isGenerator = true;
         target[name2] = fn;
       } else if (member.kind === "get" || member.kind === "set") {
         const fn = {
           [JS_FUNCTION_BRAND]: true,
+          name: `${member.kind} ${name2}`,
           params: member.value.params,
           body: member.value.body,
           closure: env,
@@ -2341,6 +2441,9 @@ var jsmini = (() => {
       case "VariableDeclaration": {
         for (const decl of stmt.declarations) {
           const value = decl.init ? yield* evalExpression(decl.init, env) : void 0;
+          if (decl.id.type === "Identifier" && isJSFunction(value) && !value.name) {
+            value.name = decl.id.name;
+          }
           if (decl.id.type === "Identifier" && stmt.kind === "var" && !decl.init) {
             const varEnv = env.findVarScope();
             if (!varEnv.hasOwn(decl.id.name)) {
@@ -2521,9 +2624,12 @@ var jsmini = (() => {
         const rawIterable = yield* evalExpression(stmt.right, env);
         let iterable;
         const iterKey = "@@iterator";
-        const iterFn = typeof rawIterable === "object" && rawIterable !== null ? getProperty(rawIterable, iterKey) ?? rawIterable[iterKey] : void 0;
+        let iterFn = typeof rawIterable === "object" && rawIterable !== null ? getProperty(rawIterable, iterKey) ?? rawIterable[iterKey] : void 0;
+        if (!iterFn && typeof rawIterable === "object" && rawIterable !== null && typeof rawIterable[Symbol.iterator] === "function") {
+          iterFn = rawIterable[Symbol.iterator].bind(rawIterable);
+        }
         if (iterFn && (isJSFunction(iterFn) || typeof iterFn === "function")) {
-          const iterator = isJSFunction(iterFn) ? yield* evalCallWithJSFunction(iterFn, [], env) : iterFn.call(rawIterable);
+          const iterator = isJSFunction(iterFn) ? yield* evalCallWithJSFunction(iterFn, [], env, rawIterable) : iterFn.call(rawIterable);
           iterable = [];
           for (let step = 0; step < 1e4; step++) {
             const nextFn = getProperty(iterator, "next") ?? iterator?.next;
@@ -2592,6 +2698,7 @@ var jsmini = (() => {
       case "FunctionExpression": {
         const fn = {
           [JS_FUNCTION_BRAND]: true,
+          name: expr.id?.name ?? "",
           params: expr.params,
           body: expr.body,
           closure: env,
@@ -2614,6 +2721,7 @@ var jsmini = (() => {
       case "ArrowFunctionExpression": {
         const fn = {
           [JS_FUNCTION_BRAND]: true,
+          name: "",
           params: expr.params,
           body: expr.expression ? { type: "BlockStatement", body: [{ type: "ReturnStatement", argument: expr.body }] } : expr.body,
           closure: env,
@@ -2635,6 +2743,23 @@ var jsmini = (() => {
           }
         }
         return result;
+      }
+      case "TaggedTemplateExpression": {
+        const tag = yield* evalExpression(expr.tag, env);
+        const quasi = expr.quasi;
+        const strings = quasi.quasis.map((q) => q.value.cooked);
+        strings.raw = quasi.quasis.map((q) => q.value.raw);
+        const values = [];
+        for (const e of quasi.expressions) {
+          values.push(yield* evalExpression(e, env));
+        }
+        if (typeof tag === "function") {
+          return tag(strings, ...values);
+        }
+        if (isJSFunction(tag)) {
+          return yield* evalCallWithJSFunction(tag, [strings, ...values], env);
+        }
+        throw new TypeError("tag is not a function");
       }
       case "SequenceExpression": {
         let result = void 0;
@@ -2673,7 +2798,7 @@ var jsmini = (() => {
             if (source) Object.assign(obj, source);
           } else {
             const rawKey = prop.computed ? yield* evalExpression(prop.key, env) : void 0;
-            const key = prop.computed ? isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey) : prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+            const key = prop.computed ? isJSSymbol(rawKey) ? rawKey.key : isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey) : prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
             if (prop.kind === "get" || prop.kind === "set") {
               const fnValue = yield* evalExpression(prop.value, env);
               const descriptor = {};
@@ -2711,7 +2836,9 @@ var jsmini = (() => {
               descriptor.enumerable = true;
               Object.defineProperty(obj, key, descriptor);
             } else {
-              obj[key] = yield* evalExpression(prop.value, env);
+              const val = yield* evalExpression(prop.value, env);
+              if (isJSFunction(val) && !val.name) val.name = key;
+              obj[key] = val;
             }
           }
         }
@@ -2836,7 +2963,7 @@ var jsmini = (() => {
       if (param.type === "RestElement") {
         fnEnv.define(param.argument.name, args.slice(i));
       } else {
-        yield* bindParam(param, args[i] ?? void 0, fnEnv, fnEnv);
+        yield* bindParam(param, i < args.length ? args[i] : void 0, fnEnv, fnEnv);
       }
     }
     if (constructor.__instanceFields) {
@@ -2873,17 +3000,24 @@ var jsmini = (() => {
       bindPattern(param, value, env, "let");
     }
   }
-  function* evalCallWithJSFunction(fn, args, env) {
+  function* evalCallWithJSFunction(fn, args, env, overrideThis) {
     if (!isJSFunction(fn)) return void 0;
     const jsFn = fn;
     if (jsFn.isGenerator) {
       const fnEnv2 = new Environment(jsFn.closure, !jsFn.isArrow);
+      if (overrideThis !== void 0) fnEnv2.setThis(overrideThis);
+      if (!jsFn.isArrow) {
+        const argsObj = /* @__PURE__ */ Object.create(null);
+        for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+        argsObj.length = args.length;
+        fnEnv2.define("arguments", argsObj);
+      }
       for (let i = 0; i < jsFn.params.length; i++) {
         const param = jsFn.params[i];
         if (param.type === "RestElement") {
           fnEnv2.define(param.argument.name, args.slice(i));
         } else {
-          yield* bindParam(param, args[i] ?? void 0, fnEnv2, fnEnv2);
+          yield* bindParam(param, i < args.length ? args[i] : void 0, fnEnv2, fnEnv2);
         }
       }
       hoistVarDeclarations(jsFn.body.body, fnEnv2);
@@ -2904,12 +3038,19 @@ var jsmini = (() => {
       return genObj;
     }
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
+    if (overrideThis !== void 0) fnEnv.setThis(overrideThis);
+    if (!jsFn.isArrow) {
+      const argsObj = /* @__PURE__ */ Object.create(null);
+      for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+      argsObj.length = args.length;
+      fnEnv.define("arguments", argsObj);
+    }
     for (let i = 0; i < jsFn.params.length; i++) {
       const param = jsFn.params[i];
       if (param.type === "RestElement") {
         fnEnv.define(param.argument.name, args.slice(i));
       } else {
-        yield* bindParam(param, args[i] ?? void 0, fnEnv, fnEnv);
+        yield* bindParam(param, i < args.length ? args[i] : void 0, fnEnv, fnEnv);
       }
     }
     hoistVarDeclarations(jsFn.body.body, fnEnv);
@@ -2929,6 +3070,34 @@ var jsmini = (() => {
       thisValue = yield* evalExpression(expr.callee.object, env);
       const key = yield* resolveMemberKey(expr.callee, env);
       fn = getProperty(thisValue, key);
+      if (fn === void 0 && isJSFunction(thisValue)) {
+        const jsFnObj = thisValue;
+        if (key === "call") {
+          const callArgs = yield* evalArguments(expr.arguments, env);
+          const [callThis, ...rest] = callArgs;
+          return yield* evalCallWithJSFunction(jsFnObj, rest, env, callThis);
+        } else if (key === "apply") {
+          const applyArgs = yield* evalArguments(expr.arguments, env);
+          const [applyThis, argsArray] = applyArgs;
+          const rest = Array.isArray(argsArray) ? argsArray : [];
+          return yield* evalCallWithJSFunction(jsFnObj, rest, env, applyThis);
+        } else if (key === "bind") {
+          const bindArgs = yield* evalArguments(expr.arguments, env);
+          const [bindThis, ...boundArgs] = bindArgs;
+          const bound = {
+            [JS_FUNCTION_BRAND]: true,
+            name: `bound ${jsFnObj.name ?? ""}`,
+            params: jsFnObj.params,
+            body: jsFnObj.body,
+            closure: jsFnObj.closure,
+            isArrow: jsFnObj.isArrow,
+            prototype: jsFnObj.prototype,
+            __boundThis: bindThis,
+            __boundArgs: boundArgs
+          };
+          return bound;
+        }
+      }
       if (fn === void 0 && isJSString(thisValue)) {
         const str = jsStringToString(thisValue);
         const nativeFn = str[key];
@@ -2946,6 +3115,23 @@ var jsmini = (() => {
       fn = yield* evalExpression(expr.callee, env);
     }
     const args = yield* evalArguments(expr.arguments, env);
+    if (expr.callee.type === "Identifier" && expr.callee.name === "eval" && typeof fn === "function") {
+      const code = args[0];
+      if (typeof code !== "string" && !isJSString(code)) return code;
+      const s = isJSString(code) ? jsStringToString(code) : code;
+      const ast = parse(s);
+      const evalEnv = new Environment(env, true);
+      const gen = evalProgram(ast, evalEnv);
+      let result;
+      while (true) {
+        const r = gen.next();
+        if (r.done) {
+          result = r.value;
+          break;
+        }
+      }
+      return result;
+    }
     if (expr.callee.type === "Identifier" && expr.callee.name === "__super__" && isJSFunction(fn)) {
       const superFn = fn;
       const superEnv = new Environment(superFn.closure, true);
@@ -2955,7 +3141,7 @@ var jsmini = (() => {
         if (param.type === "RestElement") {
           superEnv.define(param.argument.name, args.slice(i));
         } else {
-          yield* bindParam(param, args[i] ?? void 0, superEnv, superEnv);
+          yield* bindParam(param, i < args.length ? args[i] : void 0, superEnv, superEnv);
         }
       }
       hoistVarDeclarations(superFn.body.body, superEnv);
@@ -2971,13 +3157,13 @@ var jsmini = (() => {
       return void 0;
     }
     if (typeof fn === "function") {
-      if (thisValue !== void 0 && args.some((a) => isJSFunction(a))) {
-        const wrappedArgs = args.map(
-          (a) => isJSFunction(a) ? (...nativeArgs) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env)) : a
-        );
+      const wrappedArgs = args.some((a) => isJSFunction(a)) ? args.map(
+        (a) => isJSFunction(a) ? (...nativeArgs) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env)) : a
+      ) : args;
+      if (thisValue !== void 0) {
         return fn.apply(thisValue, wrappedArgs);
       }
-      return fn(...args);
+      return fn(...wrappedArgs);
     }
     if (!isJSFunction(fn)) {
       throw new TypeError(`${typeof fn} is not a function`);
@@ -2990,13 +3176,17 @@ var jsmini = (() => {
       const fnEnv2 = new Environment(jsFn.closure, !jsFn.isArrow);
       if (!jsFn.isArrow) {
         fnEnv2.setThis(thisValue);
+        const argsObj = /* @__PURE__ */ Object.create(null);
+        for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+        argsObj.length = args.length;
+        fnEnv2.define("arguments", argsObj);
       }
       for (let i = 0; i < jsFn.params.length; i++) {
         const param = jsFn.params[i];
         if (param.type === "RestElement") {
           fnEnv2.define(param.argument.name, args.slice(i));
         } else {
-          yield* bindParam(param, args[i] ?? void 0, fnEnv2, fnEnv2);
+          yield* bindParam(param, i < args.length ? args[i] : void 0, fnEnv2, fnEnv2);
         }
       }
       hoistVarDeclarations(jsFn.body.body, fnEnv2);
@@ -3024,13 +3214,17 @@ var jsmini = (() => {
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
     if (!jsFn.isArrow) {
       fnEnv.setThis(thisValue);
+      const argsObj = /* @__PURE__ */ Object.create(null);
+      for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+      argsObj.length = args.length;
+      fnEnv.define("arguments", argsObj);
     }
     for (let i = 0; i < jsFn.params.length; i++) {
       const param = jsFn.params[i];
       if (param.type === "RestElement") {
         fnEnv.define(param.argument.name, args.slice(i));
       } else {
-        yield* bindParam(param, args[i] ?? void 0, fnEnv, fnEnv);
+        yield* bindParam(param, i < args.length ? args[i] : void 0, fnEnv, fnEnv);
       }
     }
     hoistVarDeclarations(jsFn.body.body, fnEnv);
@@ -3067,6 +3261,21 @@ var jsmini = (() => {
       if (value === null) return internString("object");
       if (isJSFunction(value)) return internString("function");
       return internString(typeof value);
+    }
+    if (expr.operator === "delete") {
+      if (expr.argument.type === "MemberExpression") {
+        const obj = yield* evalExpression(expr.argument.object, env);
+        const key = yield* resolveMemberKey(expr.argument, env);
+        if (obj && typeof obj === "object") {
+          delete obj[key];
+        }
+        return true;
+      }
+      return true;
+    }
+    if (expr.operator === "void") {
+      yield* evalExpression(expr.argument, env);
+      return void 0;
     }
     const argument = yield* evalExpression(expr.argument, env);
     switch (expr.operator) {
@@ -3365,33 +3574,41 @@ var jsmini = (() => {
         }
         this.emit("Pop");
       } else if (id2.type === "ArrayPattern") {
+        this.emit("GetIterator");
+        const iterName = `__dstr_iter_${this.currentOffset()}`;
+        const iterIdx = this.addConstant(iterName);
+        this.emit("StaGlobal", iterIdx);
+        this.emit("Pop");
         for (let i = 0; i < id2.elements.length; i++) {
           const el = id2.elements[i];
-          if (!el) continue;
-          if (el.type === "RestElement") {
-            this.emit("LdaConst", this.addConstant(i));
-            this.emit("Dup");
+          if (!el) {
+            this.emit("LdaGlobal", iterIdx);
+            this.emit("IteratorNext");
             this.emit("Pop");
-            const tmpName = `__rest_arr_${this.currentOffset()}`;
-            const tmpIdx = this.addConstant(tmpName);
-            this.emit("Pop");
-            this.emit("Dup");
-            this.emit("StaGlobal", tmpIdx);
-            this.emit("Pop");
-            this.emit("LdaConst", this.addConstant(i));
-            this.emit("LdaGlobal", tmpIdx);
-            this.emit("Dup");
-            this.emitWithIC("GetProperty", this.addConstant("slice"));
-            this.emit("CallMethod", 1);
-            this.compileBindingTarget(el.argument);
-            break;
+            continue;
           }
-          this.emit("Dup");
-          this.emit("LdaConst", this.addConstant(i));
-          this.emit("GetPropertyComputed");
+          if (el.type === "RestElement") {
+            this.emit("CreateArray", 0);
+            const loopStart = this.currentOffset();
+            this.emit("LdaGlobal", iterIdx);
+            this.emit("IteratorNext");
+            this.emit("Dup");
+            this.emit("IteratorComplete");
+            const exitJump = this.emit("JumpIfTrue", 0);
+            this.emit("IteratorValue");
+            this.emit("ArrayPush");
+            const backJump = this.emit("Jump", 0);
+            this.patch(backJump, loopStart);
+            this.patch(exitJump, this.currentOffset());
+            this.emit("Pop");
+            this.compileBindingTarget(el.argument);
+            return;
+          }
+          this.emit("LdaGlobal", iterIdx);
+          this.emit("IteratorNext");
+          this.emit("IteratorValue");
           this.compileBindingTarget(el);
         }
-        this.emit("Pop");
       } else if (id2.type === "AssignmentPattern") {
         this.emit("Dup");
         this.emit("LdaUndefined");
@@ -3430,7 +3647,7 @@ var jsmini = (() => {
         }
       }
     }
-    compileFunctionBody(params, body) {
+    compileFunctionBody(params, body, isArrow) {
       this.paramCount = params.length;
       const destructureParams = [];
       const defaultParams = [];
@@ -3468,6 +3685,9 @@ var jsmini = (() => {
         this.emit("LdaLocal", slot);
         this.compileBindingTarget(pattern);
       }
+      if (!isArrow) {
+        this.declareLocal("arguments");
+      }
       for (const stmt of body) {
         this.compileStatement(stmt);
       }
@@ -3488,7 +3708,11 @@ var jsmini = (() => {
           }
           for (const decl of stmt.declarations) {
             if (decl.init) {
-              this.compileExpression(decl.init);
+              if (decl.id.type === "Identifier" && this.isNameableFunctionExpr(decl.init)) {
+                this.compileExpression(decl.init, decl.id.name);
+              } else {
+                this.compileExpression(decl.init);
+              }
             } else {
               this.emit("LdaUndefined");
             }
@@ -3742,11 +3966,13 @@ var jsmini = (() => {
               if (member.computed) {
                 this.compileExpression(member.key);
                 const fnCompiler = new _BytecodeCompiler(this);
+                if (member.value.generator) fnCompiler.isGenerator = true;
                 fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
                 this.emit("LdaConst", this.addConstant(fnCompiler.finish("<computed>")));
                 this.emit("SetPropertyComputed");
               } else {
                 const fnCompiler = new _BytecodeCompiler(this);
+                if (member.value.generator) fnCompiler.isGenerator = true;
                 fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
                 this.emit("LdaConst", this.addConstant(fnCompiler.finish(name2)));
                 this.emitWithIC("SetProperty", this.addConstant(name2));
@@ -3890,11 +4116,16 @@ var jsmini = (() => {
           for (const bp of loop.breakPatches) this.patch(bp, this.currentOffset());
           break;
         }
+        case "EmptyStatement":
+          break;
         default:
           throw new Error(`Unsupported statement: ${stmt.type}`);
       }
     }
-    compileExpression(expr) {
+    isNameableFunctionExpr(expr) {
+      return expr.type === "FunctionExpression" || expr.type === "ArrowFunctionExpression" || expr.type === "ClassExpression";
+    }
+    compileExpression(expr, inferredName) {
       switch (expr.type) {
         case "Literal": {
           if (expr.value === null) {
@@ -3928,13 +4159,13 @@ var jsmini = (() => {
           const fnCompiler = new _BytecodeCompiler(this);
           if (expr.generator) fnCompiler.isGenerator = true;
           fnCompiler.compileFunctionBody(expr.params, expr.body.body);
-          const fnBytecode = fnCompiler.finish(expr.id?.name ?? "<anonymous>");
+          const fnBytecode = fnCompiler.finish(expr.id?.name ?? inferredName ?? "");
           const fnIndex = this.addConstant(fnBytecode);
           this.emit("LdaConst", fnIndex);
           break;
         }
         case "ClassExpression": {
-          const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: "__anonymous__" } };
+          const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: inferredName ?? "" } };
           const instanceFields = fakeStmt.body.body.filter((m) => m.type === "PropertyDefinition" && !m.static);
           const ctorMethod = fakeStmt.body.body.find((m) => m.type === "MethodDefinition" && m.kind === "constructor");
           const fnCompiler = new _BytecodeCompiler(this);
@@ -3957,11 +4188,13 @@ var jsmini = (() => {
               if (member.computed) {
                 this.compileExpression(member.key);
                 const mc = new _BytecodeCompiler(this);
+                if (member.value.generator) mc.isGenerator = true;
                 mc.compileFunctionBody(member.value.params, member.value.body.body);
                 this.emit("LdaConst", this.addConstant(mc.finish("<computed>")));
                 this.emit("SetPropertyComputed");
               } else {
                 const mc = new _BytecodeCompiler(this);
+                if (member.value.generator) mc.isGenerator = true;
                 mc.compileFunctionBody(member.value.params, member.value.body.body);
                 this.emit("LdaConst", this.addConstant(mc.finish(name2)));
                 this.emitWithIC("SetProperty", this.addConstant(name2));
@@ -4047,8 +4280,12 @@ var jsmini = (() => {
               this.compileExpression(prop.value);
               this.emit("SetPropertyComputed");
             } else {
-              this.compileExpression(prop.value);
               const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+              if (this.isNameableFunctionExpr(prop.value)) {
+                this.compileExpression(prop.value, key);
+              } else {
+                this.compileExpression(prop.value);
+              }
               const nameIdx = this.addConstant(key);
               if (prop.kind === "get") {
                 this.emit("DefineGetter", nameIdx);
@@ -4180,11 +4417,11 @@ var jsmini = (() => {
           if (expr.expression) {
             fnCompiler.compileFunctionBody(expr.params, [
               { type: "ReturnStatement", argument: expr.body }
-            ]);
+            ], true);
           } else {
-            fnCompiler.compileFunctionBody(expr.params, expr.body.body);
+            fnCompiler.compileFunctionBody(expr.params, expr.body.body, true);
           }
-          const fnBytecode = fnCompiler.finish("<arrow>");
+          const fnBytecode = fnCompiler.finish(inferredName ?? "");
           const fnIndex = this.addConstant(fnBytecode);
           this.emit("LdaConst", fnIndex);
           break;
@@ -4212,6 +4449,46 @@ var jsmini = (() => {
           }
           break;
         }
+        case "TaggedTemplateExpression": {
+          const quasi = expr.quasi;
+          for (const e of quasi.expressions) {
+            this.compileExpression(e);
+          }
+          for (const q of quasi.quasis) {
+            this.emit("LdaConst", this.addConstant(q.value.cooked));
+          }
+          this.emit("CreateArray", quasi.quasis.length);
+          for (const q of quasi.quasis) {
+            this.emit("LdaConst", this.addConstant(q.value.raw));
+          }
+          this.emit("CreateArray", quasi.quasis.length);
+          const rawTmp = `__ttl_raw_${this.currentOffset()}`;
+          const rawIdx = this.addConstant(rawTmp);
+          this.emit("StaGlobal", rawIdx);
+          this.emit("Pop");
+          this.emit("Dup");
+          this.emit("LdaGlobal", rawIdx);
+          this.emitWithIC("SetProperty", this.addConstant("raw"));
+          this.emit("Pop");
+          const strTmp = `__ttl_str_${this.currentOffset()}`;
+          const strIdx = this.addConstant(strTmp);
+          this.emit("StaGlobal", strIdx);
+          this.emit("Pop");
+          const valTemps = [];
+          for (let i = quasi.expressions.length - 1; i >= 0; i--) {
+            const vt = `__ttl_val${i}_${this.currentOffset()}`;
+            valTemps.unshift(vt);
+            this.emit("StaGlobal", this.addConstant(vt));
+            this.emit("Pop");
+          }
+          this.emit("LdaGlobal", strIdx);
+          for (const vt of valTemps) {
+            this.emit("LdaGlobal", this.addConstant(vt));
+          }
+          this.compileExpression(expr.tag);
+          this.emit("Call", 1 + quasi.expressions.length);
+          break;
+        }
         case "UpdateExpression": {
           if (expr.argument.type === "Identifier") {
             this.emitLoad(expr.argument.name);
@@ -4229,6 +4506,29 @@ var jsmini = (() => {
           break;
         }
         case "UnaryExpression": {
+          if (expr.operator === "void") {
+            this.compileExpression(expr.argument);
+            this.emit("Pop");
+            this.emit("LdaUndefined");
+            break;
+          }
+          if (expr.operator === "delete") {
+            if (expr.argument.type === "MemberExpression") {
+              this.compileExpression(expr.argument.object);
+              if (expr.argument.computed) {
+                this.compileExpression(expr.argument.property);
+                this.emit("DeletePropertyComputed");
+              } else {
+                const name2 = expr.argument.property.type === "Identifier" ? expr.argument.property.name : String(expr.argument.property.value);
+                this.emit("DeleteProperty", this.addConstant(name2));
+              }
+            } else {
+              this.compileExpression(expr.argument);
+              this.emit("Pop");
+              this.emit("LdaConst", this.addConstant(true));
+            }
+            break;
+          }
           if (expr.operator === "typeof" && expr.argument.type === "Identifier") {
             const name2 = expr.argument.name;
             const local = this.resolveLocal(name2);
@@ -5948,6 +6248,18 @@ var jsmini = (() => {
       };
       return genObj;
     }
+    isBytecodeCallable(obj) {
+      return typeof obj === "object" && obj !== null && ("bytecode" in obj || "__closure" in obj);
+    }
+    setArguments(fn, locals, args) {
+      const argSlot = fn.paramCount;
+      if (argSlot < fn.localCount) {
+        const argsObj = /* @__PURE__ */ Object.create(null);
+        for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+        argsObj.length = args.length;
+        locals[argSlot] = argsObj;
+      }
+    }
     // 汎用の関数呼び出し (BytecodeFunction, closure, native function 対応)
     callAny(fn, thisValue, args) {
       if (typeof fn === "function") {
@@ -6091,7 +6403,13 @@ var jsmini = (() => {
       let methodFound = false;
       for (const name2 of ["valueOf", "toString"]) {
         const method = isJSObject(value) ? getProperty2(value, name2) : obj[name2];
-        if (method && typeof method === "object" && "bytecode" in method) {
+        if (typeof method === "function") {
+          methodFound = true;
+          const result = method.call(value);
+          if (result === null || result === void 0 || typeof result !== "object" || isJSString(result)) {
+            return result;
+          }
+        } else if (method && typeof method === "object" && "bytecode" in method) {
           methodFound = true;
           const result = this.callInternal(method, value, []);
           if (result === THROWN_SENTINEL) return THROWN_SENTINEL;
@@ -6604,6 +6922,24 @@ var jsmini = (() => {
                   this.push(this.arrayPrototype[name2]);
                 } else if (isJSString(obj) && name2 in this.stringPrototype) {
                   this.push(this.stringPrototype[name2]);
+                } else if (this.isBytecodeCallable(obj) && (name2 === "call" || name2 === "apply" || name2 === "bind")) {
+                  const self = this;
+                  const callable = obj;
+                  if (name2 === "call") {
+                    this.push(function(...callArgs) {
+                      return self.callFunction(callable, callArgs[0], callArgs.slice(1));
+                    });
+                  } else if (name2 === "apply") {
+                    this.push(function(thisArg, argsArray) {
+                      return self.callFunction(callable, thisArg, Array.isArray(argsArray) ? argsArray : []);
+                    });
+                  } else {
+                    this.push(function(thisArg, ...boundArgs) {
+                      return function(...args) {
+                        return self.callFunction(callable, thisArg, [...boundArgs, ...args]);
+                      };
+                    });
+                  }
                 } else {
                   this.push(obj[name2]);
                 }
@@ -6615,7 +6951,11 @@ var jsmini = (() => {
             const key = this.pop();
             const obj = this.pop();
             const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
-            this.push(obj[keyStr]);
+            if (isJSObject(obj)) {
+              this.push(getProperty2(obj, keyStr));
+            } else {
+              this.push(obj[keyStr]);
+            }
             break;
           }
           case "SetPropertyComputed": {
@@ -6696,6 +7036,31 @@ var jsmini = (() => {
             const result = this.pop();
             const value = isJSObject(result) ? getProperty2(result, "value") : result?.value;
             this.push(value);
+            break;
+          }
+          case "DeleteProperty": {
+            const obj = this.pop();
+            const name2 = constants[instr.operand];
+            if (isJSObject(obj)) {
+              setProperty(obj, name2, void 0);
+              delete obj[name2];
+            } else if (obj && typeof obj === "object") {
+              delete obj[name2];
+            }
+            this.push(true);
+            break;
+          }
+          case "DeletePropertyComputed": {
+            const key = this.pop();
+            const obj = this.pop();
+            const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
+            if (isJSObject(obj)) {
+              setProperty(obj, keyStr, void 0);
+              delete obj[keyStr];
+            } else if (obj && typeof obj === "object") {
+              delete obj[keyStr];
+            }
+            this.push(true);
             break;
           }
           case "In": {
@@ -6789,11 +7154,12 @@ var jsmini = (() => {
               const locals = new Array(fn.localCount).fill(void 0);
               if (fn.hasRestParam) {
                 const restIdx = fn.paramCount - 1;
-                for (let i = 0; i < restIdx; i++) locals[i] = args[i] ?? void 0;
+                for (let i = 0; i < restIdx; i++) locals[i] = i < args.length ? args[i] : void 0;
                 locals[restIdx] = args.slice(restIdx);
               } else {
-                for (let i = 0; i < fn.paramCount; i++) locals[i] = args[i] ?? void 0;
+                for (let i = 0; i < fn.paramCount; i++) locals[i] = i < args.length ? args[i] : void 0;
               }
+              this.setArguments(fn, locals, args);
               if (fn.isGenerator) {
                 const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
                 this.push(genObj);
@@ -6829,34 +7195,46 @@ var jsmini = (() => {
             } else if (typeof method === "object" && method !== null && "__closure" in method) {
               const closure = method;
               const fn = closure.func;
-              if (this.feedback) this.feedback.recordCall(fn, args);
-              if (this.jit) {
-                const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map((b) => b.value), thisObj);
-                if (jitResult !== null) {
-                  this.push(jitResult.result);
-                  break;
-                }
-              }
               const locals = new Array(fn.localCount).fill(void 0);
               for (let i = 0; i < fn.paramCount; i++) {
-                locals[i] = args[i] ?? void 0;
+                locals[i] = i < args.length ? args[i] : void 0;
               }
-              this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
+              this.setArguments(fn, locals, args);
+              if (fn.isGenerator) {
+                const genObj = this.createGeneratorObject(fn, locals, closure.capturedBoxes);
+                this.push(genObj);
+              } else {
+                if (this.feedback) this.feedback.recordCall(fn, args);
+                if (this.jit) {
+                  const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map((b) => b.value), thisObj);
+                  if (jitResult !== null) {
+                    this.push(jitResult.result);
+                    break;
+                  }
+                }
+                this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
+              }
             } else if (typeof method === "object" && method !== null && "bytecode" in method) {
               const fn = method;
-              if (this.feedback) this.feedback.recordCall(fn, args);
-              if (this.jit) {
-                const jitResult = this.jit.tryCall(fn, args, [], thisObj);
-                if (jitResult !== null) {
-                  this.push(jitResult.result);
-                  break;
-                }
-              }
               const locals = new Array(fn.localCount).fill(void 0);
               for (let i = 0; i < fn.paramCount; i++) {
-                locals[i] = args[i] ?? void 0;
+                locals[i] = i < args.length ? args[i] : void 0;
               }
-              this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: [] });
+              this.setArguments(fn, locals, args);
+              if (fn.isGenerator) {
+                const genObj = this.createGeneratorObject(fn, locals, []);
+                this.push(genObj);
+              } else {
+                if (this.feedback) this.feedback.recordCall(fn, args);
+                if (this.jit) {
+                  const jitResult = this.jit.tryCall(fn, args, [], thisObj);
+                  if (jitResult !== null) {
+                    this.push(jitResult.result);
+                    break;
+                  }
+                }
+                this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: [] });
+              }
             } else {
               throw new TypeError("Not a function");
             }
@@ -6913,7 +7291,7 @@ var jsmini = (() => {
               }
               const locals = new Array(ctor.localCount).fill(void 0);
               for (let i = 0; i < ctor.paramCount; i++) {
-                locals[i] = args[i] ?? void 0;
+                locals[i] = i < args.length ? args[i] : void 0;
               }
               this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor), upvalueBoxes: [] });
               frame.__pendingNewObj = newObj;
@@ -6922,7 +7300,7 @@ var jsmini = (() => {
               const fn = closure.func;
               const locals = new Array(fn.localCount).fill(void 0);
               for (let i = 0; i < fn.paramCount; i++) {
-                locals[i] = args[i] ?? void 0;
+                locals[i] = i < args.length ? args[i] : void 0;
               }
               this.frames.push({ func: fn, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });
               frame.__pendingNewObj = newObj;
@@ -7829,6 +8207,15 @@ var jsmini = (() => {
     SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
     SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
     vm.setGlobal("Symbol", SymbolFn);
+    vm.setGlobal("eval", (code) => {
+      if (typeof code !== "string" && !isJSString(code)) return code;
+      const s = isJSString(code) ? jsStringToString(code) : code;
+      const globals = {};
+      for (const [k, v] of vm.globals) {
+        globals[k] = v;
+      }
+      return evaluate(s, { globals });
+    });
     if (options.collectFeedback || options.jit) {
       vm.feedback = new FeedbackCollector();
     }

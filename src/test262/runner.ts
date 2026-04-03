@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { evaluate } from "../interpreter/evaluator.js";
 import { vmEvaluate } from "../vm/index.js";
+import { isJSString, jsStringToString } from "../vm/js-string.js";
+import { ThrowSignal } from "../interpreter/values.js";
 
 const useVM = process.argv.includes("--vm");
 const useJIT = process.argv.includes("--jit");
@@ -58,44 +60,58 @@ function parseFrontmatter(source: string) {
 // ハーネスに含まれるため、ハーネスを jsmini で実行するのではなく、
 // テストコードのみを jsmini で実行し、ハーネス関数はネイティブ実装を注入する
 function createHarnessSource(): string {
-  // Test262Error, assert, assert.sameValue, assert.notSameValue, $DONOTEVALUATE
+  // Test262Error, assert (オブジェクト形式), verifyProperty, compareArray
   // を jsmini が理解できる構文だけで定義する
+  // assert をオブジェクト形式にすることで、テストコードの assert.sameValue 等を
+  // 前処理で変換する必要がなくなる
   return `
 function Test262Error(message) {
   return message;
 }
 
-function assert(mustBeTrue, message) {
+var assert = function(mustBeTrue, message) {
   if (mustBeTrue === true) {
     return;
   }
   if (message === undefined) {
     message = "assertion failed";
   }
-}
+  throw new Error(message);
+};
 
-function assert_sameValue(actual, expected, message) {
+assert.sameValue = function(actual, expected, message) {
   if (actual === expected) {
     return;
   }
   if (message === undefined) {
-    message = "assert.sameValue failed";
+    message = "assert.sameValue failed: " + actual + " !== " + expected;
   }
-}
+  throw new Error(message);
+};
 
-function assert_notSameValue(actual, unexpected, message) {
+assert.notSameValue = function(actual, unexpected, message) {
   if (actual !== unexpected) {
     return;
   }
   if (message === undefined) {
     message = "assert.notSameValue failed";
   }
-}
+  throw new Error(message);
+};
 
-function assert_throws(expectedErrorConstructor, fn, message) {
+assert.throws = function(expectedErrorConstructor, fn, message) {
   var thrown = false;
-  try { fn(); } catch (e) { thrown = true; }
-}
+  var caughtError;
+  try { fn(); } catch (e) { thrown = true; caughtError = e; }
+  if (!thrown) {
+    var ctorName = expectedErrorConstructor.name || "unknown";
+    throw new Error(message || "Expected a " + ctorName + " to be thrown");
+  }
+  if (caughtError instanceof expectedErrorConstructor) return;
+  if (typeof caughtError === "object" && caughtError !== null && caughtError.constructor === expectedErrorConstructor) return;
+  var ctorName = expectedErrorConstructor.name || "unknown";
+  throw new Error(message || "Expected a " + ctorName + " but got " + caughtError);
+};
 
 function verifyProperty(obj, name, desc) {
 }
@@ -110,24 +126,38 @@ function compareArray(a, b) {
 `;
 }
 
-// テストコードを前処理: assert.sameValue → assert_sameValue に変換
-// (MemberExpression でのメソッド呼び出しは動くが、ハーネスをネイティブ注入する代わりに
-//  テストコードを少し書き換える方がシンプル)
+// テストコードを前処理
 function preprocessTestSource(source: string): string {
   // フロントマターのコメントを除去
   let code = source.replace(/\/\*---[\s\S]*?---\*\//, "");
-  // 単行コメントは残す (jsmini が未対応なら除去)
+  // 単行コメントを除去
   code = code.replace(/\/\/.*$/gm, "");
   // 複数行コメントも除去
   code = code.replace(/\/\*[\s\S]*?\*\//g, "");
-  // assert.sameValue → assert_sameValue
-  code = code.replace(/assert\.sameValue/g, "assert_sameValue");
-  code = code.replace(/assert\.notSameValue/g, "assert_notSameValue");
-  // throw new Test262Error(...) → Test262Error(...)
-  // (jsmini は throw/new 未対応なので、エラーケースは必ず到達しないはず)
-  code = code.replace(/throw\s+new\s+Test262Error/g, "Test262Error");
 
   return code;
+}
+
+// エラーからメッセージ文字列を抽出する
+// jsmini の ThrowSignal、JSString、ネイティブ Error すべてに対応
+function extractErrorMessage(e: unknown): string {
+  // ThrowSignal (TW) or { __thrown, value } (VM): jsmini の throw 文で投げられる
+  const val = e instanceof ThrowSignal ? e.value
+    : (typeof e === "object" && e !== null && "__thrown" in e) ? (e as any).value
+    : null;
+  if (val !== null) {
+    if (typeof val === "object" && val !== null && "message" in val) {
+      const msg = (val as any).message;
+      if (isJSString(msg)) return jsStringToString(msg);
+      try { return String(msg); } catch { return "[thrown object]"; }
+    }
+    if (isJSString(val)) return jsStringToString(val);
+    if (typeof val === "string") return val;
+    try { return String(val); } catch { return "[thrown object]"; }
+  }
+  // ネイティブ Error
+  if (e instanceof Error) return e.message;
+  try { return String(e); } catch { return "[unknown error]"; }
 }
 
 // canRun は廃止。構文未対応のテストも実行して正直に Fail にする。
@@ -177,7 +207,7 @@ function runTest(filePath: string): TestResult {
     run(fullSource, opts);
     return { file: relPath, status: "pass" };
   } catch (e: any) {
-    return { file: relPath, status: "fail", error: e.message ?? String(e) };
+    return { file: relPath, status: "fail", error: extractErrorMessage(e) };
   }
 }
 

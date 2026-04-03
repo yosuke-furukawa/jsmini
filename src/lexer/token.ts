@@ -39,6 +39,8 @@ export type TokenType =
   | "Switch"           // switch
   | "Case"             // case
   | "Default"          // default
+  | "Delete"           // delete
+  | "Void"             // void
   // undefined は予約語ではないのでキーワードに含めない
   // Operators
   | "Plus"             // +

@@ -223,40 +223,45 @@ class BytecodeCompiler {
       }
       this.emit("Pop"); // obj を捨てる
     } else if (id.type === "ArrayPattern") {
-      // stack: arr → 各要素を取り出す
+      // stack: iterable → GetIterator → temp global に保存 → 1要素ずつ取り出す
+      this.emit("GetIterator");
+      const iterName = `__dstr_iter_${this.currentOffset()}`;
+      const iterIdx = this.addConstant(iterName);
+      this.emit("StaGlobal", iterIdx);    // iterator を保存
+      this.emit("Pop");                   // stack を空に
       for (let i = 0; i < id.elements.length; i++) {
         const el = id.elements[i];
-        if (!el) continue;
-        if (el.type === "RestElement") {
-          // [...rest]: arr.slice(i)
-          // stack: [arr(orig)]
-          // CallMethod(1) needs: [i, arr, slice]
-          this.emit("LdaConst", this.addConstant(i));  // arr, i
-          this.emit("Dup");                             // arr, i, i  (dummy, need arr)
-          this.emit("Pop");                             // arr, i
-          // arr is below i — we need arr on top to get slice
-          // Use temp global to save arr
-          const tmpName = `__rest_arr_${this.currentOffset()}`;
-          const tmpIdx = this.addConstant(tmpName);
-          this.emit("Pop");                             // arr (removed i)
-          this.emit("Dup");                             // arr, arr
-          this.emit("StaGlobal", tmpIdx);               // arr, arr (saved to global)
-          this.emit("Pop");                             // arr
-          // Now build CallMethod stack: i, arr, slice
-          this.emit("LdaConst", this.addConstant(i));   // arr, i
-          this.emit("LdaGlobal", tmpIdx);               // arr, i, arr
-          this.emit("Dup");                             // arr, i, arr, arr
-          this.emitWithIC("GetProperty", this.addConstant("slice")); // arr, i, arr, slice
-          this.emit("CallMethod", 1);                   // arr, result
-          this.compileBindingTarget(el.argument);        // arr (result consumed)
-          break;
+        if (!el) {
+          // elision: iterator を進めるが値は捨てる
+          this.emit("LdaGlobal", iterIdx);
+          this.emit("IteratorNext");
+          this.emit("Pop");
+          continue;
         }
-        this.emit("Dup"); // arr を残す
-        this.emit("LdaConst", this.addConstant(i));
-        this.emit("GetPropertyComputed");
-        this.compileBindingTarget(el);
+        if (el.type === "RestElement") {
+          // [...rest]: 残り全部を配列に集める
+          this.emit("CreateArray", 0);      // stack: restArr
+          const loopStart = this.currentOffset();
+          this.emit("LdaGlobal", iterIdx);  // stack: restArr, iterator
+          this.emit("IteratorNext");        // stack: restArr, result
+          this.emit("Dup");                 // stack: restArr, result, result
+          this.emit("IteratorComplete");    // stack: restArr, result, done
+          const exitJump = this.emit("JumpIfTrue", 0);
+          this.emit("IteratorValue");       // stack: restArr, value
+          this.emit("ArrayPush");           // stack: restArr
+          const backJump = this.emit("Jump", 0);
+          this.patch(backJump, loopStart);
+          this.patch(exitJump, this.currentOffset());
+          this.emit("Pop");                 // pop result (done=true)
+          // stack: restArr
+          this.compileBindingTarget(el.argument);
+          return;
+        }
+        this.emit("LdaGlobal", iterIdx);   // stack: iterator
+        this.emit("IteratorNext");         // stack: result
+        this.emit("IteratorValue");        // stack: value
+        this.compileBindingTarget(el);     // stack: (empty)
       }
-      this.emit("Pop"); // arr を捨てる
     } else if (id.type === "AssignmentPattern") {
       // stack: value → value が undefined ならデフォルト値を使う
       this.emit("Dup");
@@ -302,7 +307,7 @@ class BytecodeCompiler {
     }
   }
 
-  compileFunctionBody(params: any[], body: Statement[]): void {
+  compileFunctionBody(params: any[], body: Statement[], isArrow?: boolean): void {
     // パラメータをローカルスロットに登録
     this.paramCount = params.length;
     const destructureParams: { slot: number; pattern: any }[] = [];
@@ -344,6 +349,10 @@ class BytecodeCompiler {
       this.emit("LdaLocal", slot);
       this.compileBindingTarget(pattern);
     }
+    // arguments オブジェクト (アロー関数以外)
+    if (!isArrow) {
+      this.declareLocal("arguments");
+    }
     // 本体をコンパイル
     for (const stmt of body) {
       this.compileStatement(stmt);
@@ -369,7 +378,12 @@ class BytecodeCompiler {
         }
         for (const decl of stmt.declarations) {
           if (decl.init) {
-            this.compileExpression(decl.init);
+            // 関数名推論: var f = function() {} → f.name === "f"
+            if (decl.id.type === "Identifier" && this.isNameableFunctionExpr(decl.init)) {
+              this.compileExpression(decl.init, decl.id.name);
+            } else {
+              this.compileExpression(decl.init);
+            }
           } else {
             this.emit("LdaUndefined");
           }
@@ -676,11 +690,13 @@ class BytecodeCompiler {
               // computed: target, key, value → SetPropertyComputed
               this.compileExpression(member.key);
               const fnCompiler = new BytecodeCompiler(this);
+              if ((member.value as any).generator) fnCompiler.isGenerator = true;
               fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
               this.emit("LdaConst", this.addConstant(fnCompiler.finish("<computed>")));
               this.emit("SetPropertyComputed");
             } else {
               const fnCompiler = new BytecodeCompiler(this);
+              if ((member.value as any).generator) fnCompiler.isGenerator = true;
               fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
               this.emit("LdaConst", this.addConstant(fnCompiler.finish(name!)));
               this.emitWithIC("SetProperty", this.addConstant(name!));
@@ -870,12 +886,19 @@ class BytecodeCompiler {
         break;
       }
 
+      case "EmptyStatement":
+        break;
+
       default:
         throw new Error(`Unsupported statement: ${stmt.type}`);
     }
   }
 
-  compileExpression(expr: Expression): void {
+  private isNameableFunctionExpr(expr: any): boolean {
+    return expr.type === "FunctionExpression" || expr.type === "ArrowFunctionExpression" || expr.type === "ClassExpression";
+  }
+
+  compileExpression(expr: Expression, inferredName?: string): void {
     switch (expr.type) {
       case "Literal": {
         if (expr.value === null) {
@@ -913,7 +936,7 @@ class BytecodeCompiler {
         const fnCompiler = new BytecodeCompiler(this);
         if ((expr as any).generator) fnCompiler.isGenerator = true;
         fnCompiler.compileFunctionBody(expr.params, expr.body.body);
-        const fnBytecode = fnCompiler.finish(expr.id?.name ?? "<anonymous>");
+        const fnBytecode = fnCompiler.finish(expr.id?.name ?? inferredName ?? "");
         const fnIndex = this.addConstant(fnBytecode);
         this.emit("LdaConst", fnIndex);
         break;
@@ -921,7 +944,7 @@ class BytecodeCompiler {
 
       case "ClassExpression": {
         // ClassDeclaration と同じコンパイルだが、変数登録せずスタックに残す
-        const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: "__anonymous__" } } as any;
+        const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: inferredName ?? "" } } as any;
         // ClassDeclaration のコンパイルは StaGlobal+Pop で終わるので、
         // ここでは ClassDeclaration の中身を再実装して Pop しない
         const instanceFields = fakeStmt.body.body.filter((m: any) => m.type === "PropertyDefinition" && !m.static);
@@ -947,11 +970,13 @@ class BytecodeCompiler {
             if (member.computed) {
               this.compileExpression(member.key);
               const mc = new BytecodeCompiler(this);
+              if ((member.value as any).generator) mc.isGenerator = true;
               mc.compileFunctionBody(member.value.params, member.value.body.body);
               this.emit("LdaConst", this.addConstant(mc.finish("<computed>")));
               this.emit("SetPropertyComputed");
             } else {
               const mc = new BytecodeCompiler(this);
+              if ((member.value as any).generator) mc.isGenerator = true;
               mc.compileFunctionBody(member.value.params, member.value.body.body);
               this.emit("LdaConst", this.addConstant(mc.finish(name!)));
               this.emitWithIC("SetProperty", this.addConstant(name!));
@@ -1047,8 +1072,12 @@ class BytecodeCompiler {
             this.compileExpression(prop.value);
             this.emit("SetPropertyComputed");
           } else {
-            this.compileExpression(prop.value);
             const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+            if (this.isNameableFunctionExpr(prop.value)) {
+              this.compileExpression(prop.value, key);
+            } else {
+              this.compileExpression(prop.value);
+            }
             const nameIdx = this.addConstant(key);
             if (prop.kind === "get") {
               this.emit("DefineGetter", nameIdx);
@@ -1181,11 +1210,11 @@ class BytecodeCompiler {
           // 式本体: 暗黙の return
           fnCompiler.compileFunctionBody(expr.params, [
             { type: "ReturnStatement", argument: expr.body as Expression }
-          ]);
+          ], true);
         } else {
-          fnCompiler.compileFunctionBody(expr.params, (expr.body as any).body);
+          fnCompiler.compileFunctionBody(expr.params, (expr.body as any).body, true);
         }
-        const fnBytecode = fnCompiler.finish("<arrow>");
+        const fnBytecode = fnCompiler.finish(inferredName ?? "");
         const fnIndex = this.addConstant(fnBytecode);
         this.emit("LdaConst", fnIndex);
         break;
@@ -1218,6 +1247,65 @@ class BytecodeCompiler {
         break;
       }
 
+      case "TaggedTemplateExpression": {
+        // Tagged template: tag(strings, ...values)
+        const quasi = (expr as any).quasi;
+        // 式の値を先に push (引数)
+        for (const e of quasi.expressions) {
+          this.compileExpression(e);
+        }
+        // strings 配列: cooked 値
+        for (const q of quasi.quasis) {
+          this.emit("LdaConst", this.addConstant(q.value.cooked));
+        }
+        this.emit("CreateArray", quasi.quasis.length);
+        // raw 配列
+        for (const q of quasi.quasis) {
+          this.emit("LdaConst", this.addConstant(q.value.raw));
+        }
+        this.emit("CreateArray", quasi.quasis.length);
+        // stack: ...values, strings, raw
+        // strings.raw = raw → SetProperty
+        const rawTmp = `__ttl_raw_${this.currentOffset()}`;
+        const rawIdx = this.addConstant(rawTmp);
+        this.emit("StaGlobal", rawIdx); // save raw
+        this.emit("Pop"); // pop raw
+        // stack: ...values, strings
+        this.emit("Dup"); // strings, strings
+        this.emit("LdaGlobal", rawIdx); // strings, strings, raw
+        this.emitWithIC("SetProperty", this.addConstant("raw")); // strings.raw = raw
+        this.emit("Pop"); // strings
+        // Now: stack = ...values, strings
+        // Need: strings, ...values, tag, tag  (for Call)
+        // This is complex with stack. Use temp globals.
+        const strTmp = `__ttl_str_${this.currentOffset()}`;
+        const strIdx = this.addConstant(strTmp);
+        this.emit("StaGlobal", strIdx); // save strings
+        this.emit("Pop"); // pop strings
+        // stack: ...values
+        // Push strings as first arg, then values are already on stack
+        // Actually Call expects: arg0, arg1, ..., callee
+        // We need: strings, val0, val1, ..., callee → Call(N+1)
+        // But values are already on stack below. Reorder needed.
+        // Simplest: save all values to temps, then push in order
+        const valTemps: string[] = [];
+        for (let i = quasi.expressions.length - 1; i >= 0; i--) {
+          const vt = `__ttl_val${i}_${this.currentOffset()}`;
+          valTemps.unshift(vt);
+          this.emit("StaGlobal", this.addConstant(vt));
+          this.emit("Pop");
+        }
+        // stack empty. Push in order: strings, val0, val1, ...
+        this.emit("LdaGlobal", strIdx);
+        for (const vt of valTemps) {
+          this.emit("LdaGlobal", this.addConstant(vt));
+        }
+        // Push tag and call
+        this.compileExpression((expr as any).tag);
+        this.emit("Call", 1 + quasi.expressions.length);
+        break;
+      }
+
       case "UpdateExpression": {
         // ++x, x++, --x, x--
         if (expr.argument.type === "Identifier") {
@@ -1237,6 +1325,31 @@ class BytecodeCompiler {
       }
 
       case "UnaryExpression": {
+        if (expr.operator === "void") {
+          this.compileExpression(expr.argument);
+          this.emit("Pop");
+          this.emit("LdaUndefined");
+          break;
+        }
+        if (expr.operator === "delete") {
+          if (expr.argument.type === "MemberExpression") {
+            this.compileExpression(expr.argument.object);
+            if (expr.argument.computed) {
+              this.compileExpression(expr.argument.property);
+              this.emit("DeletePropertyComputed");
+            } else {
+              const name = expr.argument.property.type === "Identifier"
+                ? expr.argument.property.name : String((expr.argument.property as any).value);
+              this.emit("DeleteProperty", this.addConstant(name));
+            }
+          } else {
+            // delete on non-member always returns true
+            this.compileExpression(expr.argument);
+            this.emit("Pop");
+            this.emit("LdaConst", this.addConstant(true));
+          }
+          break;
+        }
         if (expr.operator === "typeof" && expr.argument.type === "Identifier") {
           // typeof 未定義変数は ReferenceError にせず "undefined" を返す
           const name = expr.argument.name;
