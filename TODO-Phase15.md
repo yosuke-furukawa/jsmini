@@ -48,13 +48,12 @@ test262 TW:  4,592 / 8,947 (51.3%)
 
 ## 残りのステップ
 
-### 15-5: `eval()` 基本サポート
+### 15-5: `eval()` サポート ✅
 
-141 テスト (VM) / 162 テスト (TW) が直接 `eval` に依存。
-
-- [ ] 15-5a: indirect eval (`(0, eval)(code)` — グローバルスコープで実行)
-- [ ] 15-5b: direct eval (`eval(code)` — 現在のスコープで実行)
-- [ ] 15-5c: テスト追加 + test262 検証
+- [x] 15-5a: indirect eval (`(0, eval)(code)` — グローバルスコープで実行) TW + VM
+- [x] 15-5b: direct eval (`eval(code)` — strict mode: var は eval スコープに閉じる) TW
+- [x] 15-5c: VM eval → TW フォールバック (VM グローバル変数を注入、読み取り可)
+  - VM グローバルへの書き戻しは未実装
 
 ### 15-6: tagged template literals
 
@@ -65,6 +64,6 @@ test262 TW:  4,592 / 8,947 (51.3%)
 ## 目標
 
 ```
-test262 VM:  41.9% → 50.6% ✅ (達成済み)
-test262 TW:  41.1% → 51.3% ✅ (達成済み)
+test262 VM:  41.9% → 51.2% ✅
+test262 TW:  41.1% → 52.1% ✅
 ```
