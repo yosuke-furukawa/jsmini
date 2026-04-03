@@ -116,22 +116,29 @@ Source Code
 - Symbol: 自前 wrapper オブジェクト実装
 - test262: 29.6% → 44.3%
 
+### Phase 14 — WasmGC Array + ビルトイン自前実装
+
+- WasmGC `array.new` / `array.get` / `array.set` / `array.len` で配列を Wasm GC ヒープ上に直接操作
+- quicksort JIT: 499ms → 41ms (5.4x vs TW) — 配列操作が Wasm 内で完結
+- ビルトイン自前実装: Array/Boolean/Number/String/Function コンストラクタを JSObject ベースで再実装
+- VM/TW の test262 差: 284件 → 66件 (ネイティブ委譲の除去)
+
 ## パフォーマンス比較
 
 V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run bench`):
 
 | Benchmark | Tree-Walking | Bytecode VM | Wasm JIT |
 |-----------|-------------|-------------|----------|
-| fibonacci(25) | 1630ms | 1063ms (1.53x) | **0.42ms (3912x)** |
-| for loop sum (10K) | 54ms | 51ms (1.05x) | **0.71ms (76x)** |
-| nested loop (100x100) | 54ms | 50ms (1.08x) | **0.71ms (76x)** |
-| ackermann(3,4) | 88ms | 57ms (1.55x) | **0.26ms (342x)** |
-| hot add (10K calls) | 101ms | 86ms (1.17x) | **79ms (1.28x)** |
-| quicksort (200 x10) | 486ms | 448ms (1.08x) | 499ms (0.97x) |
+| fibonacci(25) | 1631ms | 1054ms (1.55x) | **0.43ms (3822x)** |
+| for loop sum (10K) | 53ms | 52ms (1.02x) | **0.70ms (76x)** |
+| nested loop (100x100) | 54ms | 51ms (1.06x) | **0.72ms (74x)** |
+| ackermann(3,4) | 88ms | 57ms (1.55x) | **0.27ms (324x)** |
+| hot add (10K calls) | 100ms | 86ms (1.17x) | 79ms (1.27x) |
+| quicksort (200 x10) | 484ms | 444ms (1.09x) | **61ms (7.9x)** |
 
-- **Wasm JIT** が圧倒的に速い: fibonacci 3912x、ackermann 342x、for loop 76x
-- **VM が TW に勝つ** のは再帰が深いパターン (fibonacci 1.53x, ackermann 1.55x)
-- **TW の generator overhead**: evaluator 全体を `function*` に変換（engine262 スタイル）したため、全式評価に generator overhead がかかる
+- **Wasm JIT** が圧倒的に速い: fibonacci 3822x、ackermann 324x、for loop 76x、nested loop 74x
+- **quicksort も JIT で 7.9x**: Phase 14 の WasmGC Array により配列操作が Wasm 内で完結 (以前は 0.97x で TW に負けていた)
+- **VM が TW に勝つ** のは再帰が深いパターン (fibonacci 1.55x, ackermann 1.55x)
 - 詳細は [BENCHMARK.md](./BENCHMARK.md)、学んだことは [LEARN-VM.md](./LEARN-VM.md)、[LEARN-JIT.md](./LEARN-JIT.md) を参照
 
 ## Test262 準拠率
@@ -139,9 +146,10 @@ V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run 
 | エンジン | Pass | Fail | Skip | Total | Pass Rate |
 |----------|------|------|------|-------|-----------|
 | Tree-Walking | 3,680 | 5,267 | 1,750 | 10,697 | **41.1%** |
-| Bytecode VM | 3,964 | 4,983 | 1,750 | 10,697 | **44.3%** |
+| Bytecode VM | 3,746 | 5,201 | 1,750 | 10,697 | **41.9%** |
 
 *Skip は module/async/noStrict。test262/test/language/ 配下 69 ディレクトリ (10,697 テスト) で実行。*
+*Phase 14 でビルトインを自前実装し、VM/TW 差を 284件 → 66件に削減 (VM: 44.3% → 41.9%)。*
 
 ## セットアップ
 
@@ -239,6 +247,7 @@ src/
     compiler.ts         # AST → バイトコードコンパイラ
     vm.ts               # スタックベース VM (Generator: Yield opcode)
     js-object.ts        # Hidden Class 付き JSObject
+    js-array.ts         # Array コンストラクタ + Array.prototype 自前実装
     js-string.ts        # Rope/Interned String
     js-symbol.ts        # 自前 Symbol 実装
     inline-cache.ts     # Inline Cache
@@ -248,7 +257,9 @@ src/
     compat.test.ts      # TW vs VM 互換テスト + VM 固有テスト
     index.ts            # vmEvaluate() エントリポイント
   jit/
+    wasm-builder.ts     # Wasm バイナリビルダー (WasmGC Array 対応)
     wasm-compiler.ts    # バイトコード → Wasm コンパイラ
+    wasm-gc-compiler.ts # WasmGC struct コンパイラ
     jit.ts              # JIT マネージャ
     feedback.ts         # 型フィードバック収集
   test262/
@@ -270,6 +281,7 @@ src/
 - [x] **Phase 11** — クロージャ (Upvalue) + OSR
 - [x] **Phase 12** — プロトタイプチェーン
 - [x] **Phase 13** — 構文拡大 + Generator (test262: 44.3%)
+- [x] **Phase 14** — WasmGC Array + ビルトイン自前実装 (quicksort JIT 5.4x, VM/TW差 284→66件)
 
 詳細は [PLAN.md](./PLAN.md) を参照。
 
@@ -278,6 +290,7 @@ src/
 - [LEARN-VM.md](./LEARN-VM.md) — TW vs Bytecode VM: 関数呼び出しのコスト差、dispatch オーバーヘッド
 - [LEARN-JIT.md](./LEARN-JIT.md) — JIT: 再帰の Wasm 内完結で 1309x、per-call JIT の限界
 - [LEARN-syntax-expansion.md](./LEARN-syntax-expansion.md) — 構文拡大: Generator の TW/VM 対比、Iterator Protocol、Symbol 自前実装
+- [LEARN-Phase14.md](./LEARN-Phase14.md) — WasmGC Array + ビルトイン自前実装
 - [BENCHMARK.md](./BENCHMARK.md) — 全ベンチマーク結果
 - [RESEARCH-WHY-BYTECODE-IS-SLOW.md](./RESEARCH-WHY-BYTECODE-IS-SLOW.md) — なぜ Object VM は TW より遅いのか
 
