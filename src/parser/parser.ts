@@ -193,6 +193,14 @@ export function parse(source: string): Program {
 
       let key: any;
       let computed = false;
+      let isGenerator = false;
+
+      // generator method: class C { *gen() {} }
+      if (current().type === "Star") {
+        eat("Star");
+        isGenerator = true;
+      }
+
       if (current().type === "LeftBracket") {
         eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
       } else if (current().type === "PrivateIdentifier") {
@@ -238,7 +246,7 @@ export function parse(source: string): Program {
       }
 
       // メソッド
-      if (current().type === "LeftParen") {
+      if (current().type === "LeftParen" || isGenerator) {
         const kind = !computed && key.type !== "PrivateIdentifier" && key.name === "constructor" ? "constructor" : "method";
         eat("LeftParen");
         resetParamState();
@@ -249,7 +257,7 @@ export function parse(source: string): Program {
         }
         eat("RightParen");
         const mbody = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
-        body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody }, kind, computed, static: isStatic });
+        body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody, generator: isGenerator } as any, kind, computed, static: isStatic });
         continue;
       }
 
@@ -1118,6 +1126,13 @@ export function parse(source: string): Program {
       let key: any;
       let propKind: "init" | "get" | "set" = "init";
       let computed = false;
+      let isGenerator = false;
+
+      // generator method: { *foo() {} }
+      if (current().type === "Star") {
+        eat("Star");
+        isGenerator = true;
+      }
 
       // computed property: [expr]
       if (current().type === "LeftBracket") {
@@ -1166,8 +1181,8 @@ export function parse(source: string): Program {
         );
       }
       let value: Expression;
-      if (current().type === "LeftParen") {
-        // メソッド省略記法: { foo() {} }
+      if (current().type === "LeftParen" || isGenerator) {
+        // メソッド省略記法: { foo() {} } or { *foo() {} }
         eat("LeftParen");
         resetParamState();
         const params: any[] = [];
@@ -1177,7 +1192,7 @@ export function parse(source: string): Program {
         }
         eat("RightParen");
         const body = parseBlockStatement();
-        value = { type: "FunctionExpression", id: null, params, body } as any;
+        value = { type: "FunctionExpression", id: null, params, body, generator: isGenerator } as any;
       } else if (current().type === "Colon") {
         eat("Colon");
         value = parseAssignment();

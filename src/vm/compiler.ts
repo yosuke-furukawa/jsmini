@@ -676,11 +676,13 @@ class BytecodeCompiler {
               // computed: target, key, value → SetPropertyComputed
               this.compileExpression(member.key);
               const fnCompiler = new BytecodeCompiler(this);
+              if ((member.value as any).generator) fnCompiler.isGenerator = true;
               fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
               this.emit("LdaConst", this.addConstant(fnCompiler.finish("<computed>")));
               this.emit("SetPropertyComputed");
             } else {
               const fnCompiler = new BytecodeCompiler(this);
+              if ((member.value as any).generator) fnCompiler.isGenerator = true;
               fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
               this.emit("LdaConst", this.addConstant(fnCompiler.finish(name!)));
               this.emitWithIC("SetProperty", this.addConstant(name!));
@@ -947,11 +949,13 @@ class BytecodeCompiler {
             if (member.computed) {
               this.compileExpression(member.key);
               const mc = new BytecodeCompiler(this);
+              if ((member.value as any).generator) mc.isGenerator = true;
               mc.compileFunctionBody(member.value.params, member.value.body.body);
               this.emit("LdaConst", this.addConstant(mc.finish("<computed>")));
               this.emit("SetPropertyComputed");
             } else {
               const mc = new BytecodeCompiler(this);
+              if ((member.value as any).generator) mc.isGenerator = true;
               mc.compileFunctionBody(member.value.params, member.value.body.body);
               this.emit("LdaConst", this.addConstant(mc.finish(name!)));
               this.emitWithIC("SetProperty", this.addConstant(name!));
