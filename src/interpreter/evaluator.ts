@@ -1055,13 +1055,14 @@ function* bindParam(param: any, value: unknown, env: Environment, evalEnv: Envir
   }
 }
 
-function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment): Generator<unknown, unknown, unknown> {
+function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment, overrideThis?: unknown): Generator<unknown, unknown, unknown> {
   if (!isJSFunction(fn)) return undefined;
   const jsFn = fn;
 
   // Generator function: return generator object instead of executing
   if ((jsFn as any).isGenerator) {
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
+    if (overrideThis !== undefined) fnEnv.setThis(overrideThis);
     for (let i = 0; i < jsFn.params.length; i++) {
       const param = jsFn.params[i];
       if (param.type === "RestElement") {
@@ -1086,6 +1087,7 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment)
   }
 
   const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
+  if (overrideThis !== undefined) fnEnv.setThis(overrideThis);
   for (let i = 0; i < jsFn.params.length; i++) {
     const param = jsFn.params[i];
     if (param.type === "RestElement") {
@@ -1116,6 +1118,35 @@ function* evalCallExpression(
     thisValue = yield* evalExpression(expr.callee.object, env);
     const key = yield* resolveMemberKey(expr.callee, env);
     fn = getProperty(thisValue as JSObject, key);
+    // JSFunction の .call / .apply / .bind
+    if (fn === undefined && isJSFunction(thisValue)) {
+      const jsFnObj = thisValue;
+      if (key === "call") {
+        const callArgs = yield* evalArguments(expr.arguments, env);
+        const [callThis, ...rest] = callArgs;
+        return yield* evalCallWithJSFunction(jsFnObj, rest, env, callThis);
+      } else if (key === "apply") {
+        const applyArgs = yield* evalArguments(expr.arguments, env);
+        const [applyThis, argsArray] = applyArgs;
+        const rest = Array.isArray(argsArray) ? argsArray : [];
+        return yield* evalCallWithJSFunction(jsFnObj, rest, env, applyThis);
+      } else if (key === "bind") {
+        const bindArgs = yield* evalArguments(expr.arguments, env);
+        const [bindThis, ...boundArgs] = bindArgs;
+        const bound: JSFunction = {
+          [JS_FUNCTION_BRAND]: true,
+          name: `bound ${jsFnObj.name ?? ""}`,
+          params: jsFnObj.params,
+          body: jsFnObj.body,
+          closure: jsFnObj.closure,
+          isArrow: jsFnObj.isArrow,
+          prototype: jsFnObj.prototype,
+          __boundThis: bindThis,
+          __boundArgs: boundArgs,
+        };
+        return bound;
+      }
+    }
     // JSString のメソッド: ネイティブ文字列メソッドに委譲
     if (fn === undefined && isJSString(thisValue)) {
       const str = jsStringToString(thisValue);
@@ -1165,13 +1196,15 @@ function* evalCallExpression(
   // ネイティブ関数 (console.log 等)
   if (typeof fn === "function") {
     // コールバック系メソッド: jsmini 関数を呼べるようにラップ
-    if (thisValue !== undefined && args.some(a => isJSFunction(a))) {
-      const wrappedArgs = args.map(a =>
-        isJSFunction(a) ? (...nativeArgs: unknown[]) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env)) : a
-      );
+    const wrappedArgs = args.some(a => isJSFunction(a))
+      ? args.map(a =>
+          isJSFunction(a) ? (...nativeArgs: unknown[]) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env)) : a
+        )
+      : args;
+    if (thisValue !== undefined) {
       return (fn as Function).apply(thisValue, wrappedArgs);
     }
-    return (fn as Function)(...args);
+    return (fn as Function)(...wrappedArgs);
   }
 
   if (!isJSFunction(fn)) {
