@@ -281,9 +281,29 @@ export function tokenize(source: string): Token[] {
       pushToken("DotDotDot", "...", startCol);
       pos += 3; column += 3; continue;
     }
-    if (ch === "?" && peek(1) === ".") {
+    if (ch === "?" && peek(1) === "." && !(peek(2) >= "0" && peek(2) <= "9")) {
       pushToken("QuestionDot", "?.", startCol);
       pos += 2; column += 2; continue;
+    }
+    // 先頭ドットの小数リテラル: .123
+    if (ch === "." && peek(1) >= "0" && peek(1) <= "9") {
+      let num = ".";
+      advance();
+      while (pos < source.length && source[pos] >= "0" && source[pos] <= "9") {
+        num += source[pos]; advance();
+      }
+      // 指数部 e/E
+      if (pos < source.length && (source[pos] === "e" || source[pos] === "E")) {
+        num += source[pos]; advance();
+        if (pos < source.length && (source[pos] === "+" || source[pos] === "-")) {
+          num += source[pos]; advance();
+        }
+        while (pos < source.length && source[pos] >= "0" && source[pos] <= "9") {
+          num += source[pos]; advance();
+        }
+      }
+      pushToken("Number", num, startCol);
+      continue;
     }
     if (ch === "?" && peek(1) === "?") {
       pushToken("QuestionQuestion", "??", startCol);
