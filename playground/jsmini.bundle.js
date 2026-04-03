@@ -2298,6 +2298,7 @@ var jsmini = (() => {
   function classKeyName(key, computed, env) {
     if (computed && env) {
       const val = exhaustGen(evalExpression(key, env));
+      if (isJSSymbol(val)) return val.key;
       return isJSString(val) ? jsStringToString(val) : String(val);
     }
     if (key.type === "Literal") return String(key.value);
@@ -2623,9 +2624,12 @@ var jsmini = (() => {
         const rawIterable = yield* evalExpression(stmt.right, env);
         let iterable;
         const iterKey = "@@iterator";
-        const iterFn = typeof rawIterable === "object" && rawIterable !== null ? getProperty(rawIterable, iterKey) ?? rawIterable[iterKey] : void 0;
+        let iterFn = typeof rawIterable === "object" && rawIterable !== null ? getProperty(rawIterable, iterKey) ?? rawIterable[iterKey] : void 0;
+        if (!iterFn && typeof rawIterable === "object" && rawIterable !== null && typeof rawIterable[Symbol.iterator] === "function") {
+          iterFn = rawIterable[Symbol.iterator].bind(rawIterable);
+        }
         if (iterFn && (isJSFunction(iterFn) || typeof iterFn === "function")) {
-          const iterator = isJSFunction(iterFn) ? yield* evalCallWithJSFunction(iterFn, [], env) : iterFn.call(rawIterable);
+          const iterator = isJSFunction(iterFn) ? yield* evalCallWithJSFunction(iterFn, [], env, rawIterable) : iterFn.call(rawIterable);
           iterable = [];
           for (let step = 0; step < 1e4; step++) {
             const nextFn = getProperty(iterator, "next") ?? iterator?.next;
@@ -2794,7 +2798,7 @@ var jsmini = (() => {
             if (source) Object.assign(obj, source);
           } else {
             const rawKey = prop.computed ? yield* evalExpression(prop.key, env) : void 0;
-            const key = prop.computed ? isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey) : prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+            const key = prop.computed ? isJSSymbol(rawKey) ? rawKey.key : isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey) : prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
             if (prop.kind === "get" || prop.kind === "set") {
               const fnValue = yield* evalExpression(prop.value, env);
               const descriptor = {};

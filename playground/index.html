@@ -780,23 +780,19 @@ for (var i = 0; i < 10; i++) {
 console.log("fibonacci:", first10);
 
 // Generator method in class
-class Range {
-  constructor(start, end) {
-    this.start = start;
-    this.end = end;
+class NumberList {
+  constructor(items) {
+    this.items = items;
   }
-  *[Symbol.iterator]() {
-    for (var i = this.start; i < this.end; i++) {
-      yield i;
+  *generate() {
+    for (var i = 0; i < this.items.length; i++) {
+      yield this.items[i];
     }
   }
 }
-
-var r = [];
-for (var n of new Range(3, 8)) {
-  r.push(n);
-}
-console.log("Range(3,8):", r);
+var list = new NumberList([10, 20, 30]);
+var iter = list.generate();
+console.log("class gen:", iter.next(), iter.next(), iter.next());
 
 // next(value) — bidirectional communication
 function* echo() {
@@ -809,36 +805,33 @@ console.log(e.next("hello")); // { value: "got: hello", done: false }`,
 
   "symbol-iterator": `// Symbol + Iterator Protocol — Phase 13
 
-// Custom iterable with Symbol.iterator
+// Custom iterable with @@iterator
 var myRange = {
   from: 1,
   to: 5,
-  [Symbol.iterator]() {
-    var current = this.from;
-    var last = this.to;
-    return {
-      next() {
-        if (current <= last) {
-          return { value: current++, done: false };
-        }
-        return { value: undefined, done: true };
+};
+myRange["@@iterator"] = function() {
+  var current = myRange.from;
+  var last = myRange.to;
+  return {
+    next: function() {
+      if (current <= last) {
+        return { value: current++, done: false };
       }
-    };
-  }
+      return { value: undefined, done: true };
+    },
+    "@@iterator": function() { return this; }
+  };
 };
 
-// for...of uses Symbol.iterator
+// for...of uses iterator protocol
 var result = [];
 for (var n of myRange) {
   result.push(n);
 }
 console.log("myRange:", result);
 
-// Destructuring uses iterator protocol
-var [a, b, c] = myRange;
-console.log("destructured:", a, b, c);
-
-// Spread with iterator
+// Generator as iterator
 function* gen() { yield 10; yield 20; yield 30; }
 var [first, ...rest] = gen();
 console.log("first:", first, "rest:", rest);

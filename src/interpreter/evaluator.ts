@@ -324,6 +324,7 @@ function evalBlockSync(body: Statement[], env: Environment): unknown {
 function classKeyName(key: any, computed?: boolean, env?: Environment): string {
   if (computed && env) {
     const val = exhaustGen(evalExpression(key, env));
+    if (isJSSymbol(val)) return val.key;
     return isJSString(val) ? jsStringToString(val) : String(val);
   }
   if (key.type === "Literal") return String(key.value);
@@ -679,15 +680,19 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
     case "ForOfStatement": {
       const lbl = (stmt as any).__label__ as string | undefined;
       const rawIterable = yield* evalExpression(stmt.right, env);
-      // iterator プロトコル: "@@iterator" キーがあれば使う、なければ配列として扱う
+      // iterator プロトコル: "@@iterator" or Symbol.iterator キーがあれば使う、なければ配列として扱う
       let iterable: unknown[];
       const iterKey = "@@iterator";
-      const iterFn = typeof rawIterable === "object" && rawIterable !== null
+      let iterFn = typeof rawIterable === "object" && rawIterable !== null
         ? getProperty(rawIterable as JSObject, iterKey) ?? (rawIterable as any)[iterKey]
         : undefined;
+      // ネイティブ Symbol.iterator もチェック (new Range() 等)
+      if (!iterFn && typeof rawIterable === "object" && rawIterable !== null && typeof (rawIterable as any)[Symbol.iterator] === "function") {
+        iterFn = (rawIterable as any)[Symbol.iterator].bind(rawIterable);
+      }
       if (iterFn && (isJSFunction(iterFn) || typeof iterFn === "function")) {
         const iterator = isJSFunction(iterFn)
-          ? yield* evalCallWithJSFunction(iterFn, [], env)
+          ? yield* evalCallWithJSFunction(iterFn, [], env, rawIterable)
           : (iterFn as Function).call(rawIterable);
         iterable = [];
         for (let step = 0; step < 10000; step++) {
@@ -874,7 +879,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
           if (source) Object.assign(obj, source);
         } else {
           const rawKey = prop.computed ? yield* evalExpression(prop.key, env) : undefined;
-          const key = prop.computed ? (isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey)) : (prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value));
+          const key = prop.computed ? (isJSSymbol(rawKey) ? rawKey.key : isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey)) : (prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value));
 
           if (prop.kind === "get" || prop.kind === "set") {
             const fnValue = yield* evalExpression(prop.value, env);
