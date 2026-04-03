@@ -134,15 +134,46 @@ export function bindPattern(
       }
     }
   } else if (pattern.type === "ArrayPattern") {
-    const arr = value as unknown[];
-    for (let i = 0; i < pattern.elements.length; i++) {
-      const el = pattern.elements[i];
-      if (!el) continue;
-      if (el.type === "RestElement") {
-        bindPattern(el.argument, arr?.slice(i) ?? [], env, kind, defaultResolver);
-        break;
+    // Iterator Protocol で要素を取り出す
+    const iterable = value as any;
+    const iterFn = iterable != null && typeof iterable[Symbol.iterator] === "function"
+      ? () => iterable[Symbol.iterator]()
+      : iterable != null && typeof iterable?.["@@iterator"] === "function"
+        ? () => iterable["@@iterator"]()
+        : null;
+
+    if (iterFn) {
+      const iterator = iterFn();
+      for (let i = 0; i < pattern.elements.length; i++) {
+        const el = pattern.elements[i];
+        if (!el) {
+          // elision: iterator を進めるが値は捨てる
+          iterator.next();
+          continue;
+        }
+        if (el.type === "RestElement") {
+          const rest: unknown[] = [];
+          let r = iterator.next();
+          while (r && !r.done) { rest.push(r.value); r = iterator.next(); }
+          bindPattern(el.argument, rest, env, kind, defaultResolver);
+          return;
+        }
+        const r = iterator.next();
+        const val = r && !r.done ? r.value : undefined;
+        bindPattern(el, val, env, kind, defaultResolver);
       }
-      bindPattern(el, arr?.[i], env, kind, defaultResolver);
+    } else {
+      // 配列風オブジェクト: 直接インデックスアクセス
+      const arr = iterable as unknown[];
+      for (let i = 0; i < pattern.elements.length; i++) {
+        const el = pattern.elements[i];
+        if (!el) continue;
+        if (el.type === "RestElement") {
+          bindPattern(el.argument, arr?.slice(i) ?? [], env, kind, defaultResolver);
+          break;
+        }
+        bindPattern(el, arr?.[i], env, kind, defaultResolver);
+      }
     }
   } else if (pattern.type === "AssignmentPattern") {
     const val = (value === undefined && defaultResolver) ? defaultResolver(pattern.right) : value;
