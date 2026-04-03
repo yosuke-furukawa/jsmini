@@ -42,21 +42,25 @@ test262 TW:  4,592 / 8,947 (51.3%)
 - [x] 配列分割代入: Iterator Protocol 対応 (TW + VM)
 - [x] test262 ハーネス: assert オブジェクト形式化 + assert.throws 型チェック + エラーメッセージ改善
 
+### 15-3: `void` 演算子 ✅ (15-ex に含む)
+
+### 15-4: `delete` 演算子 ✅ (15-ex に含む)
+
 ## 残りのステップ
 
-### 15-3: `eval()` 基本サポート
+### 15-5: `eval()` 基本サポート
 
 141 テスト (VM) / 162 テスト (TW) が直接 `eval` に依存。
 
-- [ ] 15-3a: indirect eval (`(0, eval)(code)` — グローバルスコープで実行)
-- [ ] 15-3b: direct eval (`eval(code)` — 現在のスコープで実行)
-- [ ] 15-3c: テスト追加 + test262 検証
+- [ ] 15-5a: indirect eval (`(0, eval)(code)` — グローバルスコープで実行)
+- [ ] 15-5b: direct eval (`eval(code)` — 現在のスコープで実行)
+- [ ] 15-5c: テスト追加 + test262 検証
 
-### 15-4: tagged template literals
+### 15-6: tagged template literals
 
-- [ ] 15-4a: パーサ (TaggedTemplateExpression)
-- [ ] 15-4b: TW + VM 評価
-- [ ] 15-4c: テスト追加 + test262 検証
+- [ ] 15-6a: パーサ (TaggedTemplateExpression)
+- [ ] 15-6b: TW + VM 評価
+- [ ] 15-6c: テスト追加 + test262 検証
 
 ## 目標
 
