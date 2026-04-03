@@ -39,13 +39,13 @@
 - [x] 16-3c: optimize() パイプライン (Constant Folding + DCE の繰り返し)
 - [x] 16-3d: テスト (8 tests: fold, nested, comparison, DCE, pipeline)
 
-### 16-4: IR → Wasm 変換
+### 16-4: IR → Wasm 変換 ✅
 
-- [ ] 16-4a: `src/ir/codegen.ts` — IR Op → Wasm 命令
-  - Phi → Wasm local
-  - CFG → structured control flow
-- [ ] 16-4b: fibonacci, for-loop で Wasm 生成確認
-- [ ] 16-4c: 既存ベンチマークが壊れてないことを確認
+- [x] 16-4a: `src/ir/codegen.ts` — IR Op → Wasm 命令マッピング + Phi → local
+- [x] 16-4b: `--jit --ir` パイプライン (JitManager に compileViaIR 追加)
+- [x] 16-4c: `--print-ir` で IR ダンプ (最適化前後)
+- [x] 16-4d: 6 codegen テスト + 既存ベンチ正常確認
+- [x] 16-4e: IR JIT vs Direct JIT ベンチ: 定数畳み込み 1.9x, add 1.6x 高速
 
 ## 目標
 
