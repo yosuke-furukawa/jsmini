@@ -8,9 +8,12 @@
 ## 現状
 
 ```
-今:  bytecode → 1命令ずつ Wasm に変換 (最適化なし)
-後:  bytecode → IR (SSA) → Constant Folding + DCE → Wasm
+今:        bytecode → direct Wasm (wasm-compiler.ts) ← 残す
+新 (--ir): bytecode → IR (SSA) → Constant Folding + DCE → Wasm (ir/codegen.ts)
 ```
+
+両パスを共存させる。`--jit` は従来の direct Wasm、`--jit --ir` で IR 経由。
+比較ベンチや段階的移行が可能。
 
 ## ステップ
 
