@@ -958,7 +958,11 @@ export class VM {
           const key = this.pop();
           const obj = this.pop() as Record<string, unknown>;
           const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
-          this.push(obj[keyStr]);
+          if (isJSObject(obj)) {
+            this.push(jsObjGet(obj, keyStr));
+          } else {
+            this.push(obj[keyStr]);
+          }
           break;
         }
         case "SetPropertyComputed": {
