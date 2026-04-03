@@ -143,14 +143,15 @@ function extractErrorMessage(e: unknown): string {
     if (typeof val === "object" && val !== null && "message" in val) {
       const msg = (val as any).message;
       if (isJSString(msg)) return jsStringToString(msg);
-      return String(msg);
+      try { return String(msg); } catch { return "[thrown object]"; }
     }
     if (isJSString(val)) return jsStringToString(val);
-    return String(val);
+    if (typeof val === "string") return val;
+    try { return String(val); } catch { return "[thrown object]"; }
   }
   // ネイティブ Error
   if (e instanceof Error) return e.message;
-  return String(e);
+  try { return String(e); } catch { return "[unknown error]"; }
 }
 
 // canRun は廃止。構文未対応のテストも実行して正直に Fail にする。
