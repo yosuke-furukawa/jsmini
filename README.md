@@ -135,6 +135,15 @@ Source Code
 - test262 ハーネス正直化 (assert.throws 型チェック)
 - test262: 41% → 52%
 
+### Phase 16 — SSA IR + Constant Folding
+
+- CFG + SSA 形式の中間表現 (V8 Turboshaft, JSC B3, SpiderMonkey MIR と同じ設計)
+- Bytecode → SSA IR 変換 (抽象スタック模擬実行、Phi ノード挿入)
+- Constant Folding + DCE 最適化パス (`(1+2)*(3+4)` → `21` にコンパイル時計算)
+- IR → Wasm コード生成 (`--jit --ir` で IR 経由、`--jit` で従来の直接変換)
+- `--print-ir` で IR ダンプ (最適化前後を表示)
+- IR JIT は Direct JIT より 1.6-1.9x 高速 (定数畳み込みの効果)
+
 ## パフォーマンス比較
 
 V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run bench`):
@@ -274,10 +283,16 @@ src/
     wasm-gc-compiler.ts # WasmGC struct コンパイラ
     jit.ts              # JIT マネージャ
     feedback.ts         # 型フィードバック収集
+  ir/
+    types.ts            # SSA IR データ構造 (Block, Op, PhiOp)
+    builder.ts          # Bytecode → SSA IR 変換
+    optimize.ts         # Constant Folding + DCE
+    codegen.ts          # IR → Wasm コード生成
+    printer.ts          # IR テキストダンプ
   test262/
     runner.ts           # Test262 テストランナー (--vm 対応)
   bench.ts              # ベンチマーク
-  index.ts              # CLI エントリポイント (--vm, --print-bytecode)
+  index.ts              # CLI エントリポイント (--vm, --print-bytecode, --print-ir)
 ```
 
 ## ロードマップ
@@ -295,6 +310,7 @@ src/
 - [x] **Phase 13** — 構文拡大 + Generator (test262: 44.3%)
 - [x] **Phase 14** — WasmGC Array + ビルトイン自前実装 (quicksort JIT 5.4x, VM/TW差 284→66件)
 - [x] **Phase 15** — 構文対応拡大 (test262: 41% → 52%, assert ハーネス正直化)
+- [x] **Phase 16** — SSA IR + Constant Folding (IR JIT 1.6-1.9x, `--print-ir`)
 
 詳細は [PLAN.md](./PLAN.md) を参照。
 
@@ -305,6 +321,8 @@ src/
 - [LEARN-syntax-expansion.md](./LEARN-syntax-expansion.md) — 構文拡大: Generator の TW/VM 対比、Iterator Protocol、Symbol 自前実装
 - [LEARN-Phase14.md](./LEARN-Phase14.md) — WasmGC Array + ビルトイン自前実装
 - [LEARN-Phase15.md](./LEARN-Phase15.md) — 構文対応拡大 + test262 ハーネス正直化 + V8 の歴史
+- [LEARN-Phase16.md](./LEARN-Phase16.md) — SSA IR + Constant Folding + CFG/SSA/Phi の解説
+- [RESEARCH-IR.md](./RESEARCH-IR.md) — V8, JSC, SpiderMonkey の IR 設計調査
 - [BENCHMARK.md](./BENCHMARK.md) — 全ベンチマーク結果
 - [RESEARCH-WHY-BYTECODE-IS-SLOW.md](./RESEARCH-WHY-BYTECODE-IS-SLOW.md) — なぜ Object VM は TW より遅いのか
 
