@@ -32,13 +32,12 @@
 - [x] 16-2b: fibonacci, for-loop の IR ダンプ確認
 - [x] 16-2c: テスト (5 tests)
 
-### 16-3: Constant Folding + DCE
+### 16-3: Constant Folding + DCE ✅
 
-- [ ] 16-3a: `src/ir/optimize.ts` — Constant Folding
-  - `Add(Const(3), Const(4))` → `Const(7)` 等
-- [ ] 16-3b: DCE (use count = 0 の Op を除去)
-- [ ] 16-3c: `--print-ir` で最適化前後を表示
-- [ ] 16-3d: テスト
+- [x] 16-3a: `src/ir/optimize.ts` — Constant Folding (2引数 + 1引数、fixpoint)
+- [x] 16-3b: DCE (use count = 0 の Op を除去、制御フロー命令は保護)
+- [x] 16-3c: optimize() パイプライン (Constant Folding + DCE の繰り返し)
+- [x] 16-3d: テスト (8 tests: fold, nested, comparison, DCE, pipeline)
 
 ### 16-4: IR → Wasm 変換
 
