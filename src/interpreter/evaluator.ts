@@ -1194,6 +1194,23 @@ function* evalCallExpression(
 
   const args = yield* evalArguments(expr.arguments, env);
 
+  // direct eval: eval("code") — 呼び出し元のスコープで実行 (strict mode: var は eval スコープに閉じる)
+  if (expr.callee.type === "Identifier" && expr.callee.name === "eval" && typeof fn === "function") {
+    const code = args[0];
+    if (typeof code !== "string" && !isJSString(code)) return code; // 文字列以外はそのまま返す
+    const s = isJSString(code) ? jsStringToString(code) : code as string;
+    const ast = parse(s);
+    // eval 専用スコープ (親 = 呼び出し元の env)。var は eval スコープに閉じる (strict mode)
+    const evalEnv = new Environment(env, true); // isFunctionScope=true で var を閉じ込める
+    const gen = evalProgram(ast, evalEnv);
+    let result: unknown;
+    while (true) {
+      const r = gen.next();
+      if (r.done) { result = r.value; break; }
+    }
+    return result;
+  }
+
   // super() 呼び出し: 親コンストラクタを現在の this で実行
   if (expr.callee.type === "Identifier" && expr.callee.name === "__super__" && isJSFunction(fn)) {
     const superFn = fn;
