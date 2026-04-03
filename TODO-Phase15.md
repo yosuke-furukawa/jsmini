@@ -55,15 +55,15 @@ test262 TW:  4,592 / 8,947 (51.3%)
 - [x] 15-5c: VM eval → TW フォールバック (VM グローバル変数を注入、読み取り可)
   - VM グローバルへの書き戻しは未実装
 
-### 15-6: tagged template literals
+### 15-6: tagged template literals ✅
 
-- [ ] 15-6a: パーサ (TaggedTemplateExpression)
-- [ ] 15-6b: TW + VM 評価
-- [ ] 15-6c: テスト追加 + test262 検証
+- [x] 15-6a: パーサ (TaggedTemplateExpression)
+- [x] 15-6b: TW + VM 評価
+  - strings 配列 + raw プロパティ + 式の値を tag 関数に渡す
 
 ## 目標
 
 ```
-test262 VM:  41.9% → 51.2% ✅
-test262 TW:  41.1% → 52.1% ✅
+test262 TW:  41.1% → 52.1% ✅ (+984)
+test262 VM:  41.9% → 51.2% ✅ (+838)
 ```
