@@ -123,6 +123,7 @@ function preprocessTestSource(source: string): string {
   // assert.sameValue → assert_sameValue
   code = code.replace(/assert\.sameValue/g, "assert_sameValue");
   code = code.replace(/assert\.notSameValue/g, "assert_notSameValue");
+  code = code.replace(/assert\.throws/g, "assert_throws");
   // throw new Test262Error(...) → Test262Error(...)
   // (jsmini は throw/new 未対応なので、エラーケースは必ず到達しないはず)
   code = code.replace(/throw\s+new\s+Test262Error/g, "Test262Error");
