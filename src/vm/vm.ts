@@ -289,6 +289,10 @@ export class VM {
     return genObj;
   }
 
+  private isBytecodeCallable(obj: unknown): boolean {
+    return typeof obj === "object" && obj !== null && ("bytecode" in obj || "__closure" in obj);
+  }
+
   // 汎用の関数呼び出し (BytecodeFunction, closure, native function 対応)
   private callAny(fn: unknown, thisValue: unknown, args: unknown[]): unknown {
     if (typeof fn === "function") {
@@ -917,6 +921,25 @@ export class VM {
                 this.push(this.arrayPrototype[name]);
               } else if (isJSString(obj) && name in this.stringPrototype) {
                 this.push(this.stringPrototype[name]);
+              } else if (this.isBytecodeCallable(obj) && (name === "call" || name === "apply" || name === "bind")) {
+                // BytecodeFunction / closure の .call / .apply / .bind
+                const self = this;
+                const callable = obj;
+                if (name === "call") {
+                  this.push(function(this: unknown, ...callArgs: unknown[]) {
+                    return self.callFunction(callable, callArgs[0], callArgs.slice(1));
+                  });
+                } else if (name === "apply") {
+                  this.push(function(this: unknown, thisArg: unknown, argsArray?: unknown[]) {
+                    return self.callFunction(callable, thisArg, Array.isArray(argsArray) ? argsArray : []);
+                  });
+                } else {
+                  this.push(function(this: unknown, thisArg: unknown, ...boundArgs: unknown[]) {
+                    return function(...args: unknown[]) {
+                      return self.callFunction(callable, thisArg, [...boundArgs, ...args]);
+                    };
+                  });
+                }
               } else {
                 this.push((obj as Record<string, unknown>)[name]);
               }
