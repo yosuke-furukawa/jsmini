@@ -102,7 +102,15 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   env.defineReadOnly("RangeError", RangeError);
   env.defineReadOnly("Boolean", Boolean);
   env.defineReadOnly("Number", Number);
-  env.defineReadOnly("String", String);
+  // String: JSString を受け取れるカスタムコンストラクタ
+  const StringCtor = function(this: any, v?: unknown) {
+    const s = isJSString(v) ? jsStringToString(v) : (v === undefined ? "" : String(v));
+    if (new.target) return new String(s);
+    return internString(s);
+  } as unknown as StringConstructor;
+  StringCtor.fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
+  (StringCtor as any).prototype = String.prototype;
+  env.defineReadOnly("String", StringCtor);
   env.defineReadOnly("Array", Array);
   env.defineReadOnly("Function", Function);
 

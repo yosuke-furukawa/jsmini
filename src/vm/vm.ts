@@ -437,7 +437,14 @@ export class VM {
     for (const name of ["valueOf", "toString"]) {
       // JSObject (Hidden Class) の場合は jsObjGet、それ以外は普通のプロパティアクセス
       const method = isJSObject(value) ? jsObjGet(value, name) : obj[name];
-      if (method && typeof method === "object" && "bytecode" in (method as any)) {
+      if (typeof method === "function") {
+        // ネイティブ関数 (e.g. new String() の valueOf/toString)
+        methodFound = true;
+        const result = (method as Function).call(value);
+        if (result === null || result === undefined || typeof result !== "object" || isJSString(result)) {
+          return result;
+        }
+      } else if (method && typeof method === "object" && "bytecode" in (method as any)) {
         methodFound = true;
         const result = this.callInternal(method as BytecodeFunction, value, []);
         if (result === THROWN_SENTINEL) return THROWN_SENTINEL;
