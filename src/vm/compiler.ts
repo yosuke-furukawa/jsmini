@@ -378,7 +378,12 @@ class BytecodeCompiler {
         }
         for (const decl of stmt.declarations) {
           if (decl.init) {
-            this.compileExpression(decl.init);
+            // 関数名推論: var f = function() {} → f.name === "f"
+            if (decl.id.type === "Identifier" && this.isNameableFunctionExpr(decl.init)) {
+              this.compileExpression(decl.init, decl.id.name);
+            } else {
+              this.compileExpression(decl.init);
+            }
           } else {
             this.emit("LdaUndefined");
           }
@@ -889,7 +894,11 @@ class BytecodeCompiler {
     }
   }
 
-  compileExpression(expr: Expression): void {
+  private isNameableFunctionExpr(expr: any): boolean {
+    return expr.type === "FunctionExpression" || expr.type === "ArrowFunctionExpression" || expr.type === "ClassExpression";
+  }
+
+  compileExpression(expr: Expression, inferredName?: string): void {
     switch (expr.type) {
       case "Literal": {
         if (expr.value === null) {
@@ -927,7 +936,7 @@ class BytecodeCompiler {
         const fnCompiler = new BytecodeCompiler(this);
         if ((expr as any).generator) fnCompiler.isGenerator = true;
         fnCompiler.compileFunctionBody(expr.params, expr.body.body);
-        const fnBytecode = fnCompiler.finish(expr.id?.name ?? "<anonymous>");
+        const fnBytecode = fnCompiler.finish(expr.id?.name ?? inferredName ?? "");
         const fnIndex = this.addConstant(fnBytecode);
         this.emit("LdaConst", fnIndex);
         break;
@@ -935,7 +944,7 @@ class BytecodeCompiler {
 
       case "ClassExpression": {
         // ClassDeclaration と同じコンパイルだが、変数登録せずスタックに残す
-        const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: "__anonymous__" } } as any;
+        const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: inferredName ?? "" } } as any;
         // ClassDeclaration のコンパイルは StaGlobal+Pop で終わるので、
         // ここでは ClassDeclaration の中身を再実装して Pop しない
         const instanceFields = fakeStmt.body.body.filter((m: any) => m.type === "PropertyDefinition" && !m.static);
@@ -1063,8 +1072,12 @@ class BytecodeCompiler {
             this.compileExpression(prop.value);
             this.emit("SetPropertyComputed");
           } else {
-            this.compileExpression(prop.value);
             const key = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+            if (this.isNameableFunctionExpr(prop.value)) {
+              this.compileExpression(prop.value, key);
+            } else {
+              this.compileExpression(prop.value);
+            }
             const nameIdx = this.addConstant(key);
             if (prop.kind === "get") {
               this.emit("DefineGetter", nameIdx);
@@ -1201,7 +1214,7 @@ class BytecodeCompiler {
         } else {
           fnCompiler.compileFunctionBody(expr.params, (expr.body as any).body, true);
         }
-        const fnBytecode = fnCompiler.finish("<arrow>");
+        const fnBytecode = fnCompiler.finish(inferredName ?? "");
         const fnIndex = this.addConstant(fnBytecode);
         this.emit("LdaConst", fnIndex);
         break;
