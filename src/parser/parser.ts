@@ -985,6 +985,16 @@ export function parse(source: string): Program {
         const property = parseExpression();
         eat("RightBracket");
         expr = { type: "MemberExpression", object: expr, property, computed: true };
+      } else if (current().type === "NoSubstitutionTemplate" || current().type === "TemplateHead") {
+        // Tagged template literal: tag`...`
+        let quasi: any;
+        if (current().type === "NoSubstitutionTemplate") {
+          const tok = eat("NoSubstitutionTemplate");
+          quasi = { type: "TemplateLiteral", quasis: [{ type: "TemplateElement", value: { raw: tok.value, cooked: tok.value }, tail: true }], expressions: [] };
+        } else {
+          quasi = parseTemplateLiteral();
+        }
+        expr = { type: "TaggedTemplateExpression", tag: expr, quasi } as any;
       } else {
         break;
       }

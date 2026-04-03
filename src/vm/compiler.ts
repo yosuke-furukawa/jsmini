@@ -1247,6 +1247,65 @@ class BytecodeCompiler {
         break;
       }
 
+      case "TaggedTemplateExpression": {
+        // Tagged template: tag(strings, ...values)
+        const quasi = (expr as any).quasi;
+        // 式の値を先に push (引数)
+        for (const e of quasi.expressions) {
+          this.compileExpression(e);
+        }
+        // strings 配列: cooked 値
+        for (const q of quasi.quasis) {
+          this.emit("LdaConst", this.addConstant(q.value.cooked));
+        }
+        this.emit("CreateArray", quasi.quasis.length);
+        // raw 配列
+        for (const q of quasi.quasis) {
+          this.emit("LdaConst", this.addConstant(q.value.raw));
+        }
+        this.emit("CreateArray", quasi.quasis.length);
+        // stack: ...values, strings, raw
+        // strings.raw = raw → SetProperty
+        const rawTmp = `__ttl_raw_${this.currentOffset()}`;
+        const rawIdx = this.addConstant(rawTmp);
+        this.emit("StaGlobal", rawIdx); // save raw
+        this.emit("Pop"); // pop raw
+        // stack: ...values, strings
+        this.emit("Dup"); // strings, strings
+        this.emit("LdaGlobal", rawIdx); // strings, strings, raw
+        this.emitWithIC("SetProperty", this.addConstant("raw")); // strings.raw = raw
+        this.emit("Pop"); // strings
+        // Now: stack = ...values, strings
+        // Need: strings, ...values, tag, tag  (for Call)
+        // This is complex with stack. Use temp globals.
+        const strTmp = `__ttl_str_${this.currentOffset()}`;
+        const strIdx = this.addConstant(strTmp);
+        this.emit("StaGlobal", strIdx); // save strings
+        this.emit("Pop"); // pop strings
+        // stack: ...values
+        // Push strings as first arg, then values are already on stack
+        // Actually Call expects: arg0, arg1, ..., callee
+        // We need: strings, val0, val1, ..., callee → Call(N+1)
+        // But values are already on stack below. Reorder needed.
+        // Simplest: save all values to temps, then push in order
+        const valTemps: string[] = [];
+        for (let i = quasi.expressions.length - 1; i >= 0; i--) {
+          const vt = `__ttl_val${i}_${this.currentOffset()}`;
+          valTemps.unshift(vt);
+          this.emit("StaGlobal", this.addConstant(vt));
+          this.emit("Pop");
+        }
+        // stack empty. Push in order: strings, val0, val1, ...
+        this.emit("LdaGlobal", strIdx);
+        for (const vt of valTemps) {
+          this.emit("LdaGlobal", this.addConstant(vt));
+        }
+        // Push tag and call
+        this.compileExpression((expr as any).tag);
+        this.emit("Call", 1 + quasi.expressions.length);
+        break;
+      }
+
       case "UpdateExpression": {
         // ++x, x++, --x, x--
         if (expr.argument.type === "Identifier") {

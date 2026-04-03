@@ -815,6 +815,26 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       }
       return result;
     }
+    case "TaggedTemplateExpression": {
+      const tag = yield* evalExpression((expr as any).tag, env);
+      const quasi = (expr as any).quasi;
+      // strings 配列 (cooked) + raw プロパティ
+      const strings = quasi.quasis.map((q: any) => q.value.cooked);
+      (strings as any).raw = quasi.quasis.map((q: any) => q.value.raw);
+      // 式の値を評価
+      const values: unknown[] = [];
+      for (const e of quasi.expressions) {
+        values.push(yield* evalExpression(e, env));
+      }
+      // tag(strings, ...values) を呼び出す
+      if (typeof tag === "function") {
+        return (tag as Function)(strings, ...values);
+      }
+      if (isJSFunction(tag)) {
+        return yield* evalCallWithJSFunction(tag, [strings, ...values], env);
+      }
+      throw new TypeError("tag is not a function");
+    }
     case "SequenceExpression": {
       let result: unknown = undefined;
       for (const e of expr.expressions) {
