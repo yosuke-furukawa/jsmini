@@ -37,6 +37,11 @@ export function parse(source: string): Program {
 
   // Statement | Declaration — ブロック内やトップレベルで使う
   function parseStatementOrDeclaration(): Statement {
+    // 空文: ;
+    if (current().type === "Semicolon") {
+      eat("Semicolon");
+      return { type: "EmptyStatement" } as any;
+    }
     if (isDeclarationStart()) {
       return parseDeclaration();
     }

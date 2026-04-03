@@ -872,6 +872,9 @@ class BytecodeCompiler {
         break;
       }
 
+      case "EmptyStatement":
+        break;
+
       default:
         throw new Error(`Unsupported statement: ${stmt.type}`);
     }
