@@ -405,6 +405,12 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
   vm.setGlobal("Symbol", SymbolFn);
 
+  // eval: indirect eval (グローバルスコープで実行)
+  vm.setGlobal("eval", (code: unknown) => {
+    const s = isJSString(code) ? jsStringToString(code) : String(code);
+    return vmEvaluate(s, options);
+  });
+
   // フィードバック収集 (JIT 有効時は自動で有効)
   if (options.collectFeedback || options.jit) {
     vm.feedback = new FeedbackCollector();

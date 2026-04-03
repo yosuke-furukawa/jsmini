@@ -196,6 +196,12 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
   env.defineReadOnly("Symbol", SymbolFn);
 
+  // eval: indirect eval (グローバルスコープで実行)
+  env.defineReadOnly("eval", (code: unknown) => {
+    const s = isJSString(code) ? jsStringToString(code) : String(code);
+    return evaluate(s, options);
+  });
+
   _currentOnStep = onStep;
   try {
     const gen = evalProgram(ast, env);
