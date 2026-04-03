@@ -267,6 +267,7 @@ function hoistFunctionDeclarations(stmts: Statement[], env: Environment): void {
     if (stmt.type === "FunctionDeclaration") {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
+        name: stmt.id.name,
         params: stmt.params,
         body: stmt.body,
         closure: env,
@@ -318,9 +319,11 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
 
   // コンストラクタ関数を作成
   let ctorFn: JSFunction;
+  const className = stmt.id.name;
   if (ctorMethod) {
     ctorFn = {
       [JS_FUNCTION_BRAND]: true,
+      name: className,
       params: ctorMethod.value.params,
       body: ctorMethod.value.body,
       closure: env,
@@ -330,6 +333,7 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
   } else if (superClass) {
     ctorFn = {
       [JS_FUNCTION_BRAND]: true,
+      name: className,
       params: superClass.params,
       body: superClass.body,
       closure: superClass.closure,
@@ -339,6 +343,7 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
   } else {
     ctorFn = {
       [JS_FUNCTION_BRAND]: true,
+      name: className,
       params: [],
       body: { type: "BlockStatement", body: [] },
       closure: env,
@@ -362,15 +367,18 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
       if (member.kind === "constructor") continue; // constructor は ctorFn 自体
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
+        name,
         params: member.value.params,
         body: member.value.body,
         closure: env,
         prototype: {},
       };
+      if ((member.value as any).generator) (fn as any).isGenerator = true;
       (target as any)[name] = fn;
     } else if (member.kind === "get" || member.kind === "set") {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
+        name: `${member.kind} ${name}`,
         params: member.value.params,
         body: member.value.body,
         closure: env,
@@ -459,6 +467,10 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
     case "VariableDeclaration": {
       for (const decl of stmt.declarations) {
         const value = decl.init ? yield* evalExpression(decl.init, env) : undefined;
+        // 変数名から関数の name を推論: var f = function() {} → f.name === "f"
+        if (decl.id.type === "Identifier" && isJSFunction(value) && !value.name) {
+          value.name = decl.id.name;
+        }
         if (decl.id.type === "Identifier" && stmt.kind === "var" && !decl.init) {
           // var 再宣言（初期化なし）の no-op 処理
           const varEnv = env.findVarScope();
@@ -731,6 +743,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
     case "FunctionExpression": {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
+        name: expr.id?.name ?? "",
         params: expr.params,
         body: expr.body,
         closure: env,
@@ -756,6 +769,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
     case "ArrowFunctionExpression": {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
+        name: "",
         params: expr.params,
         body: expr.expression
           ? { type: "BlockStatement", body: [{ type: "ReturnStatement", argument: expr.body as Expression }] }
@@ -857,7 +871,10 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
             descriptor.enumerable = true;
             Object.defineProperty(obj, key, descriptor);
           } else {
-            obj[key] = yield* evalExpression(prop.value, env);
+            const val = yield* evalExpression(prop.value, env);
+            // メソッド省略記法: 関数の name を設定
+            if (isJSFunction(val) && !val.name) val.name = key;
+            obj[key] = val;
           }
         }
       }
