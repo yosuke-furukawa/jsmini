@@ -101,10 +101,16 @@ assert.notSameValue = function(actual, unexpected, message) {
 
 assert.throws = function(expectedErrorConstructor, fn, message) {
   var thrown = false;
-  try { fn(); } catch (e) { thrown = true; }
+  var caughtError;
+  try { fn(); } catch (e) { thrown = true; caughtError = e; }
   if (!thrown) {
-    throw new Error(message || "Expected a " + expectedErrorConstructor + " to be thrown");
+    var ctorName = expectedErrorConstructor.name || "unknown";
+    throw new Error(message || "Expected a " + ctorName + " to be thrown");
   }
+  if (caughtError instanceof expectedErrorConstructor) return;
+  if (typeof caughtError === "object" && caughtError !== null && caughtError.constructor === expectedErrorConstructor) return;
+  var ctorName = expectedErrorConstructor.name || "unknown";
+  throw new Error(message || "Expected a " + ctorName + " but got " + caughtError);
 };
 
 function verifyProperty(obj, name, desc) {
