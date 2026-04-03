@@ -293,6 +293,17 @@ export class VM {
     return typeof obj === "object" && obj !== null && ("bytecode" in obj || "__closure" in obj);
   }
 
+  private setArguments(fn: BytecodeFunction, locals: unknown[], args: unknown[]): void {
+    // arguments スロットはパラメータの直後 (コンパイラで declareLocal("arguments") した位置)
+    const argSlot = fn.paramCount;
+    if (argSlot < fn.localCount) {
+      const argsObj = Object.create(null);
+      for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+      argsObj.length = args.length;
+      locals[argSlot] = argsObj;
+    }
+  }
+
   // 汎用の関数呼び出し (BytecodeFunction, closure, native function 対応)
   private callAny(fn: unknown, thisValue: unknown, args: unknown[]): unknown {
     if (typeof fn === "function") {
@@ -1185,6 +1196,8 @@ export class VM {
             } else {
               for (let i = 0; i < fn.paramCount; i++) locals[i] = i < args.length ? args[i] : undefined;
             }
+            // arguments オブジェクト: パラメータの直後のスロット
+            this.setArguments(fn, locals, args);
             if (fn.isGenerator) {
               // Generator: フレームを push せず、GeneratorObject を返す
               const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
@@ -1226,6 +1239,7 @@ export class VM {
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = i < args.length ? args[i] : undefined;
             }
+            this.setArguments(fn, locals, args);
             if (fn.isGenerator) {
               const genObj = this.createGeneratorObject(fn, locals, closure.capturedBoxes);
               this.push(genObj);
@@ -1243,6 +1257,7 @@ export class VM {
             for (let i = 0; i < fn.paramCount; i++) {
               locals[i] = i < args.length ? args[i] : undefined;
             }
+            this.setArguments(fn, locals, args);
             if (fn.isGenerator) {
               const genObj = this.createGeneratorObject(fn, locals, []);
               this.push(genObj);

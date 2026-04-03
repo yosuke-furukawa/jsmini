@@ -1071,6 +1071,12 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment,
   if ((jsFn as any).isGenerator) {
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
     if (overrideThis !== undefined) fnEnv.setThis(overrideThis);
+    if (!jsFn.isArrow) {
+      const argsObj = Object.create(null);
+      for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+      argsObj.length = args.length;
+      fnEnv.define("arguments", argsObj);
+    }
     for (let i = 0; i < jsFn.params.length; i++) {
       const param = jsFn.params[i];
       if (param.type === "RestElement") {
@@ -1096,6 +1102,13 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment,
 
   const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
   if (overrideThis !== undefined) fnEnv.setThis(overrideThis);
+  // arguments オブジェクト (アロー関数以外)
+  if (!jsFn.isArrow) {
+    const argsObj = Object.create(null);
+    for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+    argsObj.length = args.length;
+    fnEnv.define("arguments", argsObj);
+  }
   for (let i = 0; i < jsFn.params.length; i++) {
     const param = jsFn.params[i];
     if (param.type === "RestElement") {
@@ -1230,6 +1243,10 @@ function* evalCallExpression(
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
     if (!jsFn.isArrow) {
       fnEnv.setThis(thisValue);
+      const argsObj = Object.create(null);
+      for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+      argsObj.length = args.length;
+      fnEnv.define("arguments", argsObj);
     }
     for (let i = 0; i < jsFn.params.length; i++) {
       const param = jsFn.params[i];
@@ -1264,6 +1281,10 @@ function* evalCallExpression(
   const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
   if (!jsFn.isArrow) {
     fnEnv.setThis(thisValue);
+    const argsObj = Object.create(null);
+    for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+    argsObj.length = args.length;
+    fnEnv.define("arguments", argsObj);
   }
 
   // 仮引数に実引数をバインド（分割代入 + レスト対応）

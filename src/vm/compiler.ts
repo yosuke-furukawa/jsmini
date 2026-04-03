@@ -307,7 +307,7 @@ class BytecodeCompiler {
     }
   }
 
-  compileFunctionBody(params: any[], body: Statement[]): void {
+  compileFunctionBody(params: any[], body: Statement[], isArrow?: boolean): void {
     // パラメータをローカルスロットに登録
     this.paramCount = params.length;
     const destructureParams: { slot: number; pattern: any }[] = [];
@@ -348,6 +348,10 @@ class BytecodeCompiler {
     for (const { slot, pattern } of destructureParams) {
       this.emit("LdaLocal", slot);
       this.compileBindingTarget(pattern);
+    }
+    // arguments オブジェクト (アロー関数以外)
+    if (!isArrow) {
+      this.declareLocal("arguments");
     }
     // 本体をコンパイル
     for (const stmt of body) {
@@ -1193,9 +1197,9 @@ class BytecodeCompiler {
           // 式本体: 暗黙の return
           fnCompiler.compileFunctionBody(expr.params, [
             { type: "ReturnStatement", argument: expr.body as Expression }
-          ]);
+          ], true);
         } else {
-          fnCompiler.compileFunctionBody(expr.params, (expr.body as any).body);
+          fnCompiler.compileFunctionBody(expr.params, (expr.body as any).body, true);
         }
         const fnBytecode = fnCompiler.finish("<arrow>");
         const fnIndex = this.addConstant(fnBytecode);
