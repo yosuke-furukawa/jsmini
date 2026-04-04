@@ -142,7 +142,7 @@ export class JitManager {
 
   private compileViaIR(func: BytecodeFunction, spec: WasmNumericType, stringArgIndices: number[]): CachedWasm | null {
     try {
-      const ir = buildIR(func);
+      const ir = buildIR(func, { feedback: this.feedback });
       optimize(ir);
       const result = compileIRToWasm(ir);
       if (!result) return null;

@@ -4,10 +4,15 @@
 // V8 の Maglev や SpiderMonkey の WarpBuilder と同じ役割。
 
 import type { BytecodeFunction, Instruction } from "../vm/bytecode.js";
+import type { FeedbackCollector, WasmNumericType } from "../jit/feedback.js";
 import {
   type IRFunction, type Block, type Op, type PhiOp, type IRType,
   createIRFunction, createBlock, createConst, createParam, createPhi, createOp,
 } from "./types.js";
+
+export type BuildIROptions = {
+  feedback?: FeedbackCollector;
+};
 
 // ========== ブロック境界の特定 ==========
 
@@ -53,9 +58,21 @@ function cloneStack(stack: AbstractStack): AbstractStack {
 
 // ========== SSA Builder ==========
 
-export function buildIR(func: BytecodeFunction): IRFunction {
+export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFunction {
   const bytecode = func.bytecode;
   const constants = func.constants;
+  const feedback = options?.feedback;
+
+  // 型フィードバックからパラメータの型を取得
+  const wasmArgTypes: (WasmNumericType | null)[] = [];
+  if (feedback) {
+    const types = feedback.getWasmArgTypes(func);
+    if (types) {
+      for (let i = 0; i < func.paramCount; i++) {
+        wasmArgTypes.push(i < types.length ? types[i] : null);
+      }
+    }
+  }
 
   const irFunc = createIRFunction(func.name, func.paramCount);
 
@@ -72,10 +89,11 @@ export function buildIR(func: BytecodeFunction): IRFunction {
     irFunc.blocks.push(block);
   }
 
-  // パラメータの Op を作成 (エントリブロック用)
+  // パラメータの Op を作成 (型フィードバックで型を設定)
   const paramOps: Op[] = [];
   for (let i = 0; i < func.paramCount; i++) {
-    paramOps.push(createParam(irFunc, i, "any"));
+    const paramType: IRType = wasmArgTypes[i] === "f64" ? "f64" : wasmArgTypes[i] === "i32" ? "i32" : "any";
+    paramOps.push(createParam(irFunc, i, paramType));
   }
 
   // ローカル変数の SSA 値を追跡
@@ -204,12 +222,20 @@ export function buildIR(func: BytecodeFunction): IRFunction {
         }
 
         // 算術 (pop 2, push 1)
-        case "Add": case "Sub": case "Mul": case "Div": case "Mod":
+        case "Add": case "Sub": case "Mul": case "Div": case "Mod": {
+          const right = stack.pop()!;
+          const left = stack.pop()!;
+          const resultType = inferBinType(left, right);
+          const op = registerOp(createOp(irFunc, instr.op as any, [left, right], resultType));
+          block.ops.push(op);
+          stack.push(op.id);
+          break;
+        }
         case "BitAnd": case "BitOr": case "BitXor":
         case "ShiftLeft": case "ShiftRight": {
           const right = stack.pop()!;
           const left = stack.pop()!;
-          const op = registerOp(createOp(irFunc, instr.op as any, [left, right], "i32"));
+          const op = registerOp(createOp(irFunc, instr.op as any, [left, right], "i32")); // ビット演算は常に i32
           block.ops.push(op);
           stack.push(op.id);
           break;
@@ -340,6 +366,15 @@ export function buildIR(func: BytecodeFunction): IRFunction {
   return irFunc;
 
   // ========== ヘルパー ==========
+
+  // 2つの型から結果の型を推論 (f64 が含まれたら f64 に widening)
+  function inferBinType(leftId: number, rightId: number): IRType {
+    const left = opById.get(leftId);
+    const right = opById.get(rightId);
+    if (left?.type === "f64" || right?.type === "f64") return "f64";
+    if (left?.type === "i32" && right?.type === "i32") return "i32";
+    return "i32"; // default
+  }
 
   function propagateState(targetBlockId: number, locals: (number | undefined)[], stack: AbstractStack): void {
     if (!blockEntryLocals.has(targetBlockId)) {

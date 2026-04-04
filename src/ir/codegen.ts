@@ -50,6 +50,13 @@ export function codegenIR(irFunc: IRFunction): number[] {
 
   const extraLocals = nextLocal - irFunc.paramCount;
 
+  // Op を id で引けるテーブル
+  const opById = new Map<number, Op>();
+  for (const block of irFunc.blocks) {
+    for (const phi of block.phis) opById.set(phi.id, phi);
+    for (const op of block.ops) opById.set(op.id, op);
+  }
+
   // ========== CFG → Wasm structured control flow ==========
   // シンプルなアプローチ:
   // - ブロックをトポロジカル順序で配置
@@ -86,7 +93,7 @@ export function codegenIR(irFunc: IRFunction): number[] {
 
     // 通常の命令
     for (const op of block.ops) {
-      emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders);
+      emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById);
     }
 
     // ループヘッダの end を、ループ内の最後のブロックの後に置く
@@ -114,6 +121,7 @@ function emitOp(
   activeLoops: number[],
   activeBlocks: number[],
   loopHeaders: Set<number>,
+  opById: Map<number, Op>,
 ): void {
   switch (op.opcode) {
     case "Const": {
@@ -164,17 +172,23 @@ function emitOp(
     case "NotEqual": case "StrictNotEqual": {
       emitLoadValue(op.args[0], body, opToLocal);
       emitLoadValue(op.args[1], body, opToLocal);
-      body.push(getWasmCmpOp(op.opcode));
+      const argOp = opById.get(op.args[0]);
+      body.push(getWasmCmpOp(op.opcode, argOp?.type ?? "i32"));
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
 
     // 単項
     case "Negate": {
-      // -x = 0 - x
-      body.push(WASM_OP.i32_const, ...i32ToLEB128(0));
-      emitLoadValue(op.args[0], body, opToLocal);
-      body.push(WASM_OP.i32_sub);
+      const argOp = opById.get(op.args[0]);
+      if (argOp?.type === "f64") {
+        emitLoadValue(op.args[0], body, opToLocal);
+        body.push(WASM_OP.f64_neg);
+      } else {
+        body.push(WASM_OP.i32_const, ...i32ToLEB128(0));
+        emitLoadValue(op.args[0], body, opToLocal);
+        body.push(WASM_OP.i32_sub);
+      }
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
@@ -283,16 +297,50 @@ function getWasmBinOp(opcode: string, type: string): number {
 }
 
 // IR comparison opcode → Wasm comparison opcode
-function getWasmCmpOp(opcode: string): number {
+function getWasmCmpOp(opcode: string, argType: string = "i32"): number {
+  const isF64 = argType === "f64";
   switch (opcode) {
-    case "LessThan": return WASM_OP.i32_lt_s;
-    case "LessEqual": return WASM_OP.i32_le_s;
-    case "GreaterThan": return WASM_OP.i32_gt_s;
-    case "GreaterEqual": return WASM_OP.i32_ge_s;
-    case "Equal": case "StrictEqual": return 0x46; // i32.eq
-    case "NotEqual": case "StrictNotEqual": return 0x47; // i32.ne
+    case "LessThan": return isF64 ? WASM_OP.f64_lt : WASM_OP.i32_lt_s;
+    case "LessEqual": return isF64 ? WASM_OP.f64_le : WASM_OP.i32_le_s;
+    case "GreaterThan": return isF64 ? WASM_OP.f64_gt : WASM_OP.i32_gt_s;
+    case "GreaterEqual": return isF64 ? WASM_OP.f64_ge : WASM_OP.i32_ge_s;
+    case "Equal": case "StrictEqual": return isF64 ? 0x61 : 0x46; // f64.eq / i32.eq
+    case "NotEqual": case "StrictNotEqual": return isF64 ? 0x62 : 0x47; // f64.ne / i32.ne
     default: return WASM_OP.i32_lt_s;
   }
+}
+
+// パラメータの型を IR から取得
+function getParamTypes(irFunc: IRFunction): IRType[] {
+  const types: IRType[] = [];
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      if (op.opcode === "Param" && op.index !== undefined) {
+        types[op.index] = op.type;
+      }
+    }
+  }
+  for (let i = 0; i < irFunc.paramCount; i++) {
+    if (!types[i]) types[i] = "i32";
+  }
+  return types;
+}
+
+// Return の引数の型から戻り値の型を推論
+function getReturnType(irFunc: IRFunction): IRType {
+  const opById = new Map<number, Op>();
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) opById.set(op.id, op);
+  }
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      if (op.opcode === "Return" && op.args.length > 0) {
+        const retVal = opById.get(op.args[0]);
+        if (retVal) return retVal.type;
+      }
+    }
+  }
+  return "i32";
 }
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
@@ -301,9 +349,12 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
   try {
     const builder = new WasmBuilder();
 
-    // パラメータ: 全部 i32
-    const params = new Array(irFunc.paramCount).fill(WASM_TYPE.i32);
-    const results = [WASM_TYPE.i32]; // 戻り値は i32
+    // パラメータの型を IR から取得
+    const paramTypes = getParamTypes(irFunc);
+    const params = paramTypes.map(t => t === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32);
+    // 戻り値の型: Return の引数の型から推論
+    const returnType = getReturnType(irFunc);
+    const results = [returnType === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32];
 
     const bodyCode = codegenIR(irFunc);
 
