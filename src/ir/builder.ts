@@ -4,10 +4,15 @@
 // V8 の Maglev や SpiderMonkey の WarpBuilder と同じ役割。
 
 import type { BytecodeFunction, Instruction } from "../vm/bytecode.js";
+import type { FeedbackCollector, WasmNumericType } from "../jit/feedback.js";
 import {
   type IRFunction, type Block, type Op, type PhiOp, type IRType,
   createIRFunction, createBlock, createConst, createParam, createPhi, createOp,
 } from "./types.js";
+
+export type BuildIROptions = {
+  feedback?: FeedbackCollector;
+};
 
 // ========== ブロック境界の特定 ==========
 
@@ -53,9 +58,21 @@ function cloneStack(stack: AbstractStack): AbstractStack {
 
 // ========== SSA Builder ==========
 
-export function buildIR(func: BytecodeFunction): IRFunction {
+export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFunction {
   const bytecode = func.bytecode;
   const constants = func.constants;
+  const feedback = options?.feedback;
+
+  // 型フィードバックからパラメータの型を取得
+  const wasmArgTypes: (WasmNumericType | null)[] = [];
+  if (feedback) {
+    const types = feedback.getWasmArgTypes(func);
+    if (types) {
+      for (let i = 0; i < func.paramCount; i++) {
+        wasmArgTypes.push(i < types.length ? types[i] : null);
+      }
+    }
+  }
 
   const irFunc = createIRFunction(func.name, func.paramCount);
 
@@ -72,10 +89,21 @@ export function buildIR(func: BytecodeFunction): IRFunction {
     irFunc.blocks.push(block);
   }
 
-  // パラメータの Op を作成 (エントリブロック用)
+  // パラメータの Op を作成 (型フィードバックで型を設定)
+  // 型が特殊化されてる場合は TypeGuard を挿入
   const paramOps: Op[] = [];
+  const guardOps: Op[] = [];
   for (let i = 0; i < func.paramCount; i++) {
-    paramOps.push(createParam(irFunc, i, "any"));
+    const paramType: IRType = wasmArgTypes[i] === "f64" ? "f64" : wasmArgTypes[i] === "i32" ? "i32" : "any";
+    const param = createParam(irFunc, i, paramType);
+    paramOps.push(param);
+
+    // 型が推測された場合に TypeGuard を挿入
+    if (paramType !== "any") {
+      const guard = createOp(irFunc, "TypeGuard", [param.id], paramType);
+      guard.guardType = paramType;
+      guardOps.push(guard);
+    }
   }
 
   // ローカル変数の SSA 値を追跡
@@ -98,9 +126,6 @@ export function buildIR(func: BytecodeFunction): IRFunction {
     opById.set(op.id, op);
     return op;
   }
-
-  // パラメータを登録
-  for (const p of paramOps) registerOp(p);
 
   // ブロック0 の初期状態
   const initLocals: (number | undefined)[] = new Array(localCount).fill(undefined);
@@ -129,9 +154,10 @@ export function buildIR(func: BytecodeFunction): IRFunction {
     let locals = [...(blockEntryLocals.get(blockId) ?? new Array(localCount).fill(undefined))];
     let stack: AbstractStack = cloneStack(blockEntryStacks.get(blockId) ?? []);
 
-    // パラメータ Op をブロック0に追加
+    // パラメータ Op + TypeGuard をブロック0に追加
     if (blockId === 0) {
-      for (const p of paramOps) block.ops.push(p);
+      for (const p of paramOps) { registerOp(p); block.ops.push(p); }
+      for (const g of guardOps) { registerOp(g); block.ops.push(g); }
     }
 
     // 各命令を抽象解釈
@@ -204,12 +230,20 @@ export function buildIR(func: BytecodeFunction): IRFunction {
         }
 
         // 算術 (pop 2, push 1)
-        case "Add": case "Sub": case "Mul": case "Div": case "Mod":
+        case "Add": case "Sub": case "Mul": case "Div": case "Mod": {
+          const right = stack.pop()!;
+          const left = stack.pop()!;
+          const resultType = inferBinType(left, right);
+          const op = registerOp(createOp(irFunc, instr.op as any, [left, right], resultType));
+          block.ops.push(op);
+          stack.push(op.id);
+          break;
+        }
         case "BitAnd": case "BitOr": case "BitXor":
         case "ShiftLeft": case "ShiftRight": {
           const right = stack.pop()!;
           const left = stack.pop()!;
-          const op = registerOp(createOp(irFunc, instr.op as any, [left, right], "i32"));
+          const op = registerOp(createOp(irFunc, instr.op as any, [left, right], "i32")); // ビット演算は常に i32
           block.ops.push(op);
           stack.push(op.id);
           break;
@@ -340,6 +374,15 @@ export function buildIR(func: BytecodeFunction): IRFunction {
   return irFunc;
 
   // ========== ヘルパー ==========
+
+  // 2つの型から結果の型を推論 (f64 が含まれたら f64 に widening)
+  function inferBinType(leftId: number, rightId: number): IRType {
+    const left = opById.get(leftId);
+    const right = opById.get(rightId);
+    if (left?.type === "f64" || right?.type === "f64") return "f64";
+    if (left?.type === "i32" && right?.type === "i32") return "i32";
+    return "i32"; // default
+  }
 
   function propagateState(targetBlockId: number, locals: (number | undefined)[], stack: AbstractStack): void {
     if (!blockEntryLocals.has(targetBlockId)) {

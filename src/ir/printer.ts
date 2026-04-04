@@ -29,6 +29,9 @@ function formatOp(op: Op, indent: string = "  "): string {
       return `${indent}v${op.id}: ${typeStr} = Phi(${inputs})`;
     }
 
+    case "TypeGuard":
+      return `${indent}v${op.id}: ${typeStr} = TypeGuard(v${op.args[0]}, ${op.guardType})`;
+
     case "Branch":
       return `${indent}Branch(v${op.args[0]})`;
 

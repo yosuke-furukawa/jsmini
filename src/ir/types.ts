@@ -50,6 +50,9 @@ export type IROpcode =
   // 関数呼び出し
   | "Call"            // args[0] = callee, args[1..] = 引数
 
+  // 型ガード
+  | "TypeGuard"       // TypeGuard(value, expectedType) — 型チェック、失敗で deopt
+
   // SSA
   | "Phi";            // 合流点での値選択
 
@@ -66,6 +69,9 @@ export interface Op {
 
   // Param 用
   index?: number;
+
+  // TypeGuard 用
+  guardType?: IRType;
 }
 
 // ========== Phi ノード ==========
