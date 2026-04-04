@@ -154,6 +154,14 @@ function emitOp(
       break;
     }
 
+    case "TypeGuard": {
+      // 型ガード: 現在は型が合ってる前提で passthrough
+      // 将来: 型チェック → 失敗で deopt (unreachable or special return)
+      emitLoadValue(op.args[0], body, opToLocal);
+      maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      break;
+    }
+
     // 2引数算術
     case "Add": case "Sub": case "Mul": case "Div": case "Mod":
     case "BitAnd": case "BitOr": case "BitXor":

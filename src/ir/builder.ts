@@ -90,10 +90,20 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
   }
 
   // パラメータの Op を作成 (型フィードバックで型を設定)
+  // 型が特殊化されてる場合は TypeGuard を挿入
   const paramOps: Op[] = [];
+  const guardOps: Op[] = [];
   for (let i = 0; i < func.paramCount; i++) {
     const paramType: IRType = wasmArgTypes[i] === "f64" ? "f64" : wasmArgTypes[i] === "i32" ? "i32" : "any";
-    paramOps.push(createParam(irFunc, i, paramType));
+    const param = createParam(irFunc, i, paramType);
+    paramOps.push(param);
+
+    // 型が推測された場合に TypeGuard を挿入
+    if (paramType !== "any") {
+      const guard = createOp(irFunc, "TypeGuard", [param.id], paramType);
+      guard.guardType = paramType;
+      guardOps.push(guard);
+    }
   }
 
   // ローカル変数の SSA 値を追跡
@@ -116,9 +126,6 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
     opById.set(op.id, op);
     return op;
   }
-
-  // パラメータを登録
-  for (const p of paramOps) registerOp(p);
 
   // ブロック0 の初期状態
   const initLocals: (number | undefined)[] = new Array(localCount).fill(undefined);
@@ -147,9 +154,10 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
     let locals = [...(blockEntryLocals.get(blockId) ?? new Array(localCount).fill(undefined))];
     let stack: AbstractStack = cloneStack(blockEntryStacks.get(blockId) ?? []);
 
-    // パラメータ Op をブロック0に追加
+    // パラメータ Op + TypeGuard をブロック0に追加
     if (blockId === 0) {
-      for (const p of paramOps) block.ops.push(p);
+      for (const p of paramOps) { registerOp(p); block.ops.push(p); }
+      for (const g of guardOps) { registerOp(g); block.ops.push(g); }
     }
 
     // 各命令を抽象解釈
