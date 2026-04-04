@@ -12,6 +12,7 @@ import {
 
 export type BuildIROptions = {
   feedback?: FeedbackCollector;
+  knownFuncs?: Map<string, BytecodeFunction>;
 };
 
 // ========== ブロック境界の特定 ==========
@@ -62,6 +63,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
   const bytecode = func.bytecode;
   const constants = func.constants;
   const feedback = options?.feedback;
+  const knownFuncs = options?.knownFuncs;
 
   // 型フィードバックからパラメータの型を取得
   const wasmArgTypes: (WasmNumericType | null)[] = [];
@@ -341,6 +343,34 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           propagateState(fallBlockId, locals, stack);
           if (!visited.has(targetBlockId)) queue.push(targetBlockId);
           if (!visited.has(fallBlockId)) queue.push(fallBlockId);
+          break;
+        }
+
+        // グローバル変数 (関数参照)
+        case "LdaGlobal": {
+          const name = constants[instr.operand!] as string;
+          // 関数参照 → Const として扱い、calleeName を記録
+          const op = registerOp(createOp(irFunc, "Const", [], "any"));
+          op.value = name as any;
+          op.calleeName = name;
+          block.ops.push(op);
+          stack.push(op.id);
+          break;
+        }
+
+        // 関数呼び出し
+        case "Call": {
+          const argc = instr.operand!;
+          const calleeId = stack.pop()!; // 関数
+          const args: number[] = [];
+          for (let j = 0; j < argc; j++) {
+            args.unshift(stack.pop()!);
+          }
+          const calleeOp = opById.get(calleeId);
+          const op = registerOp(createOp(irFunc, "Call", [calleeId, ...args], "any"));
+          if (calleeOp?.calleeName) op.calleeName = calleeOp.calleeName;
+          block.ops.push(op);
+          stack.push(op.id);
           break;
         }
 

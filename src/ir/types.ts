@@ -72,6 +72,9 @@ export interface Op {
 
   // TypeGuard 用
   guardType?: IRType;
+
+  // Call 用: インライン展開対象の BytecodeFunction
+  calleeName?: string;
 }
 
 // ========== Phi ノード ==========

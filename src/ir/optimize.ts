@@ -8,6 +8,8 @@
 
 import type { IRFunction, Block, Op } from "./types.js";
 import { isPhi } from "./types.js";
+import { inlinePass } from "./inline.js";
+export type { InlineOptions } from "./inline.js";
 
 // ========== Constant Folding ==========
 
@@ -134,10 +136,13 @@ export function deadCodeElimination(func: IRFunction): boolean {
 
 // ========== 最適化パイプライン ==========
 
-export function optimize(func: IRFunction): void {
-  // Constant Folding → DCE を繰り返す (fixpoint)
+export function optimize(func: IRFunction, inlineOptions?: InlineOptions): void {
+  // Inlining → Constant Folding → DCE を繰り返す (fixpoint)
   for (let iter = 0; iter < 10; iter++) {
     let changed = false;
+    if (inlineOptions) {
+      changed = inlinePass(func, inlineOptions) || changed;
+    }
     changed = constantFolding(func) || changed;
     changed = deadCodeElimination(func) || changed;
     if (!changed) break;
