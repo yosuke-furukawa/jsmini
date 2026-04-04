@@ -6,7 +6,7 @@ import { getElementKind, isTrackedArray } from "../vm/js-array.js";
 import { isJSString, getInternId, getStringById } from "../vm/js-string.js";
 import { isJSObject, getSlots } from "../vm/js-object.js";
 import { buildIR } from "../ir/builder.js";
-import { optimize } from "../ir/optimize.js";
+import { optimize, type InlineOptions } from "../ir/optimize.js";
 import { compileIRToWasm } from "../ir/codegen.js";
 
 export type JitOptions = {
@@ -142,8 +142,11 @@ export class JitManager {
 
   private compileViaIR(func: BytecodeFunction, spec: WasmNumericType, stringArgIndices: number[]): CachedWasm | null {
     try {
-      const ir = buildIR(func, { feedback: this.feedback });
-      optimize(ir);
+      const ir = buildIR(func, { feedback: this.feedback, knownFuncs: this.knownFuncs });
+      optimize(ir, {
+        knownFuncs: this.knownFuncs,
+        buildIROptions: { feedback: this.feedback },
+      });
       const result = compileIRToWasm(ir);
       if (!result) return null;
       const wasmFn = (result.instance.exports as any)[ir.name] as (...args: number[]) => number;

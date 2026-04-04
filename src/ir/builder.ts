@@ -12,6 +12,7 @@ import {
 
 export type BuildIROptions = {
   feedback?: FeedbackCollector;
+  knownFuncs?: Map<string, BytecodeFunction>;
 };
 
 // ========== ブロック境界の特定 ==========
@@ -62,6 +63,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
   const bytecode = func.bytecode;
   const constants = func.constants;
   const feedback = options?.feedback;
+  const knownFuncs = options?.knownFuncs;
 
   // 型フィードバックからパラメータの型を取得
   const wasmArgTypes: (WasmNumericType | null)[] = [];
@@ -344,6 +346,34 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           break;
         }
 
+        // グローバル変数 (関数参照)
+        case "LdaGlobal": {
+          const name = constants[instr.operand!] as string;
+          // 関数参照 → Const として扱い、calleeName を記録
+          const op = registerOp(createOp(irFunc, "Const", [], "any"));
+          op.value = name as any;
+          op.calleeName = name;
+          block.ops.push(op);
+          stack.push(op.id);
+          break;
+        }
+
+        // 関数呼び出し
+        case "Call": {
+          const argc = instr.operand!;
+          const calleeId = stack.pop()!; // 関数
+          const args: number[] = [];
+          for (let j = 0; j < argc; j++) {
+            args.unshift(stack.pop()!);
+          }
+          const calleeOp = opById.get(calleeId);
+          const op = registerOp(createOp(irFunc, "Call", [calleeId, ...args], "any"));
+          if (calleeOp?.calleeName) op.calleeName = calleeOp.calleeName;
+          block.ops.push(op);
+          stack.push(op.id);
+          break;
+        }
+
         default:
           // 未対応の命令はスキップ (IR 変換対象外)
           break;
@@ -369,7 +399,10 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
   }
 
   // Phi ノードを挿入 (合流点で値が異なる場合)
-  insertPhiNodes(irFunc, blockExitLocals, opById);
+  insertPhiNodes(irFunc, blockExitLocals, blockEntryLocals, opById);
+
+  // Phi の値で後続ブロックの参照を書き換える
+  rewritePhiReferences(irFunc, blockEntryLocals);
 
   return irFunc;
 
@@ -399,6 +432,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
 function insertPhiNodes(
   irFunc: IRFunction,
   blockExitLocals: Map<number, (number | undefined)[]>,
+  blockEntryLocals: Map<number, (number | undefined)[]>,
   opById: Map<number, Op>,
 ): void {
   for (const block of irFunc.blocks) {
@@ -412,6 +446,8 @@ function insertPhiNodes(
     if (predLocals.length < 2) continue;
 
     const localCount = predLocals[0].length;
+    const entryLocals = blockEntryLocals.get(block.id);
+
     for (let slot = 0; slot < localCount; slot++) {
       const values = predLocals.map(l => l[slot]);
       // 全部同じなら Phi 不要
@@ -423,8 +459,70 @@ function insertPhiNodes(
       for (let i = 0; i < block.predecessors.length; i++) {
         phi.inputs.push([block.predecessors[i], values[i]!]);
       }
+      // Phi がどのローカルスロットの値を置き換えるか記録
+      (phi as any).__slot = slot;
+      // entry locals の対応する値を Phi の値に更新
+      if (entryLocals && entryLocals[slot] !== undefined) {
+        (phi as any).__replacedValue = entryLocals[slot];
+      }
       block.phis.push(phi);
       opById.set(phi.id, phi);
+    }
+  }
+}
+
+// Phi の値で、合流ブロックとその後続ブロック内の参照を書き換える
+function rewritePhiReferences(
+  irFunc: IRFunction,
+  blockEntryLocals: Map<number, (number | undefined)[]>,
+): void {
+  for (const block of irFunc.blocks) {
+    if (block.phis.length === 0) continue;
+
+    // このブロックの Phi が置き換える値のマップ: oldId → phiId
+    const replaceMap = new Map<number, number>();
+    for (const phi of block.phis) {
+      const replacedVal = (phi as any).__replacedValue as number | undefined;
+      if (replacedVal !== undefined) {
+        replaceMap.set(replacedVal, phi.id);
+      }
+    }
+
+    if (replaceMap.size === 0) continue;
+
+    // このブロック内の ops の引数を書き換え
+    for (const op of block.ops) {
+      op.args = op.args.map(a => replaceMap.get(a) ?? a);
+    }
+
+    // 後続ブロック (successors) 内の ops も書き換え
+    // (ループの場合、B1 → B2 → B1 で B2 が B1 の Phi を参照すべき)
+    const visited = new Set<number>();
+    const queue = [...block.successors];
+    while (queue.length > 0) {
+      const succId = queue.shift()!;
+      if (visited.has(succId)) continue;
+      if (succId === block.id) continue; // 自分自身はスキップ (既に処理済み)
+      visited.add(succId);
+
+      const succBlock = irFunc.blocks.find(b => b.id === succId);
+      if (!succBlock) continue;
+
+      for (const op of succBlock.ops) {
+        op.args = op.args.map(a => replaceMap.get(a) ?? a);
+      }
+      // Phi の inputs も書き換え
+      for (const phi of succBlock.phis) {
+        phi.inputs = phi.inputs.map(([bid, vid]) => [bid, replaceMap.get(vid) ?? vid]);
+      }
+
+      // さらに後続へ (ただし Phi があるブロックで止まる — 別の Phi で置き換わるため)
+      for (const nextId of succBlock.successors) {
+        const nextBlock = irFunc.blocks.find(b => b.id === nextId);
+        if (nextBlock && nextBlock.phis.length === 0) {
+          queue.push(nextId);
+        }
+      }
     }
   }
 }
