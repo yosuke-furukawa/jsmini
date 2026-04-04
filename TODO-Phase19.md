@@ -44,23 +44,28 @@ B2 → B1 (back edge)              ;; B1: 条件チェック
                               end
 ```
 
-### アルゴリズムの選択肢
+### アルゴリズム: Stackifier
 
-1. **Stackifier** (LLVM が使う方式)
-   - ブロックをトポロジカル順に配置
-   - back edge → `loop` + `br`、forward edge → `block` + `br`
-   - シンプルで jsmini に適している
+LLVM が Wasm バックエンドで使う方式を採用。
 
-2. **Relooper** (Emscripten が使った方式)
-   - 任意の CFG を structured control flow に変換
-   - 複雑だが汎用的
+**ルール:**
+1. ブロックをトポロジカル順に並べる (back edge を無視して依存順)
+2. 下向きの矢印 (forward edge) → `block` + `br` で脱出
+3. 上向きの矢印 (back edge) → `loop` + `br` で先頭に戻る
 
-3. **直接パターンマッチ** (jsmini 向け)
-   - for ループ: `B0 → B1(header) → B2(body) → B1` のパターンを検出
-   - if/else: `B0 → B1, B2 → B3` のパターンを検出
-   - 対応できないパターンは direct JIT にフォールバック
-
-jsmini では (3) の直接パターンマッチが最もシンプルで教育的。
+```
+CFG:                          Wasm:
+B0 → B1 (forward)            ;; B0 の中身
+B1 → B2, B3 (forward)        block $exit
+B2 → B1 (back edge)            loop $loop
+                                  ;; B1: 条件
+                                  br_if $exit
+                                  ;; B2: 本体
+                                  br $loop
+                                end
+                              end
+                              ;; B3: 出口
+```
 
 ## ステップ
 
@@ -82,48 +87,31 @@ IR の CFG からループ構造を検出する。
 - [ ] 19-2b: Phi の使用箇所を local.get に置換
 - [ ] 19-2c: テスト
 
-### 19-3: CFG → Wasm structured control flow
+### 19-3: Stackifier — CFG → Wasm structured control flow
 
-IR のブロック構造を Wasm の block/loop/br に変換する。
+IR のブロックをトポロジカル順に配置し、Wasm の block/loop/br に変換する。
 
-- [ ] 19-3a: for ループパターンの認識と変換
+- [ ] 19-3a: トポロジカルソート (back edge を無視して依存順に並べる)
+- [ ] 19-3b: back edge の検出 → `loop` + `br` を生成
   ```wasm
-  (local $sum i32) (local $i i32)
-  ;; B0: 初期化
-  i32.const 0
-  local.set $sum
-  i32.const 0
-  local.set $i
-  ;; B1: ループ
   block $exit
     loop $loop
-      ;; 条件チェック
+      ;; B1: 条件
       local.get $i
       local.get $n
       i32.lt_s
       i32.eqz
-      br_if $exit
-      ;; B2: 本体 (Inlining 済みの add(i,1) = i+1)
-      local.get $sum
-      local.get $i
-      i32.const 1
-      i32.add        ;; add(i, 1) → i + 1
-      i32.add        ;; sum + (i + 1)
-      local.set $sum
-      ;; i++
-      local.get $i
-      i32.const 1
-      i32.add
-      local.set $i
-      br $loop
+      br_if $exit        ;; forward edge → block 脱出
+      ;; B2: 本体
+      ...
+      br $loop           ;; back edge → loop 先頭に戻る
     end
   end
-  ;; B3: return sum
-  local.get $sum
   ```
-- [ ] 19-3b: if/else パターン (forward branch) の変換
-- [ ] 19-3c: ネストしたループ / if の対応
-- [ ] 19-3d: テスト
+- [ ] 19-3c: forward edge の検出 → `block` + `br` を生成 (if/else)
+- [ ] 19-3d: ブロックごとに Op → Wasm 命令を出力 (既存の emitOp を再利用)
+- [ ] 19-3e: br の depth 計算 (ネストした block/loop の深さ)
+- [ ] 19-3f: テスト (for loop, if/else, nested loop)
 
 ### 19-4: ベンチマーク
 
