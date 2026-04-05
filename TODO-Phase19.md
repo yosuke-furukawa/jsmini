@@ -73,9 +73,10 @@ B2 → B1 (back edge)            loop $loop
 
 IR の CFG からループ構造を検出する。
 
-- [ ] 19-1a: back edge の検出 (successor が自分より前のブロック)
-- [ ] 19-1b: ループヘッダ + ループ本体 + 出口ブロックの特定
-- [ ] 19-1c: テスト
+- [x] 19-1a: DFS で back edge 検出
+- [x] 19-1b: ループヘッダ + ループ本体 (Set) + 出口ブロックの特定
+- [x] 19-1c: トポロジカル順序 (Block ID 昇順)
+- [x] 19-1d: テスト (5 tests: linear, if/else, for loop, nested loop, topo order)
 
 ### 19-2: Phi → Wasm local の変換
 
