@@ -53,11 +53,30 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
     }
   }
 
-  // 中間値で複数回使われるもの → local に格納
+  // 中間値で複数回使われるもの or 別ブロックで使われるもの → local に格納
   const useCount = computeUseCount(irFunc);
+  // 各 Op がどのブロックで定義されてるか
+  const opDefBlock = new Map<number, number>();
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) opDefBlock.set(op.id, block.id);
+  }
+  // 各 Op がどのブロックで使われてるか
+  const opUseBlocks = new Map<number, Set<number>>();
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      for (const argId of op.args) {
+        if (!opUseBlocks.has(argId)) opUseBlocks.set(argId, new Set());
+        opUseBlocks.get(argId)!.add(block.id);
+      }
+    }
+  }
   const needsLocal = new Set<number>();
   for (const [id, count] of useCount) {
-    if (count > 1 && !opToLocal.has(id)) {
+    if (opToLocal.has(id)) continue;
+    const defBlock = opDefBlock.get(id);
+    const useBlocks = opUseBlocks.get(id);
+    // 複数回使用 or 別ブロックで使用 → local に格納
+    if (count > 1 || (defBlock !== undefined && useBlocks && [...useBlocks].some(b => b !== defBlock))) {
       needsLocal.add(id);
       opToLocal.set(id, nextLocal++);
     }
@@ -522,7 +541,7 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
     return { instance, funcName: irFunc.name };
   } catch (e: any) {
     // Wasm コンパイルエラー → null (フォールバック)
-    // debug: console.error(e.message ?? e);
+    // Wasm コンパイルエラー → フォールバック
     return null;
   }
 }

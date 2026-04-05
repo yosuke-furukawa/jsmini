@@ -360,19 +360,30 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
     const preds = blockEdges.get(blockId)!.predecessors;
     for (const [slot, phi] of phis) {
       phi.inputs = [];
-      let allSame = true;
-      let firstVal: number | undefined;
       for (const predId of preds) {
         const exitLocals = blockExitLocals.get(predId);
         const val = exitLocals ? exitLocals[slot] : undefined;
         if (val !== undefined) {
           phi.inputs.push([predId, val]);
-          if (firstVal === undefined) firstVal = val;
-          else if (val !== firstVal) allSame = false;
         }
       }
-      // 全部同じ値なら Phi 不要 → 空にして後で除去
+      // 自己参照を除いて、全入力が同じ値なら Phi 不要
+      const nonSelfInputs = phi.inputs.filter(([, vid]) => vid !== phi.id);
+      const allSame = nonSelfInputs.length > 0 && nonSelfInputs.every(([, vid]) => vid === nonSelfInputs[0][1]);
       if (allSame || phi.inputs.length < 2) {
+        // Phi を除去: 参照を唯一の値に置き換え
+        const replacement = nonSelfInputs.length > 0 ? nonSelfInputs[0][1] : undefined;
+        if (replacement !== undefined) {
+          // この Phi を参照してる全 Op の引数を置換
+          for (const b of irFunc.blocks) {
+            for (const op of b.ops) {
+              op.args = op.args.map(a => a === phi.id ? replacement : a);
+            }
+            for (const p of b.phis) {
+              p.inputs = p.inputs.map(([bid, vid]) => [bid, vid === phi.id ? replacement : vid]);
+            }
+          }
+        }
         phi.inputs = [];
       }
     }
