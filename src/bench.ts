@@ -31,11 +31,14 @@ const benchmarks = [
     name: "hot function add (10000 calls)",
     source: `
       function add(a, b) { return a + b; }
-      var sum = 0;
-      for (var i = 0; i < 10000; i = i + 1) {
-        sum = sum + add(i, 1);
+      function hotAdd(n) {
+        var sum = 0;
+        for (var i = 0; i < n; i = i + 1) {
+          sum = sum + add(i, 1);
+        }
+        return sum;
       }
-      sum;
+      hotAdd(10000);
     `,
     jitEligible: true,
   },
@@ -43,11 +46,14 @@ const benchmarks = [
     name: "hot function mul (10000 calls)",
     source: `
       function mul(a, b) { return a * b; }
-      var sum = 0;
-      for (var i = 0; i < 10000; i = i + 1) {
-        sum = sum + mul(i, 2);
+      function hotMul(n) {
+        var sum = 0;
+        for (var i = 0; i < n; i = i + 1) {
+          sum = sum + mul(i, 2);
+        }
+        return sum;
       }
-      sum;
+      hotMul(10000);
     `,
     jitEligible: true,
   },
@@ -326,6 +332,12 @@ for (const { name, source, jitEligible } of benchmarks) {
     const jit = bench(() => vmEvaluate(source, { jit: true, jitThreshold: 5 }));
     console.log(`  wasm-jit     : ${jit.avg.toFixed(2)}ms (min: ${jit.min.toFixed(2)}ms) result=${jit.result}`);
     console.log(`  jit vs tw    : ${(tw.avg / jit.avg).toFixed(2)}x`);
+    const irJit = bench(() => vmEvaluate(source, { jit: true, jitThreshold: 5, useIR: true }));
+    if (!irJit.error && irJit.result === tw.result) {
+      console.log(`  ir-jit       : ${irJit.avg.toFixed(2)}ms (min: ${irJit.min.toFixed(2)}ms) result=${irJit.result}`);
+      console.log(`  ir vs tw     : ${(tw.avg / irJit.avg).toFixed(2)}x`);
+      console.log(`  ir vs direct : ${(jit.avg / irJit.avg).toFixed(2)}x`);
+    }
   }
 
   // GC 統計

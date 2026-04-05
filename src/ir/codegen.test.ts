@@ -95,3 +95,54 @@ describe("IR → Wasm codegen", () => {
     assert.equal(wasmF(10), 21);
   });
 });
+
+describe("IR → Wasm codegen — loops", () => {
+  it("for loop sum: sumTo(n)", () => {
+    const func = getFirstFunction("function sumTo(n) { var s=0; for(var i=0;i<n;i++){s=s+i;} return s; }");
+    const ir = buildIR(func);
+    optimize(ir);
+    const compiled = compileIRToWasm(ir);
+    assert.ok(compiled !== null, "should compile loop to wasm");
+    const wasmF = (compiled!.instance.exports as any).sumTo;
+    assert.equal(wasmF(0), 0);
+    assert.equal(wasmF(10), 45);
+    assert.equal(wasmF(100), 4950);
+    assert.equal(wasmF(10000), 49995000);
+  });
+
+  it("nested loop: f(n) = n*n", () => {
+    const func = getFirstFunction("function f(n){var s=0;for(var i=0;i<n;i++)for(var j=0;j<n;j++)s++;return s;}");
+    const ir = buildIR(func);
+    optimize(ir);
+    const compiled = compileIRToWasm(ir);
+    assert.ok(compiled !== null, "should compile nested loop to wasm");
+    const wasmF = (compiled!.instance.exports as any).f;
+    assert.equal(wasmF(0), 0);
+    assert.equal(wasmF(1), 1);
+    assert.equal(wasmF(5), 25);
+    assert.equal(wasmF(10), 100);
+    assert.equal(wasmF(100), 10000);
+  });
+
+  it("loop with Inlining: add(i, 1) inlined", () => {
+    const source = "function add(a,b){return a+b;} function f(n){var s=0;for(var i=0;i<n;i++){s=s+add(i,1);}return s;}";
+    const script = compile(source);
+    const funcs = new Map<string, any>();
+    for (const c of script.constants) {
+      if (typeof c === "object" && c !== null && "bytecode" in (c as any)) {
+        funcs.set((c as any).name, c);
+      }
+    }
+    const func = funcs.get("f")!;
+    const ir = buildIR(func, { knownFuncs: funcs });
+    optimize(ir, { knownFuncs: funcs });
+    const dump = printIR(ir);
+    // Call が消えてるはず
+    assert.ok(!dump.includes("Call("), "add should be inlined (no Call)");
+    const compiled = compileIRToWasm(ir);
+    assert.ok(compiled !== null);
+    const wasmF = (compiled!.instance.exports as any).f;
+    assert.equal(wasmF(10), 55);   // sum(1..10) = 55
+    assert.equal(wasmF(100), 5050);
+  });
+});
