@@ -280,6 +280,67 @@ const benchmarks = [
     `,
     jitEligible: false,
   },
+  // ===== JIT-focused benchmarks (V8/Octane-style patterns) =====
+  {
+    name: "inlining: cube(square(x)) 10K calls",
+    source: `
+      function square(x) { return x * x; }
+      function cube(x) { return x * square(x); }
+      function bench(n) {
+        var sum = 0;
+        for (var i = 0; i < n; i = i + 1) {
+          sum = sum + cube(i % 100);
+        }
+        return sum;
+      }
+      bench(10000);
+    `,
+    jitEligible: true,
+  },
+  {
+    name: "smi arithmetic (10K iterations)",
+    source: `
+      function bench(n) {
+        var sum = 0;
+        for (var i = 0; i < n; i = i + 1) {
+          sum = sum + i * 3 - i * 2 + 1;
+        }
+        return sum;
+      }
+      bench(10000);
+    `,
+    jitEligible: true,
+  },
+  {
+    name: "loop-invariant code motion",
+    source: `
+      function bench(n, multiplier) {
+        var sum = 0;
+        for (var i = 0; i < n; i = i + 1) {
+          sum = sum + i * multiplier + multiplier;
+        }
+        return sum;
+      }
+      var r = 0;
+      for (var j = 0; j < 200; j = j + 1) { r = bench(10000, 3); }
+      r;
+    `,
+    jitEligible: true,
+  },
+  {
+    name: "i32 overflow → deopt (IR gives wrong result)",
+    source: `
+      function addUp(n) {
+        var sum = 0;
+        for (var i = 0; i < n; i = i + 1) {
+          sum = sum + i * i;
+        }
+        return sum;
+      }
+      addUp(50000);
+    `,
+    jitEligible: true,
+  },
 ];
 
 function bench(fn: () => unknown, warmup = 5, runs = 10): { result: unknown; avg: number; min: number; error?: string } {
