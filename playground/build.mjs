@@ -20,6 +20,11 @@ export { disassemble } from "../src/vm/bytecode.ts";
 // jsmini engine - Wasm JIT
 export { disassembleToWat } from "../src/jit/wasm-compiler.ts";
 
+// jsmini engine - IR
+export { buildIR } from "../src/ir/builder.ts";
+export { printIR } from "../src/ir/printer.ts";
+export { optimize } from "../src/ir/optimize.ts";
+
 // CodeMirror
 export { basicSetup } from "codemirror";
 export { javascript } from "@codemirror/lang-javascript";

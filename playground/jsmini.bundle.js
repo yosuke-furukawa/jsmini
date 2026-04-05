@@ -30,6 +30,7 @@ var jsmini = (() => {
     StateEffect: () => StateEffect,
     StateField: () => StateField,
     basicSetup: () => basicSetup,
+    buildIR: () => buildIR,
     compile: () => compile,
     disassemble: () => disassemble,
     disassembleToWat: () => disassembleToWat,
@@ -37,7 +38,9 @@ var jsmini = (() => {
     javascript: () => javascript,
     keymap: () => keymap,
     oneDark: () => oneDark,
+    optimize: () => optimize,
     parse: () => parse,
+    printIR: () => printIR,
     tokenize: () => tokenize,
     vmEvaluate: () => vmEvaluate
   });
@@ -6153,13 +6156,22 @@ var jsmini = (() => {
           }
         }
       }
-      const result = compileMultiSync(relatedFuncs, "i32");
-      if (!result) {
-        frame.__osrDone = true;
-        return null;
+      let wasmFn;
+      if (this.jit?.useIR) {
+        const irResult = this.jit.tryOSRViaIR(func, relatedFuncs);
+        if (irResult) {
+          wasmFn = irResult;
+        }
       }
-      const wasmFn = result.get(func.name);
-      if (!wasmFn) return null;
+      if (!wasmFn) {
+        const result = compileMultiSync(relatedFuncs, "i32");
+        if (!result) {
+          frame.__osrDone = true;
+          return null;
+        }
+        wasmFn = result.get(func.name);
+        if (!wasmFn) return null;
+      }
       const args = [];
       for (let i = 0; i < func.paramCount; i++) {
         const val = frame.locals[i];
@@ -7478,6 +7490,1158 @@ var jsmini = (() => {
     return t2 === "smi_array" || t2 === "double_array" || t2 === "array";
   }
 
+  // src/ir/types.ts
+  function createBlock(id2) {
+    return { id: id2, ops: [], phis: [], successors: [], predecessors: [] };
+  }
+  function createOp(func, opcode, args, type) {
+    const op = { id: func.nextOpId++, opcode, args, type };
+    return op;
+  }
+  function createConst(func, value, type = "i32") {
+    const op = createOp(func, "Const", [], type);
+    op.value = value;
+    return op;
+  }
+  function createParam(func, index, type = "any") {
+    const op = createOp(func, "Param", [], type);
+    op.index = index;
+    return op;
+  }
+  function createPhi(func, type = "any") {
+    const op = createOp(func, "Phi", [], type);
+    op.inputs = [];
+    return op;
+  }
+  function createIRFunction(name2, paramCount) {
+    return { name: name2, paramCount, blocks: [], nextOpId: 0 };
+  }
+
+  // src/ir/builder.ts
+  function findBlockBoundaries(bytecode) {
+    const boundaries = /* @__PURE__ */ new Set();
+    boundaries.add(0);
+    for (let pc = 0; pc < bytecode.length; pc++) {
+      const instr = bytecode[pc];
+      if (instr.op === "Jump" || instr.op === "JumpIfFalse" || instr.op === "JumpIfTrue") {
+        const target = instr.operand;
+        boundaries.add(target);
+        boundaries.add(pc + 1);
+      }
+      if (instr.op === "Return") {
+        if (pc + 1 < bytecode.length) {
+          boundaries.add(pc + 1);
+        }
+      }
+    }
+    return boundaries;
+  }
+  function buildPCToBlockMap(boundaries, bcLength) {
+    const sorted = [...boundaries].sort((a, b) => a - b);
+    const map = /* @__PURE__ */ new Map();
+    for (let i = 0; i < sorted.length; i++) {
+      map.set(sorted[i], i);
+    }
+    return map;
+  }
+  function cloneStack(stack) {
+    return [...stack];
+  }
+  function buildIR(func, options) {
+    const bytecode = func.bytecode;
+    const constants = func.constants;
+    const feedback = options?.feedback;
+    const knownFuncs = options?.knownFuncs;
+    const wasmArgTypes = [];
+    if (feedback) {
+      const types2 = feedback.getWasmArgTypes(func);
+      if (types2) {
+        for (let i = 0; i < func.paramCount; i++) {
+          wasmArgTypes.push(i < types2.length ? types2[i] : null);
+        }
+      }
+    }
+    const irFunc = createIRFunction(func.name, func.paramCount);
+    const boundaries = findBlockBoundaries(bytecode);
+    const pcToBlock = buildPCToBlockMap(boundaries, bytecode.length);
+    const sortedBoundaries = [...boundaries].sort((a, b) => a - b);
+    const blocks = /* @__PURE__ */ new Map();
+    for (let i = 0; i < sortedBoundaries.length; i++) {
+      const block = createBlock(i);
+      blocks.set(i, block);
+      irFunc.blocks.push(block);
+    }
+    const paramOps = [];
+    const guardOps = [];
+    for (let i = 0; i < func.paramCount; i++) {
+      const paramType = wasmArgTypes[i] === "f64" ? "f64" : wasmArgTypes[i] === "i32" ? "i32" : "any";
+      const param = createParam(irFunc, i, paramType);
+      paramOps.push(param);
+      if (paramType !== "any") {
+        const guard = createOp(irFunc, "TypeGuard", [param.id], paramType);
+        guard.guardType = paramType;
+        guardOps.push(guard);
+      }
+    }
+    const localCount = func.localCount;
+    const opById = /* @__PURE__ */ new Map();
+    function registerOp(op) {
+      opById.set(op.id, op);
+      return op;
+    }
+    function inferBinType(leftId, rightId) {
+      const l = opById.get(leftId), r = opById.get(rightId);
+      if (l?.type === "f64" || r?.type === "f64") return "f64";
+      if (l?.type === "i32" && r?.type === "i32") return "i32";
+      return "i32";
+    }
+    const blockEdges = /* @__PURE__ */ new Map();
+    for (const [, b] of blocks) blockEdges.set(b.id, { successors: [], predecessors: [] });
+    for (let blockId = 0; blockId < sortedBoundaries.length; blockId++) {
+      const startPC = sortedBoundaries[blockId];
+      const endPC = blockId + 1 < sortedBoundaries.length ? sortedBoundaries[blockId + 1] : bytecode.length;
+      for (let pc = startPC; pc < endPC; pc++) {
+        const instr = bytecode[pc];
+        if (instr.op === "Jump") {
+          const t2 = pcToBlock.get(instr.operand);
+          blockEdges.get(blockId).successors.push(t2);
+          blockEdges.get(t2).predecessors.push(blockId);
+        } else if (instr.op === "JumpIfFalse" || instr.op === "JumpIfTrue") {
+          const t2 = pcToBlock.get(instr.operand);
+          const f = pcToBlock.get(pc + 1);
+          if (instr.op === "JumpIfFalse") {
+            blockEdges.get(blockId).successors.push(f, t2);
+          } else {
+            blockEdges.get(blockId).successors.push(t2, f);
+          }
+          blockEdges.get(t2).predecessors.push(blockId);
+          blockEdges.get(f).predecessors.push(blockId);
+        } else if (instr.op === "Return") {
+        }
+      }
+      const lastInstr = bytecode[endPC - 1];
+      if (lastInstr && lastInstr.op !== "Jump" && lastInstr.op !== "JumpIfFalse" && lastInstr.op !== "JumpIfTrue" && lastInstr.op !== "Return") {
+        if (blockId + 1 < sortedBoundaries.length) {
+          blockEdges.get(blockId).successors.push(blockId + 1);
+          blockEdges.get(blockId + 1).predecessors.push(blockId);
+        }
+      }
+    }
+    for (const [id2, edges] of blockEdges) {
+      blocks.get(id2).successors = edges.successors;
+      blocks.get(id2).predecessors = edges.predecessors;
+    }
+    const phiMap = /* @__PURE__ */ new Map();
+    for (const [id2, edges] of blockEdges) {
+      if (edges.predecessors.length >= 2) {
+        const phis = /* @__PURE__ */ new Map();
+        for (let slot = 0; slot < localCount; slot++) {
+          const phi = createPhi(irFunc, "any");
+          registerOp(phi);
+          phis.set(slot, phi);
+          blocks.get(id2).phis.push(phi);
+        }
+        phiMap.set(id2, phis);
+      }
+    }
+    const blockEntryStacks = /* @__PURE__ */ new Map();
+    const blockExitLocals = /* @__PURE__ */ new Map();
+    const initLocals = new Array(localCount).fill(void 0);
+    for (let i = 0; i < func.paramCount; i++) initLocals[i] = paramOps[i].id;
+    const blockEntryLocals = /* @__PURE__ */ new Map();
+    blockEntryLocals.set(0, initLocals);
+    blockEntryStacks.set(0, []);
+    const visited = /* @__PURE__ */ new Set();
+    const queue = [0];
+    while (queue.length > 0) {
+      const blockId = queue.shift();
+      if (visited.has(blockId)) continue;
+      visited.add(blockId);
+      const block = blocks.get(blockId);
+      const startPC = sortedBoundaries[blockId];
+      const endPC = blockId + 1 < sortedBoundaries.length ? sortedBoundaries[blockId + 1] : bytecode.length;
+      let locals;
+      if (phiMap.has(blockId)) {
+        locals = [...blockEntryLocals.get(blockId) ?? new Array(localCount).fill(void 0)];
+        const phis = phiMap.get(blockId);
+        for (const [slot, phi] of phis) {
+          if (locals[slot] !== void 0) {
+            locals[slot] = phi.id;
+          }
+        }
+      } else {
+        locals = [...blockEntryLocals.get(blockId) ?? new Array(localCount).fill(void 0)];
+      }
+      let stack = cloneStack(blockEntryStacks.get(blockId) ?? []);
+      if (blockId === 0) {
+        for (const p of paramOps) {
+          registerOp(p);
+          block.ops.push(p);
+        }
+        for (const g of guardOps) {
+          registerOp(g);
+          block.ops.push(g);
+        }
+      }
+      for (let pc = startPC; pc < endPC; pc++) {
+        const instr = bytecode[pc];
+        switch (instr.op) {
+          case "LdaConst": {
+            const val = constants[instr.operand];
+            if (typeof val === "number") {
+              const op = registerOp(createConst(irFunc, val, Number.isInteger(val) ? "i32" : "f64"));
+              block.ops.push(op);
+              stack.push(op.id);
+            } else {
+              const op = registerOp(createOp(irFunc, "Const", [], "any"));
+              op.value = val;
+              block.ops.push(op);
+              stack.push(op.id);
+            }
+            break;
+          }
+          case "LdaUndefined": {
+            const op = registerOp(createOp(irFunc, "Undefined", [], "any"));
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "LdaNull": {
+            const op = registerOp(createConst(irFunc, 0, "any"));
+            op.value = null;
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "LdaTrue": {
+            const op = registerOp(createConst(irFunc, 1, "bool"));
+            op.value = true;
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "LdaFalse": {
+            const op = registerOp(createConst(irFunc, 0, "bool"));
+            op.value = false;
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "LdaLocal": {
+            const slot = instr.operand;
+            const valId = locals[slot];
+            if (valId !== void 0) {
+              stack.push(valId);
+            } else {
+              const op = registerOp(createOp(irFunc, "Undefined", [], "any"));
+              block.ops.push(op);
+              stack.push(op.id);
+            }
+            break;
+          }
+          case "StaLocal": {
+            locals[instr.operand] = stack[stack.length - 1];
+            break;
+          }
+          case "Add":
+          case "Sub":
+          case "Mul":
+          case "Div":
+          case "Mod": {
+            const r = stack.pop(), l = stack.pop();
+            const op = registerOp(createOp(irFunc, instr.op, [l, r], inferBinType(l, r)));
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "BitAnd":
+          case "BitOr":
+          case "BitXor":
+          case "ShiftLeft":
+          case "ShiftRight": {
+            const r = stack.pop(), l = stack.pop();
+            const op = registerOp(createOp(irFunc, instr.op, [l, r], "i32"));
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "Negate":
+          case "BitNot":
+          case "LogicalNot": {
+            const a = stack.pop();
+            const opc = instr.op === "LogicalNot" ? "Not" : instr.op;
+            const op = registerOp(createOp(irFunc, opc, [a], instr.op === "LogicalNot" ? "bool" : "i32"));
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "LessThan":
+          case "GreaterThan":
+          case "LessEqual":
+          case "GreaterEqual":
+          case "Equal":
+          case "StrictEqual":
+          case "NotEqual":
+          case "StrictNotEqual": {
+            const r = stack.pop(), l = stack.pop();
+            const op = registerOp(createOp(irFunc, instr.op, [l, r], "bool"));
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "Increment": {
+            const a = stack.pop();
+            const one = registerOp(createConst(irFunc, 1));
+            block.ops.push(one);
+            const op = registerOp(createOp(irFunc, "Add", [a, one.id], "i32"));
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "Decrement": {
+            const a = stack.pop();
+            const one = registerOp(createConst(irFunc, 1));
+            block.ops.push(one);
+            const op = registerOp(createOp(irFunc, "Sub", [a, one.id], "i32"));
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "Pop":
+            stack.pop();
+            break;
+          case "Dup":
+            stack.push(stack[stack.length - 1]);
+            break;
+          case "Return": {
+            const val = stack.pop();
+            block.ops.push(registerOp(createOp(irFunc, "Return", [val], "any")));
+            break;
+          }
+          case "Jump": {
+            block.ops.push(registerOp(createOp(irFunc, "Jump", [], "any")));
+            const t2 = pcToBlock.get(instr.operand);
+            propagate(t2, locals, stack);
+            if (!visited.has(t2)) queue.push(t2);
+            break;
+          }
+          case "JumpIfFalse":
+          case "JumpIfTrue": {
+            const cond = stack.pop();
+            block.ops.push(registerOp(createOp(irFunc, "Branch", [cond], "any")));
+            const t2 = pcToBlock.get(instr.operand), f = pcToBlock.get(pc + 1);
+            propagate(t2, locals, stack);
+            propagate(f, locals, stack);
+            if (!visited.has(t2)) queue.push(t2);
+            if (!visited.has(f)) queue.push(f);
+            break;
+          }
+          case "LdaGlobal": {
+            const name2 = constants[instr.operand];
+            if (knownFuncs?.has(name2)) {
+              const op = registerOp(createOp(irFunc, "Const", [], "any"));
+              op.value = name2;
+              op.calleeName = name2;
+              block.ops.push(op);
+              stack.push(op.id);
+            } else {
+              const op = registerOp(createOp(irFunc, "LoadGlobal", [], "any"));
+              op.globalName = name2;
+              block.ops.push(op);
+              stack.push(op.id);
+            }
+            break;
+          }
+          case "StaGlobal": {
+            const name2 = constants[instr.operand];
+            const val = stack[stack.length - 1];
+            const op = registerOp(createOp(irFunc, "StoreGlobal", [val], "any"));
+            op.globalName = name2;
+            block.ops.push(op);
+            break;
+          }
+          case "Call": {
+            const argc = instr.operand;
+            const calleeId = stack.pop();
+            const args = [];
+            for (let j = 0; j < argc; j++) args.unshift(stack.pop());
+            const calleeOp = opById.get(calleeId);
+            const op = registerOp(createOp(irFunc, "Call", [calleeId, ...args], "any"));
+            if (calleeOp?.calleeName) op.calleeName = calleeOp.calleeName;
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          default:
+            break;
+        }
+      }
+      blockExitLocals.set(blockId, [...locals]);
+      const lastOp = block.ops[block.ops.length - 1];
+      if (!lastOp || lastOp.opcode !== "Return" && lastOp.opcode !== "Jump" && lastOp.opcode !== "Branch") {
+        if (blockId + 1 < sortedBoundaries.length) {
+          block.ops.push(registerOp(createOp(irFunc, "Jump", [], "any")));
+          propagate(blockId + 1, locals, stack);
+          if (!visited.has(blockId + 1)) queue.push(blockId + 1);
+        }
+      }
+    }
+    for (const [blockId, phis] of phiMap) {
+      const preds = blockEdges.get(blockId).predecessors;
+      for (const [slot, phi] of phis) {
+        phi.inputs = [];
+        let allSame = true;
+        let firstVal;
+        for (const predId of preds) {
+          const exitLocals = blockExitLocals.get(predId);
+          const val = exitLocals ? exitLocals[slot] : void 0;
+          if (val !== void 0) {
+            phi.inputs.push([predId, val]);
+            if (firstVal === void 0) firstVal = val;
+            else if (val !== firstVal) allSame = false;
+          }
+        }
+        if (allSame || phi.inputs.length < 2) {
+          phi.inputs = [];
+        }
+      }
+    }
+    for (const block of irFunc.blocks) {
+      block.phis = block.phis.filter((p) => p.inputs.length >= 2);
+    }
+    return irFunc;
+    function propagate(targetBlockId, locals, stack) {
+      if (!blockEntryLocals.has(targetBlockId)) {
+        blockEntryLocals.set(targetBlockId, [...locals]);
+        blockEntryStacks.set(targetBlockId, cloneStack(stack));
+      }
+    }
+  }
+
+  // src/ir/inline.ts
+  function inlinePass(irFunc, options) {
+    const { knownFuncs, buildIROptions } = options;
+    const maxSize = options.maxInlineSize ?? 30;
+    let changed = false;
+    for (const block of irFunc.blocks) {
+      for (let i = 0; i < block.ops.length; i++) {
+        const op = block.ops[i];
+        if (op.opcode !== "Call") continue;
+        if (!op.calleeName) continue;
+        if (op.calleeName === irFunc.name) continue;
+        const calleeBC = knownFuncs.get(op.calleeName);
+        if (!calleeBC) continue;
+        if (calleeBC.bytecode.length > maxSize) continue;
+        const calleeIR = buildIR(calleeBC, buildIROptions);
+        const result = performInline(irFunc, block, i, op, calleeIR);
+        if (result) {
+          changed = true;
+          i--;
+        }
+      }
+    }
+    return changed;
+  }
+  function performInline(callerFunc, callerBlock, callOpIndex, callOp, calleeIR) {
+    const callArgs = callOp.args.slice(1);
+    const idMap = /* @__PURE__ */ new Map();
+    const calleeBlocks = calleeIR.blocks.filter((b) => b.ops.length > 0);
+    if (calleeBlocks.length !== 1) return false;
+    const calleeBlock = calleeBlocks[0];
+    const returnOp = calleeBlock.ops.find((op) => op.opcode === "Return");
+    if (!returnOp) return false;
+    const newOps = [];
+    for (const op of calleeBlock.ops) {
+      if (op.opcode === "Param") {
+        const argIdx = op.index ?? 0;
+        if (argIdx < callArgs.length) {
+          idMap.set(op.id, callArgs[argIdx]);
+        }
+        continue;
+      }
+      if (op.opcode === "TypeGuard") {
+        const mappedArg = idMap.get(op.args[0]) ?? op.args[0];
+        idMap.set(op.id, mappedArg);
+        continue;
+      }
+      if (op.opcode === "Return") {
+        const returnValId = idMap.get(op.args[0]) ?? op.args[0];
+        idMap.set(callOp.id, returnValId);
+        continue;
+      }
+      const newId = callerFunc.nextOpId++;
+      idMap.set(op.id, newId);
+      const newArgs = op.args.map((argId) => idMap.get(argId) ?? argId);
+      const newOp = {
+        id: newId,
+        opcode: op.opcode,
+        args: newArgs,
+        type: op.type,
+        value: op.value,
+        index: op.index,
+        guardType: op.guardType
+      };
+      newOps.push(newOp);
+    }
+    const calleeConstIndex = callerBlock.ops.findIndex(
+      (op) => op.id === callOp.args[0] && op.opcode === "Const" && op.calleeName
+    );
+    const opsToRemove = /* @__PURE__ */ new Set();
+    opsToRemove.add(callOp.id);
+    if (calleeConstIndex >= 0) opsToRemove.add(callerBlock.ops[calleeConstIndex].id);
+    const newBlockOps = [];
+    for (const op of callerBlock.ops) {
+      if (opsToRemove.has(op.id)) {
+        if (op.id === callOp.id) {
+          newBlockOps.push(...newOps);
+          const resultId = idMap.get(callOp.id);
+          if (resultId !== void 0) {
+            for (const laterOp of callerBlock.ops) {
+              laterOp.args = laterOp.args.map((a) => a === callOp.id ? resultId : a);
+            }
+            for (const newOp of newBlockOps) {
+              newOp.args = newOp.args.map((a) => a === callOp.id ? resultId : a);
+            }
+          }
+        }
+        continue;
+      }
+      newBlockOps.push(op);
+    }
+    callerBlock.ops = newBlockOps;
+    return true;
+  }
+
+  // src/ir/optimize.ts
+  function constantFolding(func) {
+    let changed = false;
+    const opById = /* @__PURE__ */ new Map();
+    for (const block of func.blocks) {
+      for (const phi of block.phis) opById.set(phi.id, phi);
+      for (const op of block.ops) opById.set(op.id, op);
+    }
+    for (const block of func.blocks) {
+      for (let i = 0; i < block.ops.length; i++) {
+        const op = block.ops[i];
+        const folded = tryFold(op, opById);
+        if (folded !== null) {
+          op.opcode = "Const";
+          op.value = folded;
+          op.args = [];
+          op.type = typeof folded === "boolean" ? "bool" : Number.isInteger(folded) ? "i32" : "f64";
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+  function tryFold(op, opById) {
+    if (op.args.length === 2) {
+      const left = opById.get(op.args[0]);
+      const right = opById.get(op.args[1]);
+      if (!left || !right) return null;
+      if (left.opcode !== "Const" || right.opcode !== "Const") return null;
+      if (left.value === void 0 || right.value === void 0) return null;
+      if (typeof left.value !== "number" || typeof right.value !== "number") return null;
+      const l = left.value;
+      const r = right.value;
+      switch (op.opcode) {
+        case "Add":
+          return l + r;
+        case "Sub":
+          return l - r;
+        case "Mul":
+          return l * r;
+        case "Div":
+          return r !== 0 ? l / r : null;
+        case "Mod":
+          return r !== 0 ? l % r : null;
+        case "BitAnd":
+          return l & r;
+        case "BitOr":
+          return l | r;
+        case "BitXor":
+          return l ^ r;
+        case "ShiftLeft":
+          return l << r;
+        case "ShiftRight":
+          return l >> r;
+        case "LessThan":
+          return l < r;
+        case "LessEqual":
+          return l <= r;
+        case "GreaterThan":
+          return l > r;
+        case "GreaterEqual":
+          return l >= r;
+        case "Equal":
+        case "StrictEqual":
+          return l === r;
+        case "NotEqual":
+        case "StrictNotEqual":
+          return l !== r;
+        default:
+          return null;
+      }
+    }
+    if (op.args.length === 1) {
+      const arg = opById.get(op.args[0]);
+      if (!arg || arg.opcode !== "Const" || arg.value === void 0) return null;
+      if (typeof arg.value !== "number") return null;
+      switch (op.opcode) {
+        case "Negate":
+          return -arg.value;
+        case "BitNot":
+          return ~arg.value;
+        case "Not":
+          return !arg.value;
+        default:
+          return null;
+      }
+    }
+    return null;
+  }
+  function deadCodeElimination(func) {
+    let changed = false;
+    const useCount = /* @__PURE__ */ new Map();
+    for (const block of func.blocks) {
+      for (const phi of block.phis) {
+        for (const [, valId] of phi.inputs) {
+          useCount.set(valId, (useCount.get(valId) ?? 0) + 1);
+        }
+      }
+      for (const op of block.ops) {
+        for (const argId of op.args) {
+          useCount.set(argId, (useCount.get(argId) ?? 0) + 1);
+        }
+      }
+    }
+    const controlOps = /* @__PURE__ */ new Set(["Return", "Branch", "Jump"]);
+    for (const block of func.blocks) {
+      const newOps = [];
+      for (const op of block.ops) {
+        if (controlOps.has(op.opcode)) {
+          newOps.push(op);
+          continue;
+        }
+        if ((useCount.get(op.id) ?? 0) > 0) {
+          newOps.push(op);
+        } else {
+          changed = true;
+        }
+      }
+      block.ops = newOps;
+    }
+    return changed;
+  }
+  function optimize(func, inlineOptions) {
+    for (let iter = 0; iter < 10; iter++) {
+      let changed = false;
+      if (inlineOptions) {
+        changed = inlinePass(func, inlineOptions) || changed;
+      }
+      changed = constantFolding(func) || changed;
+      changed = deadCodeElimination(func) || changed;
+      if (!changed) break;
+    }
+  }
+
+  // src/ir/loop-analysis.ts
+  function findBackEdges(irFunc) {
+    const backEdges = /* @__PURE__ */ new Set();
+    const visited = /* @__PURE__ */ new Set();
+    const inStack = /* @__PURE__ */ new Set();
+    const blockMap = /* @__PURE__ */ new Map();
+    for (const b of irFunc.blocks) blockMap.set(b.id, b);
+    function dfs(blockId) {
+      visited.add(blockId);
+      inStack.add(blockId);
+      const block = blockMap.get(blockId);
+      if (!block) return;
+      for (const succId of block.successors) {
+        if (inStack.has(succId)) {
+          backEdges.add(`${blockId}\u2192${succId}`);
+        } else if (!visited.has(succId)) {
+          dfs(succId);
+        }
+      }
+      inStack.delete(blockId);
+    }
+    if (irFunc.blocks.length > 0) {
+      dfs(irFunc.blocks[0].id);
+    }
+    return backEdges;
+  }
+  function topoSort(irFunc, _backEdges) {
+    return irFunc.blocks.filter((b) => b.ops.length > 0 || b.phis.length > 0).map((b) => b.id).sort((a, b) => a - b);
+  }
+  function findLoops(irFunc, backEdges) {
+    const loops = [];
+    const blockMap = /* @__PURE__ */ new Map();
+    for (const b of irFunc.blocks) blockMap.set(b.id, b);
+    for (const edge of backEdges) {
+      const [fromStr, toStr] = edge.split("\u2192");
+      const backFrom = parseInt(fromStr);
+      const header = parseInt(toStr);
+      const body = /* @__PURE__ */ new Set();
+      body.add(header);
+      body.add(backFrom);
+      const queue = [backFrom];
+      while (queue.length > 0) {
+        const bid = queue.shift();
+        const block = blockMap.get(bid);
+        if (!block) continue;
+        for (const predId of block.predecessors) {
+          if (!body.has(predId) && predId !== header) {
+            body.add(predId);
+            queue.push(predId);
+          }
+        }
+      }
+      const headerBlock = blockMap.get(header);
+      let exitBlock = -1;
+      if (headerBlock) {
+        for (const succId of headerBlock.successors) {
+          if (!body.has(succId)) {
+            exitBlock = succId;
+            break;
+          }
+        }
+      }
+      loops.push({ header, body, backEdgeFrom: backFrom, exitBlock });
+    }
+    return loops;
+  }
+  function analyzeCFG(irFunc) {
+    const backEdges = findBackEdges(irFunc);
+    const topoOrder = topoSort(irFunc, backEdges);
+    const loops = findLoops(irFunc, backEdges);
+    const loopHeaders = new Set(loops.map((l) => l.header));
+    return { loops, backEdges, topoOrder, loopHeaders };
+  }
+
+  // src/ir/codegen.ts
+  var WASM_VOID = 64;
+  function codegenIR(irFunc) {
+    const body = [];
+    const opToLocal = /* @__PURE__ */ new Map();
+    let nextLocal = irFunc.paramCount;
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "Param" && op.index !== void 0) {
+          opToLocal.set(op.id, op.index);
+        }
+      }
+    }
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) {
+        opToLocal.set(phi.id, nextLocal++);
+      }
+    }
+    const globalToLocal = /* @__PURE__ */ new Map();
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if ((op.opcode === "LoadGlobal" || op.opcode === "StoreGlobal") && op.globalName) {
+          if (!globalToLocal.has(op.globalName)) {
+            globalToLocal.set(op.globalName, nextLocal++);
+          }
+        }
+      }
+    }
+    const useCount = computeUseCount(irFunc);
+    const needsLocal = /* @__PURE__ */ new Set();
+    for (const [id2, count] of useCount) {
+      if (count > 1 && !opToLocal.has(id2)) {
+        needsLocal.add(id2);
+        opToLocal.set(id2, nextLocal++);
+      }
+    }
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) {
+        for (const [, valueId] of phi.inputs) {
+          if (!opToLocal.has(valueId)) {
+            needsLocal.add(valueId);
+            opToLocal.set(valueId, nextLocal++);
+          }
+        }
+      }
+    }
+    const extraLocals = nextLocal - irFunc.paramCount;
+    const opById = /* @__PURE__ */ new Map();
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) opById.set(phi.id, phi);
+      for (const op of block.ops) opById.set(op.id, op);
+    }
+    const blockMap = /* @__PURE__ */ new Map();
+    for (const b of irFunc.blocks) blockMap.set(b.id, b);
+    const cfg = analyzeCFG(irFunc);
+    const phiWrites = /* @__PURE__ */ new Map();
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) {
+        const phiLocal = opToLocal.get(phi.id);
+        if (phiLocal === void 0) continue;
+        for (const [predId, valueId] of phi.inputs) {
+          if (!phiWrites.has(predId)) phiWrites.set(predId, []);
+          phiWrites.get(predId).push({ phiLocal, valueId });
+        }
+      }
+    }
+    const controlStack = [];
+    for (const blockId of cfg.topoOrder) {
+      const block = blockMap.get(blockId);
+      if (!block) continue;
+      const loopInfo = cfg.loops.find((l) => l.header === blockId);
+      if (loopInfo) {
+        body.push(WASM_OP.block, WASM_VOID);
+        controlStack.push({ kind: "block", targetBlockId: loopInfo.exitBlock });
+        body.push(WASM_OP.loop, WASM_VOID);
+        controlStack.push({ kind: "loop", targetBlockId: blockId });
+      }
+      for (const op of block.ops) {
+        if (op.opcode === "Branch") {
+          emitLoadValue(op.args[0], body, opToLocal);
+          if (loopInfo) {
+            body.push(WASM_OP.i32_eqz);
+            const exitDepth = controlStack.length - 1 - controlStack.findLastIndex(
+              (e) => e.kind === "block" && e.targetBlockId === loopInfo.exitBlock
+            );
+            body.push(WASM_OP.br_if, exitDepth);
+          } else {
+            body.push(WASM_OP.br_if, 0);
+          }
+        } else if (op.opcode === "Jump") {
+          const jumpTarget = block.successors[0];
+          const writes = phiWrites.get(blockId);
+          if (writes) {
+            for (const { phiLocal, valueId } of writes) {
+              emitValueOrConst(valueId, body, opToLocal, opById);
+              body.push(WASM_OP.local_set, phiLocal);
+            }
+          }
+          if (jumpTarget !== void 0 && cfg.backEdges.has(`${blockId}\u2192${jumpTarget}`)) {
+            const loopDepth = controlStack.length - 1 - controlStack.findLastIndex(
+              (e) => e.kind === "loop" && e.targetBlockId === jumpTarget
+            );
+            body.push(WASM_OP.br, loopDepth);
+          }
+        } else if (op.opcode === "Return") {
+          emitLoadValue(op.args[0], body, opToLocal);
+          body.push(WASM_OP.return);
+        } else {
+          emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], /* @__PURE__ */ new Set(), opById, globalToLocal);
+        }
+      }
+      for (const loop of cfg.loops) {
+        const lastBodyBlock = Math.max(...[...loop.body]);
+        if (blockId === lastBodyBlock) {
+          body.push(WASM_OP.end);
+          controlStack.pop();
+          body.push(WASM_OP.end);
+          controlStack.pop();
+        }
+      }
+    }
+    body.push(WASM_OP.end);
+    const initCode = [];
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) {
+        const phiLocal = opToLocal.get(phi.id);
+        if (phiLocal === void 0) continue;
+        const entryInput = phi.inputs.find(([predId]) => predId === 0);
+        if (entryInput) {
+          const [, valueId] = entryInput;
+          emitValueOrConst(valueId, initCode, opToLocal, opById);
+          initCode.push(WASM_OP.local_set, phiLocal);
+        }
+      }
+    }
+    return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount };
+  }
+  function emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById, globalToLocal = /* @__PURE__ */ new Map()) {
+    switch (op.opcode) {
+      case "Const": {
+        if (op.type === "f64") {
+          body.push(WASM_OP.f64_const, ...f64ToBytes(op.value));
+        } else if (op.type === "bool") {
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
+        } else {
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value));
+        }
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "Param": {
+        const local = opToLocal.get(op.id);
+        if (local !== void 0) {
+          body.push(WASM_OP.local_get, local);
+          maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        }
+        break;
+      }
+      case "Undefined": {
+        body.push(WASM_OP.i32_const, ...i32ToLEB128(0));
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "LoadGlobal": {
+        const gLocal = globalToLocal.get(op.globalName);
+        if (gLocal !== void 0) {
+          body.push(WASM_OP.local_get, gLocal);
+          maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        }
+        break;
+      }
+      case "StoreGlobal": {
+        const gLocal = globalToLocal.get(op.globalName);
+        if (gLocal !== void 0) {
+          emitLoadValue(op.args[0], body, opToLocal);
+          body.push(WASM_OP.local_set, gLocal);
+        }
+        break;
+      }
+      case "TypeGuard": {
+        emitLoadValue(op.args[0], body, opToLocal);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      // 2引数算術
+      case "Add":
+      case "Sub":
+      case "Mul":
+      case "Div":
+      case "Mod":
+      case "BitAnd":
+      case "BitOr":
+      case "BitXor":
+      case "ShiftLeft":
+      case "ShiftRight": {
+        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[1], body, opToLocal);
+        body.push(getWasmBinOp(op.opcode, op.type));
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      // 比較
+      case "LessThan":
+      case "LessEqual":
+      case "GreaterThan":
+      case "GreaterEqual":
+      case "Equal":
+      case "StrictEqual":
+      case "NotEqual":
+      case "StrictNotEqual": {
+        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[1], body, opToLocal);
+        const argOp = opById.get(op.args[0]);
+        body.push(getWasmCmpOp(op.opcode, argOp?.type ?? "i32"));
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      // 単項
+      case "Negate": {
+        const argOp = opById.get(op.args[0]);
+        if (argOp?.type === "f64") {
+          emitLoadValue(op.args[0], body, opToLocal);
+          body.push(WASM_OP.f64_neg);
+        } else {
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(0));
+          emitLoadValue(op.args[0], body, opToLocal);
+          body.push(WASM_OP.i32_sub);
+        }
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "BitNot": {
+        emitLoadValue(op.args[0], body, opToLocal);
+        body.push(WASM_OP.i32_const, ...i32ToLEB128(-1));
+        body.push(115);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "Not": {
+        emitLoadValue(op.args[0], body, opToLocal);
+        body.push(WASM_OP.i32_eqz);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      // 制御フロー
+      case "Return": {
+        emitLoadValue(op.args[0], body, opToLocal);
+        body.push(WASM_OP.return);
+        break;
+      }
+      case "Branch": {
+        emitLoadValue(op.args[0], body, opToLocal);
+        body.push(WASM_OP.br_if, 0);
+        break;
+      }
+      case "Jump": {
+        if (activeLoops.length > 0) {
+          body.push(WASM_OP.br, 0);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  function emitLoadValue(opId, body, opToLocal) {
+    const local = opToLocal.get(opId);
+    if (local !== void 0) {
+      body.push(WASM_OP.local_get, local);
+    }
+  }
+  function emitValueOrConst(opId, body, opToLocal, opById) {
+    const local = opToLocal.get(opId);
+    if (local !== void 0) {
+      body.push(WASM_OP.local_get, local);
+      return;
+    }
+    const op = opById.get(opId);
+    if (op?.opcode === "Const") {
+      if (op.type === "f64") {
+        body.push(WASM_OP.f64_const, ...f64ToBytes(op.value));
+      } else {
+        body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value));
+      }
+      return;
+    }
+    if (op?.opcode === "Param" && op.index !== void 0) {
+      body.push(WASM_OP.local_get, op.index);
+      return;
+    }
+    body.push(WASM_OP.i32_const, 0);
+  }
+  function maybeStoreLocal(opId, body, opToLocal, needsLocal) {
+    if (needsLocal.has(opId)) {
+      const local = opToLocal.get(opId);
+      body.push(WASM_OP.local_tee, local);
+    }
+  }
+  function computeUseCount(irFunc) {
+    const counts = /* @__PURE__ */ new Map();
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) {
+        for (const [, valId] of phi.inputs) {
+          counts.set(valId, (counts.get(valId) ?? 0) + 1);
+        }
+      }
+      for (const op of block.ops) {
+        for (const argId of op.args) {
+          counts.set(argId, (counts.get(argId) ?? 0) + 1);
+        }
+      }
+    }
+    return counts;
+  }
+  function getWasmBinOp(opcode, type) {
+    const isF64 = type === "f64";
+    switch (opcode) {
+      case "Add":
+        return isF64 ? WASM_OP.f64_add : WASM_OP.i32_add;
+      case "Sub":
+        return isF64 ? WASM_OP.f64_sub : WASM_OP.i32_sub;
+      case "Mul":
+        return isF64 ? WASM_OP.f64_mul : WASM_OP.i32_mul;
+      case "Div":
+        return isF64 ? WASM_OP.f64_div : WASM_OP.i32_div_s;
+      case "Mod":
+        return WASM_OP.i32_rem_s;
+      case "BitAnd":
+        return 113;
+      // i32.and
+      case "BitOr":
+        return 114;
+      // i32.or
+      case "BitXor":
+        return 115;
+      // i32.xor
+      case "ShiftLeft":
+        return 116;
+      // i32.shl
+      case "ShiftRight":
+        return 117;
+      // i32.shr_s
+      default:
+        return WASM_OP.i32_add;
+    }
+  }
+  function getWasmCmpOp(opcode, argType = "i32") {
+    const isF64 = argType === "f64";
+    switch (opcode) {
+      case "LessThan":
+        return isF64 ? WASM_OP.f64_lt : WASM_OP.i32_lt_s;
+      case "LessEqual":
+        return isF64 ? WASM_OP.f64_le : WASM_OP.i32_le_s;
+      case "GreaterThan":
+        return isF64 ? WASM_OP.f64_gt : WASM_OP.i32_gt_s;
+      case "GreaterEqual":
+        return isF64 ? WASM_OP.f64_ge : WASM_OP.i32_ge_s;
+      case "Equal":
+      case "StrictEqual":
+        return isF64 ? 97 : 70;
+      // f64.eq / i32.eq
+      case "NotEqual":
+      case "StrictNotEqual":
+        return isF64 ? 98 : 71;
+      // f64.ne / i32.ne
+      default:
+        return WASM_OP.i32_lt_s;
+    }
+  }
+  function getParamTypes(irFunc) {
+    const types2 = [];
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "Param" && op.index !== void 0) {
+          types2[op.index] = op.type;
+        }
+      }
+    }
+    for (let i = 0; i < irFunc.paramCount; i++) {
+      if (!types2[i]) types2[i] = "i32";
+    }
+    return types2;
+  }
+  function getReturnType(irFunc) {
+    const opById = /* @__PURE__ */ new Map();
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) opById.set(op.id, op);
+    }
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "Return" && op.args.length > 0) {
+          const retVal = opById.get(op.args[0]);
+          if (retVal) return retVal.type;
+        }
+      }
+    }
+    return "i32";
+  }
+  function compileIRToWasm(irFunc) {
+    try {
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if (op.opcode === "Call") return null;
+          if (op.opcode === "Const" && op.value !== void 0 && typeof op.value !== "number" && typeof op.value !== "boolean" && op.value !== null) return null;
+        }
+      }
+      const builder = new WasmBuilder();
+      const paramTypes = getParamTypes(irFunc);
+      const params = paramTypes.map((t2) => t2 === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32);
+      const returnType = getReturnType(irFunc);
+      const results = [returnType === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32];
+      const { body: bodyCode, extraLocals } = codegenIR(irFunc);
+      builder.addFunction(irFunc.name, params, results, bodyCode, extraLocals);
+      const wasmBytes = builder.build();
+      const module = new WebAssembly.Module(wasmBytes);
+      const instance = new WebAssembly.Instance(module);
+      return { instance, funcName: irFunc.name };
+    } catch (e) {
+      return null;
+    }
+  }
+
   // src/jit/jit.ts
   var JitManager = class {
     constructor(feedback, options) {
@@ -7492,8 +8656,10 @@ var jsmini = (() => {
       __publicField(this, "deoptLog", []);
       __publicField(this, "tierLog", []);
       __publicField(this, "traceTier", false);
+      __publicField(this, "useIR", false);
       this.feedback = feedback;
       this.threshold = options.threshold;
+      this.useIR = options.useIR ?? false;
     }
     // VM から関数を登録 (グローバル関数の追跡)
     registerFunc(name2, func) {
@@ -7547,7 +8713,10 @@ var jsmini = (() => {
       if (arrayArgIndices.length > 0) {
         compiled = this.compileWithRelatedFuncs(func, spec, arrayArgIndices);
         if (compiled) compiled.stringArgIndices = stringArgIndices;
-      } else {
+      } else if (this.useIR) {
+        compiled = this.compileViaIR(func, spec, stringArgIndices);
+      }
+      if (!compiled && arrayArgIndices.length === 0) {
         const wasmFn = compileToWasmSync(func, spec);
         if (wasmFn) {
           compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
@@ -7560,6 +8729,40 @@ var jsmini = (() => {
       }
       this.logTier(func, "Bytecode VM", callCount);
       return null;
+    }
+    compileViaIR(func, spec, stringArgIndices) {
+      try {
+        const ir = buildIR(func, { feedback: this.feedback, knownFuncs: this.knownFuncs });
+        optimize(ir, {
+          knownFuncs: this.knownFuncs,
+          buildIROptions: { feedback: this.feedback }
+        });
+        const result = compileIRToWasm(ir);
+        if (!result) return null;
+        const wasmFn = result.instance.exports[ir.name];
+        if (!wasmFn) return null;
+        return { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
+      } catch {
+        return null;
+      }
+    }
+    // OSR から IR パスで Wasm コンパイル
+    tryOSRViaIR(func, relatedFuncs) {
+      try {
+        const funcsMap = /* @__PURE__ */ new Map();
+        for (const f of relatedFuncs) funcsMap.set(f.name, f);
+        const ir = buildIR(func, { feedback: this.feedback, knownFuncs: funcsMap });
+        optimize(ir, {
+          knownFuncs: funcsMap,
+          buildIROptions: { feedback: this.feedback }
+        });
+        const result = compileIRToWasm(ir);
+        if (!result) return null;
+        const wasmFn = result.instance.exports[ir.name];
+        return wasmFn ?? null;
+      } catch {
+        return null;
+      }
     }
     compileWithRelatedFuncs(func, spec, arrayArgIndices) {
       const funcsToCompile = this.collectRelatedFuncs(func);
@@ -8221,7 +9424,8 @@ var jsmini = (() => {
     }
     if (options.jit && vm.feedback) {
       vm.jit = new JitManager(vm.feedback, {
-        threshold: options.jitThreshold ?? 100
+        threshold: options.jitThreshold ?? 100,
+        useIR: options.useIR
       });
       if (options.traceTier) vm.jit.traceTier = true;
     }
@@ -8241,6 +9445,69 @@ var jsmini = (() => {
       return result;
     }
     return value;
+  }
+
+  // src/ir/printer.ts
+  function formatType(type) {
+    return type;
+  }
+  function formatOp(op, indent = "  ") {
+    const typeStr = formatType(op.type);
+    switch (op.opcode) {
+      case "Const":
+        return `${indent}v${op.id}: ${typeStr} = Const(${op.value})`;
+      case "Param":
+        return `${indent}v${op.id}: ${typeStr} = Param(${op.index})`;
+      case "Undefined":
+        return `${indent}v${op.id}: any = Undefined`;
+      case "Phi": {
+        const phi = op;
+        const inputs = phi.inputs.map(([blockId, valId]) => `B${blockId}:v${valId}`).join(", ");
+        return `${indent}v${op.id}: ${typeStr} = Phi(${inputs})`;
+      }
+      case "LoadGlobal":
+        return `${indent}v${op.id}: ${typeStr} = LoadGlobal("${op.globalName}")`;
+      case "StoreGlobal":
+        return `${indent}StoreGlobal("${op.globalName}", v${op.args[0]})`;
+      case "TypeGuard":
+        return `${indent}v${op.id}: ${typeStr} = TypeGuard(v${op.args[0]}, ${op.guardType})`;
+      case "Branch":
+        return `${indent}Branch(v${op.args[0]})`;
+      case "Jump":
+        return `${indent}Jump`;
+      case "Return":
+        return `${indent}Return(v${op.args[0]})`;
+      case "Call": {
+        const [callee, ...callArgs] = op.args;
+        const argsStr = callArgs.map((a) => `v${a}`).join(", ");
+        return `${indent}v${op.id}: ${typeStr} = Call(v${callee}, ${argsStr})`;
+      }
+      default: {
+        const argsStr = op.args.map((a) => `v${a}`).join(", ");
+        return `${indent}v${op.id}: ${typeStr} = ${op.opcode}(${argsStr})`;
+      }
+    }
+  }
+  function formatBlock(block) {
+    const lines = [];
+    const preds = block.predecessors.length > 0 ? ` <- [${block.predecessors.map((p) => `B${p}`).join(", ")}]` : "";
+    const succs = block.successors.length > 0 ? ` -> [${block.successors.map((s) => `B${s}`).join(", ")}]` : "";
+    lines.push(`B${block.id}${preds}${succs}:`);
+    for (const phi of block.phis) {
+      lines.push(formatOp(phi));
+    }
+    for (const op of block.ops) {
+      lines.push(formatOp(op));
+    }
+    return lines.join("\n");
+  }
+  function printIR(func) {
+    const lines = [];
+    lines.push(`== IR: ${func.name} (params: ${func.paramCount}) ==`);
+    for (const block of func.blocks) {
+      lines.push(formatBlock(block));
+    }
+    return lines.join("\n");
   }
 
   // node_modules/@marijn/find-cluster-break/src/index.js
