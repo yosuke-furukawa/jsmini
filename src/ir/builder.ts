@@ -108,36 +108,92 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
     }
   }
 
-  // ローカル変数の SSA 値を追跡
-  // locals[slot] = 現在の SSA 値 ID
   const localCount = func.localCount;
-
-  // 各ブロックの入口でのローカル状態
-  const blockEntryLocals = new Map<number, (number | undefined)[]>();
-  // 各ブロックの入口でのスタック状態
-  const blockEntryStacks = new Map<number, AbstractStack>();
-  // 各ブロックの出口でのローカル状態
-  const blockExitLocals = new Map<number, (number | undefined)[]>();
-
-  // ========== ブロックごとに抽象解釈 ==========
-
-  // Op を Op ID で引けるようにする
   const opById = new Map<number, Op>();
+  function registerOp(op: Op): Op { opById.set(op.id, op); return op; }
 
-  function registerOp(op: Op): Op {
-    opById.set(op.id, op);
-    return op;
+  // 2つの型から結果の型を推論
+  function inferBinType(leftId: number, rightId: number): IRType {
+    const l = opById.get(leftId), r = opById.get(rightId);
+    if (l?.type === "f64" || r?.type === "f64") return "f64";
+    if (l?.type === "i32" && r?.type === "i32") return "i32";
+    return "i32";
   }
+
+  // ======== パス 1: ブロック構造 + エッジ構築 + 合流点 Phi 予約 ========
+
+  // bytecode を走査してブロック間のエッジを構築 (ops は生成しない)
+  const blockEdges = new Map<number, { successors: number[]; predecessors: number[] }>();
+  for (const [, b] of blocks) blockEdges.set(b.id, { successors: [], predecessors: [] });
+
+  for (let blockId = 0; blockId < sortedBoundaries.length; blockId++) {
+    const startPC = sortedBoundaries[blockId];
+    const endPC = blockId + 1 < sortedBoundaries.length ? sortedBoundaries[blockId + 1] : bytecode.length;
+    for (let pc = startPC; pc < endPC; pc++) {
+      const instr = bytecode[pc];
+      if (instr.op === "Jump") {
+        const t = pcToBlock.get(instr.operand!)!;
+        blockEdges.get(blockId)!.successors.push(t);
+        blockEdges.get(t)!.predecessors.push(blockId);
+      } else if (instr.op === "JumpIfFalse" || instr.op === "JumpIfTrue") {
+        const t = pcToBlock.get(instr.operand!)!;
+        const f = pcToBlock.get(pc + 1)!;
+        if (instr.op === "JumpIfFalse") {
+          blockEdges.get(blockId)!.successors.push(f, t);
+        } else {
+          blockEdges.get(blockId)!.successors.push(t, f);
+        }
+        blockEdges.get(t)!.predecessors.push(blockId);
+        blockEdges.get(f)!.predecessors.push(blockId);
+      } else if (instr.op === "Return") {
+        // no successor
+      }
+    }
+    // fall-through: 末尾が制御フロー命令でなければ次のブロックへ
+    const lastInstr = bytecode[endPC - 1];
+    if (lastInstr && lastInstr.op !== "Jump" && lastInstr.op !== "JumpIfFalse" && lastInstr.op !== "JumpIfTrue" && lastInstr.op !== "Return") {
+      if (blockId + 1 < sortedBoundaries.length) {
+        blockEdges.get(blockId)!.successors.push(blockId + 1);
+        blockEdges.get(blockId + 1)!.predecessors.push(blockId);
+      }
+    }
+  }
+
+  // エッジをブロックに反映
+  for (const [id, edges] of blockEdges) {
+    blocks.get(id)!.successors = edges.successors;
+    blocks.get(id)!.predecessors = edges.predecessors;
+  }
+
+  // 合流点 (predecessors >= 2) に Phi を予約
+  // phiMap: blockId → { slot → phiOp }
+  const phiMap = new Map<number, Map<number, PhiOp>>();
+  for (const [id, edges] of blockEdges) {
+    if (edges.predecessors.length >= 2) {
+      const phis = new Map<number, PhiOp>();
+      for (let slot = 0; slot < localCount; slot++) {
+        const phi = createPhi(irFunc, "any");
+        registerOp(phi);
+        phis.set(slot, phi);
+        blocks.get(id)!.phis.push(phi);
+      }
+      phiMap.set(id, phis);
+    }
+  }
+
+  // ======== パス 2: 抽象解釈 (Phi ID を使う) ========
+
+  const blockEntryStacks = new Map<number, AbstractStack>();
+  const blockExitLocals = new Map<number, (number | undefined)[]>();
 
   // ブロック0 の初期状態
   const initLocals: (number | undefined)[] = new Array(localCount).fill(undefined);
-  for (let i = 0; i < func.paramCount; i++) {
-    initLocals[i] = paramOps[i].id;
-  }
+  for (let i = 0; i < func.paramCount; i++) initLocals[i] = paramOps[i].id;
+
+  const blockEntryLocals = new Map<number, (number | undefined)[]>();
   blockEntryLocals.set(0, initLocals);
   blockEntryStacks.set(0, []);
 
-  // BFS でブロックを処理
   const visited = new Set<number>();
   const queue: number[] = [0];
 
@@ -148,12 +204,21 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
 
     const block = blocks.get(blockId)!;
     const startPC = sortedBoundaries[blockId];
-    const endPC = blockId + 1 < sortedBoundaries.length
-      ? sortedBoundaries[blockId + 1]
-      : bytecode.length;
+    const endPC = blockId + 1 < sortedBoundaries.length ? sortedBoundaries[blockId + 1] : bytecode.length;
 
-    // 初期状態
-    let locals = [...(blockEntryLocals.get(blockId) ?? new Array(localCount).fill(undefined))];
+    // 初期ローカル: Phi があるブロックは Phi ID で上書き
+    let locals: (number | undefined)[];
+    if (phiMap.has(blockId)) {
+      locals = [...(blockEntryLocals.get(blockId) ?? new Array(localCount).fill(undefined))];
+      const phis = phiMap.get(blockId)!;
+      for (const [slot, phi] of phis) {
+        if (locals[slot] !== undefined) {
+          locals[slot] = phi.id;  // ★ Phi ID で上書き
+        }
+      }
+    } else {
+      locals = [...(blockEntryLocals.get(blockId) ?? new Array(localCount).fill(undefined))];
+    }
     let stack: AbstractStack = cloneStack(blockEntryStacks.get(blockId) ?? []);
 
     // パラメータ Op + TypeGuard をブロック0に追加
@@ -165,364 +230,149 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
     // 各命令を抽象解釈
     for (let pc = startPC; pc < endPC; pc++) {
       const instr = bytecode[pc];
-
       switch (instr.op) {
-        // 定数ロード
         case "LdaConst": {
           const val = constants[instr.operand!];
           if (typeof val === "number") {
             const op = registerOp(createConst(irFunc, val, Number.isInteger(val) ? "i32" : "f64"));
-            block.ops.push(op);
-            stack.push(op.id);
+            block.ops.push(op); stack.push(op.id);
           } else {
-            // 非数値の定数 (文字列等) → any 型の Const
             const op = registerOp(createOp(irFunc, "Const", [], "any"));
-            op.value = val as any;
-            block.ops.push(op);
-            stack.push(op.id);
+            op.value = val as any; block.ops.push(op); stack.push(op.id);
           }
           break;
         }
-        case "LdaUndefined": {
-          const op = registerOp(createOp(irFunc, "Undefined", [], "any"));
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
-        }
-        case "LdaNull": {
-          const op = registerOp(createConst(irFunc, 0, "any"));
-          op.value = null as any;
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
-        }
-        case "LdaTrue": {
-          const op = registerOp(createConst(irFunc, 1, "bool"));
-          op.value = true;
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
-        }
-        case "LdaFalse": {
-          const op = registerOp(createConst(irFunc, 0, "bool"));
-          op.value = false;
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
-        }
-
-        // ローカル変数
+        case "LdaUndefined": { const op = registerOp(createOp(irFunc, "Undefined", [], "any")); block.ops.push(op); stack.push(op.id); break; }
+        case "LdaNull": { const op = registerOp(createConst(irFunc, 0, "any")); op.value = null as any; block.ops.push(op); stack.push(op.id); break; }
+        case "LdaTrue": { const op = registerOp(createConst(irFunc, 1, "bool")); op.value = true; block.ops.push(op); stack.push(op.id); break; }
+        case "LdaFalse": { const op = registerOp(createConst(irFunc, 0, "bool")); op.value = false; block.ops.push(op); stack.push(op.id); break; }
         case "LdaLocal": {
           const slot = instr.operand!;
           const valId = locals[slot];
-          if (valId !== undefined) {
-            stack.push(valId);
-          } else {
-            // 未初期化 → undefined
-            const op = registerOp(createOp(irFunc, "Undefined", [], "any"));
-            block.ops.push(op);
-            stack.push(op.id);
-          }
+          if (valId !== undefined) { stack.push(valId); }
+          else { const op = registerOp(createOp(irFunc, "Undefined", [], "any")); block.ops.push(op); stack.push(op.id); }
           break;
         }
-        case "StaLocal": {
-          const slot = instr.operand!;
-          locals[slot] = stack[stack.length - 1]; // peek (pop しない)
-          break;
-        }
-
-        // 算術 (pop 2, push 1)
+        case "StaLocal": { locals[instr.operand!] = stack[stack.length - 1]; break; }
         case "Add": case "Sub": case "Mul": case "Div": case "Mod": {
-          const right = stack.pop()!;
-          const left = stack.pop()!;
-          const resultType = inferBinType(left, right);
-          const op = registerOp(createOp(irFunc, instr.op as any, [left, right], resultType));
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
+          const r = stack.pop()!, l = stack.pop()!;
+          const op = registerOp(createOp(irFunc, instr.op as any, [l, r], inferBinType(l, r)));
+          block.ops.push(op); stack.push(op.id); break;
         }
-        case "BitAnd": case "BitOr": case "BitXor":
-        case "ShiftLeft": case "ShiftRight": {
-          const right = stack.pop()!;
-          const left = stack.pop()!;
-          const op = registerOp(createOp(irFunc, instr.op as any, [left, right], "i32")); // ビット演算は常に i32
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
+        case "BitAnd": case "BitOr": case "BitXor": case "ShiftLeft": case "ShiftRight": {
+          const r = stack.pop()!, l = stack.pop()!;
+          const op = registerOp(createOp(irFunc, instr.op as any, [l, r], "i32"));
+          block.ops.push(op); stack.push(op.id); break;
         }
-
-        // 単項 (pop 1, push 1)
         case "Negate": case "BitNot": case "LogicalNot": {
-          const arg = stack.pop()!;
-          const opcode = instr.op === "LogicalNot" ? "Not" : instr.op as any;
-          const op = registerOp(createOp(irFunc, opcode, [arg], instr.op === "LogicalNot" ? "bool" : "i32"));
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
+          const a = stack.pop()!;
+          const opc = instr.op === "LogicalNot" ? "Not" : instr.op as any;
+          const op = registerOp(createOp(irFunc, opc, [a], instr.op === "LogicalNot" ? "bool" : "i32"));
+          block.ops.push(op); stack.push(op.id); break;
         }
-
-        // 比較 (pop 2, push 1)
         case "LessThan": case "GreaterThan": case "LessEqual": case "GreaterEqual":
         case "Equal": case "StrictEqual": case "NotEqual": case "StrictNotEqual": {
-          const right = stack.pop()!;
-          const left = stack.pop()!;
-          const op = registerOp(createOp(irFunc, instr.op as any, [left, right], "bool"));
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
+          const r = stack.pop()!, l = stack.pop()!;
+          const op = registerOp(createOp(irFunc, instr.op as any, [l, r], "bool"));
+          block.ops.push(op); stack.push(op.id); break;
         }
-
-        // 更新
         case "Increment": {
-          const arg = stack.pop()!;
-          const one = registerOp(createConst(irFunc, 1));
-          block.ops.push(one);
-          const op = registerOp(createOp(irFunc, "Add", [arg, one.id], "i32"));
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
+          const a = stack.pop()!; const one = registerOp(createConst(irFunc, 1)); block.ops.push(one);
+          const op = registerOp(createOp(irFunc, "Add", [a, one.id], "i32")); block.ops.push(op); stack.push(op.id); break;
         }
         case "Decrement": {
-          const arg = stack.pop()!;
-          const one = registerOp(createConst(irFunc, 1));
-          block.ops.push(one);
-          const op = registerOp(createOp(irFunc, "Sub", [arg, one.id], "i32"));
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
+          const a = stack.pop()!; const one = registerOp(createConst(irFunc, 1)); block.ops.push(one);
+          const op = registerOp(createOp(irFunc, "Sub", [a, one.id], "i32")); block.ops.push(op); stack.push(op.id); break;
         }
-
-        // スタック操作
-        case "Pop":
-          stack.pop();
-          break;
-        case "Dup":
-          stack.push(stack[stack.length - 1]);
-          break;
-
-        // 制御フロー
+        case "Pop": stack.pop(); break;
+        case "Dup": stack.push(stack[stack.length - 1]); break;
         case "Return": {
           const val = stack.pop()!;
-          const op = registerOp(createOp(irFunc, "Return", [val], "any"));
-          block.ops.push(op);
-          break;
+          block.ops.push(registerOp(createOp(irFunc, "Return", [val], "any"))); break;
         }
         case "Jump": {
-          const targetPC = instr.operand!;
-          const targetBlockId = pcToBlock.get(targetPC)!;
-          block.successors.push(targetBlockId);
-          blocks.get(targetBlockId)!.predecessors.push(blockId);
-          const op = registerOp(createOp(irFunc, "Jump", [], "any"));
-          block.ops.push(op);
-          // ターゲットブロックの入口状態を伝播
-          propagateState(targetBlockId, locals, stack);
-          if (!visited.has(targetBlockId)) queue.push(targetBlockId);
+          block.ops.push(registerOp(createOp(irFunc, "Jump", [], "any")));
+          const t = pcToBlock.get(instr.operand!)!;
+          propagate(t, locals, stack); if (!visited.has(t)) queue.push(t);
           break;
         }
         case "JumpIfFalse": case "JumpIfTrue": {
           const cond = stack.pop()!;
-          const targetPC = instr.operand!;
-          const targetBlockId = pcToBlock.get(targetPC)!;
-          const fallBlockId = pcToBlock.get(pc + 1)!;
-
-          if (instr.op === "JumpIfFalse") {
-            // false → target, true → fall-through
-            block.successors.push(fallBlockId, targetBlockId);
-          } else {
-            // true → target, false → fall-through
-            block.successors.push(targetBlockId, fallBlockId);
-          }
-          blocks.get(targetBlockId)!.predecessors.push(blockId);
-          blocks.get(fallBlockId)!.predecessors.push(blockId);
-
-          const op = registerOp(createOp(irFunc, "Branch", [cond], "any"));
-          block.ops.push(op);
-
-          // 両方のターゲットに状態を伝播
-          propagateState(targetBlockId, locals, stack);
-          propagateState(fallBlockId, locals, stack);
-          if (!visited.has(targetBlockId)) queue.push(targetBlockId);
-          if (!visited.has(fallBlockId)) queue.push(fallBlockId);
+          block.ops.push(registerOp(createOp(irFunc, "Branch", [cond], "any")));
+          const t = pcToBlock.get(instr.operand!)!, f = pcToBlock.get(pc + 1)!;
+          propagate(t, locals, stack); propagate(f, locals, stack);
+          if (!visited.has(t)) queue.push(t); if (!visited.has(f)) queue.push(f);
           break;
         }
-
-        // グローバル変数 (関数参照)
         case "LdaGlobal": {
           const name = constants[instr.operand!] as string;
-          // 関数参照 → Const として扱い、calleeName を記録
           const op = registerOp(createOp(irFunc, "Const", [], "any"));
-          op.value = name as any;
-          op.calleeName = name;
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
+          op.value = name as any; op.calleeName = name;
+          block.ops.push(op); stack.push(op.id); break;
         }
-
-        // 関数呼び出し
         case "Call": {
           const argc = instr.operand!;
-          const calleeId = stack.pop()!; // 関数
+          const calleeId = stack.pop()!;
           const args: number[] = [];
-          for (let j = 0; j < argc; j++) {
-            args.unshift(stack.pop()!);
-          }
+          for (let j = 0; j < argc; j++) args.unshift(stack.pop()!);
           const calleeOp = opById.get(calleeId);
           const op = registerOp(createOp(irFunc, "Call", [calleeId, ...args], "any"));
           if (calleeOp?.calleeName) op.calleeName = calleeOp.calleeName;
-          block.ops.push(op);
-          stack.push(op.id);
-          break;
+          block.ops.push(op); stack.push(op.id); break;
         }
-
-        default:
-          // 未対応の命令はスキップ (IR 変換対象外)
-          break;
+        default: break;
       }
     }
 
-    // ブロックの出口でのローカル状態を保存
+    // 出口ローカルを保存
     blockExitLocals.set(blockId, [...locals]);
 
-    // ブロック末尾がジャンプ/リターンでなければ fall-through
+    // fall-through
     const lastOp = block.ops[block.ops.length - 1];
-    if (lastOp && lastOp.opcode !== "Return" && lastOp.opcode !== "Jump" && lastOp.opcode !== "Branch") {
+    if (!lastOp || (lastOp.opcode !== "Return" && lastOp.opcode !== "Jump" && lastOp.opcode !== "Branch")) {
       if (blockId + 1 < sortedBoundaries.length) {
-        const nextBlockId = blockId + 1;
-        block.successors.push(nextBlockId);
-        blocks.get(nextBlockId)!.predecessors.push(blockId);
-        const jmp = registerOp(createOp(irFunc, "Jump", [], "any"));
-        block.ops.push(jmp);
-        propagateState(nextBlockId, locals, stack);
-        if (!visited.has(nextBlockId)) queue.push(nextBlockId);
+        block.ops.push(registerOp(createOp(irFunc, "Jump", [], "any")));
+        propagate(blockId + 1, locals, stack);
+        if (!visited.has(blockId + 1)) queue.push(blockId + 1);
       }
     }
   }
 
-  // Phi ノードを挿入 (合流点で値が異なる場合)
-  insertPhiNodes(irFunc, blockExitLocals, blockEntryLocals, opById);
+  // ======== パス 3: Phi の inputs を埋める ========
+  for (const [blockId, phis] of phiMap) {
+    const preds = blockEdges.get(blockId)!.predecessors;
+    for (const [slot, phi] of phis) {
+      phi.inputs = [];
+      let allSame = true;
+      let firstVal: number | undefined;
+      for (const predId of preds) {
+        const exitLocals = blockExitLocals.get(predId);
+        const val = exitLocals ? exitLocals[slot] : undefined;
+        if (val !== undefined) {
+          phi.inputs.push([predId, val]);
+          if (firstVal === undefined) firstVal = val;
+          else if (val !== firstVal) allSame = false;
+        }
+      }
+      // 全部同じ値なら Phi 不要 → 空にして後で除去
+      if (allSame || phi.inputs.length < 2) {
+        phi.inputs = [];
+      }
+    }
+  }
 
-  // Phi の値で後続ブロックの参照を書き換える
-  rewritePhiReferences(irFunc, blockEntryLocals);
+  // 空の Phi を除去
+  for (const block of irFunc.blocks) {
+    block.phis = block.phis.filter(p => p.inputs.length >= 2);
+  }
 
   return irFunc;
 
-  // ========== ヘルパー ==========
-
-  // 2つの型から結果の型を推論 (f64 が含まれたら f64 に widening)
-  function inferBinType(leftId: number, rightId: number): IRType {
-    const left = opById.get(leftId);
-    const right = opById.get(rightId);
-    if (left?.type === "f64" || right?.type === "f64") return "f64";
-    if (left?.type === "i32" && right?.type === "i32") return "i32";
-    return "i32"; // default
-  }
-
-  function propagateState(targetBlockId: number, locals: (number | undefined)[], stack: AbstractStack): void {
+  function propagate(targetBlockId: number, locals: (number | undefined)[], stack: AbstractStack): void {
     if (!blockEntryLocals.has(targetBlockId)) {
       blockEntryLocals.set(targetBlockId, [...locals]);
       blockEntryStacks.set(targetBlockId, cloneStack(stack));
     }
-    // 既に状態がある場合は合流 → Phi が必要になる可能性
-    // (insertPhiNodes で後処理)
   }
 }
 
-// ========== Phi ノード挿入 ==========
-
-function insertPhiNodes(
-  irFunc: IRFunction,
-  blockExitLocals: Map<number, (number | undefined)[]>,
-  blockEntryLocals: Map<number, (number | undefined)[]>,
-  opById: Map<number, Op>,
-): void {
-  for (const block of irFunc.blocks) {
-    if (block.predecessors.length < 2) continue;
-
-    // 各ローカルスロットについて、前任ブロックの出口での値が異なるか調べる
-    const predLocals = block.predecessors
-      .map(predId => blockExitLocals.get(predId))
-      .filter((l): l is (number | undefined)[] => l !== undefined);
-
-    if (predLocals.length < 2) continue;
-
-    const localCount = predLocals[0].length;
-    const entryLocals = blockEntryLocals.get(block.id);
-
-    for (let slot = 0; slot < localCount; slot++) {
-      const values = predLocals.map(l => l[slot]);
-      // 全部同じなら Phi 不要
-      if (values.every(v => v === values[0])) continue;
-      // undefined が混じってるのは初期化前 → スキップ
-      if (values.some(v => v === undefined)) continue;
-
-      const phi = createPhi(irFunc, "any");
-      for (let i = 0; i < block.predecessors.length; i++) {
-        phi.inputs.push([block.predecessors[i], values[i]!]);
-      }
-      // Phi がどのローカルスロットの値を置き換えるか記録
-      (phi as any).__slot = slot;
-      // entry locals の対応する値を Phi の値に更新
-      if (entryLocals && entryLocals[slot] !== undefined) {
-        (phi as any).__replacedValue = entryLocals[slot];
-      }
-      block.phis.push(phi);
-      opById.set(phi.id, phi);
-    }
-  }
-}
-
-// Phi の値で、合流ブロックとその後続ブロック内の参照を書き換える
-function rewritePhiReferences(
-  irFunc: IRFunction,
-  blockEntryLocals: Map<number, (number | undefined)[]>,
-): void {
-  for (const block of irFunc.blocks) {
-    if (block.phis.length === 0) continue;
-
-    // このブロックの Phi が置き換える値のマップ: oldId → phiId
-    const replaceMap = new Map<number, number>();
-    for (const phi of block.phis) {
-      const replacedVal = (phi as any).__replacedValue as number | undefined;
-      if (replacedVal !== undefined) {
-        replaceMap.set(replacedVal, phi.id);
-      }
-    }
-
-    if (replaceMap.size === 0) continue;
-
-    // このブロック内の ops の引数を書き換え
-    for (const op of block.ops) {
-      op.args = op.args.map(a => replaceMap.get(a) ?? a);
-    }
-
-    // 後続ブロック (successors) 内の ops も書き換え
-    // (ループの場合、B1 → B2 → B1 で B2 が B1 の Phi を参照すべき)
-    const visited = new Set<number>();
-    const queue = [...block.successors];
-    while (queue.length > 0) {
-      const succId = queue.shift()!;
-      if (visited.has(succId)) continue;
-      if (succId === block.id) continue; // 自分自身はスキップ (既に処理済み)
-      visited.add(succId);
-
-      const succBlock = irFunc.blocks.find(b => b.id === succId);
-      if (!succBlock) continue;
-
-      for (const op of succBlock.ops) {
-        op.args = op.args.map(a => replaceMap.get(a) ?? a);
-      }
-      // Phi の inputs も書き換え
-      for (const phi of succBlock.phis) {
-        phi.inputs = phi.inputs.map(([bid, vid]) => [bid, replaceMap.get(vid) ?? vid]);
-      }
-
-      // さらに後続へ (ただし Phi があるブロックで止まる — 別の Phi で置き換わるため)
-      for (const nextId of succBlock.successors) {
-        const nextBlock = irFunc.blocks.find(b => b.id === nextId);
-        if (nextBlock && nextBlock.phis.length === 0) {
-          queue.push(nextId);
-        }
-      }
-    }
-  }
-}

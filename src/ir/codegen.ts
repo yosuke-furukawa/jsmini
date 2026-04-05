@@ -3,9 +3,12 @@
 // 最適化済み SSA IR を Wasm バイナリ (function body) に変換する。
 // CFG → Wasm の structured control flow 変換を行う。
 
-import type { IRFunction, Block, Op, PhiOp } from "./types.js";
+import type { IRFunction, Block, Op, PhiOp, IRType } from "./types.js";
 import { isPhi } from "./types.js";
 import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, f64ToBytes } from "../jit/wasm-builder.js";
+
+const WASM_VOID = 0x40; // void block type
+import { analyzeCFG, type CFGAnalysis, type LoopInfo } from "./loop-analysis.js";
 
 // ========== Wasm Codegen ==========
 
@@ -14,7 +17,7 @@ export interface IRCodegenResult {
   funcIndex: number;
 }
 
-export function codegenIR(irFunc: IRFunction): number[] {
+export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: number } {
   const body: number[] = [];
 
   // Op ID → Wasm local index のマッピング
@@ -48,6 +51,18 @@ export function codegenIR(irFunc: IRFunction): number[] {
     }
   }
 
+  // Phi の入力値も local に格納する必要がある (back edge の local.set で使うため)
+  for (const block of irFunc.blocks) {
+    for (const phi of block.phis) {
+      for (const [, valueId] of phi.inputs) {
+        if (!opToLocal.has(valueId)) {
+          needsLocal.add(valueId);
+          opToLocal.set(valueId, nextLocal++);
+        }
+      }
+    }
+  }
+
   const extraLocals = nextLocal - irFunc.paramCount;
 
   // Op を id で引けるテーブル
@@ -57,57 +72,127 @@ export function codegenIR(irFunc: IRFunction): number[] {
     for (const op of block.ops) opById.set(op.id, op);
   }
 
-  // ========== CFG → Wasm structured control flow ==========
-  // シンプルなアプローチ:
-  // - ブロックをトポロジカル順序で配置
-  // - ループ (back edge) → loop + br
-  // - 条件分岐 → if/else or block + br_if
+  const blockMap = new Map<number, Block>();
+  for (const b of irFunc.blocks) blockMap.set(b.id, b);
 
-  // ループヘッダの検出 (predecessor に自分より後のブロックがある)
-  const loopHeaders = new Set<number>();
+  // ========== Stackifier: CFG → Wasm structured control flow ==========
+  const cfg = analyzeCFG(irFunc);
+
+  // Phi の入力を書き込む: predecessor ブロックの末尾で local.set
+  // { blockId → [{ phiLocal, valueId }] }
+  const phiWrites = new Map<number, { phiLocal: number; valueId: number }[]>();
   for (const block of irFunc.blocks) {
-    for (const predId of block.predecessors) {
-      if (predId >= block.id) {
-        loopHeaders.add(block.id);
+    for (const phi of block.phis) {
+      const phiLocal = opToLocal.get(phi.id);
+      if (phiLocal === undefined) continue;
+      for (const [predId, valueId] of phi.inputs) {
+        if (!phiWrites.has(predId)) phiWrites.set(predId, []);
+        phiWrites.get(predId)!.push({ phiLocal, valueId });
       }
     }
   }
 
-  // 各ブロックのコードを生成
-  // control flow 構造を管理するスタック
-  const activeLoops: number[] = []; // loop ヘッダの block id
-  const activeBlocks: number[] = []; // block の break target block id
+  // Wasm の control flow スタック: 各エントリは { kind, targetBlockId }
+  // br N は N 番目のエントリにジャンプ
+  const controlStack: { kind: "block" | "loop"; targetBlockId: number }[] = [];
 
-  for (const block of irFunc.blocks) {
-    // 空ブロックはスキップ
-    if (block.ops.length === 0 && block.phis.length === 0) continue;
+  // トポロジカル順にブロックを処理
+  for (const blockId of cfg.topoOrder) {
+    const block = blockMap.get(blockId);
+    if (!block) continue;
 
-    // ループヘッダ: loop 命令を挿入
-    if (loopHeaders.has(block.id)) {
-      body.push(WASM_OP.loop, WASM_TYPE.void);
-      activeLoops.push(block.id);
+    // ループヘッダ: block $exit + loop $continue を開始
+    const loopInfo = cfg.loops.find(l => l.header === blockId);
+    if (loopInfo) {
+      // block $exit — forward edge (条件 false) で脱出
+      body.push(WASM_OP.block, WASM_VOID);
+      controlStack.push({ kind: "block", targetBlockId: loopInfo.exitBlock });
+      // loop $continue — back edge で先頭に戻る
+      body.push(WASM_OP.loop, WASM_VOID);
+      controlStack.push({ kind: "loop", targetBlockId: blockId });
     }
 
-    // Phi ノードの値は既に predecessors が local に書き込み済み (emitPhiWrites で)
-    // ここでは読み取りだけ
-
-    // 通常の命令
+    // 通常の命令を出力
     for (const op of block.ops) {
-      emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById);
+      if (op.opcode === "Branch") {
+        // 条件分岐: Branch の条件を出力
+        emitLoadValue(op.args[0], body, opToLocal);
+        // Phi の値を書き込み (fall-through = body 方向の場合)
+        // Branch は条件が true → successors[0], false → successors[1] (builder の規約に依存)
+        // ループヘッダの Branch: false → exit (block 脱出)
+        if (loopInfo) {
+          // 条件が false → exit (block 脱出)
+          body.push(WASM_OP.i32_eqz);
+          const exitDepth = controlStack.length - 1 - controlStack.findLastIndex(
+            e => e.kind === "block" && e.targetBlockId === loopInfo.exitBlock
+          );
+          body.push(WASM_OP.br_if, exitDepth);
+        } else {
+          // 非ループの if: とりあえず block + br_if
+          // (シンプルに: 条件 false なら次のブロックに fall through)
+          body.push(WASM_OP.br_if, 0); // placeholder
+        }
+      } else if (op.opcode === "Jump") {
+        // 無条件ジャンプ
+        // back edge → br $loop
+        const jumpTarget = block.successors[0];
+        // Phi がある successor への Jump: phiWrites を出力
+        const writes = phiWrites.get(blockId);
+        if (writes) {
+          for (const { phiLocal, valueId } of writes) {
+            emitValueOrConst(valueId, body, opToLocal, opById);
+            body.push(WASM_OP.local_set, phiLocal);
+          }
+        }
+        if (jumpTarget !== undefined && cfg.backEdges.has(`${blockId}→${jumpTarget}`)) {
+          // back edge → br $loop
+          const loopDepth = controlStack.length - 1 - controlStack.findLastIndex(
+            e => e.kind === "loop" && e.targetBlockId === jumpTarget
+          );
+          body.push(WASM_OP.br, loopDepth);
+        }
+        // forward jump は fall-through
+      } else if (op.opcode === "Return") {
+        emitLoadValue(op.args[0], body, opToLocal);
+        body.push(WASM_OP.return);
+      } else {
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById);
+      }
     }
 
-    // ループヘッダの end を、ループ内の最後のブロックの後に置く
-    // (back edge の br で戻る)
-  }
-
-  // 全ての loop/block の end を閉じる
-  for (let i = 0; i < activeLoops.length; i++) {
-    body.push(WASM_OP.end);
+    // ループの最後のブロックの後に loop + block の end を閉じる
+    for (const loop of cfg.loops) {
+      const lastBodyBlock = Math.max(...[...loop.body]);
+      if (blockId === lastBodyBlock) {
+        // loop end
+        body.push(WASM_OP.end);
+        controlStack.pop();
+        // block end
+        body.push(WASM_OP.end);
+        controlStack.pop();
+      }
+    }
   }
 
   body.push(WASM_OP.end); // function end
 
-  return body;
+  // Phi の初期値を関数の先頭に挿入
+  const initCode: number[] = [];
+  for (const block of irFunc.blocks) {
+    for (const phi of block.phis) {
+      const phiLocal = opToLocal.get(phi.id);
+      if (phiLocal === undefined) continue;
+      // B0 (entry) からの入力を初期値として出力
+      const entryInput = phi.inputs.find(([predId]) => predId === 0);
+      if (entryInput) {
+        const [, valueId] = entryInput;
+        emitValueOrConst(valueId, initCode, opToLocal, opById);
+        initCode.push(WASM_OP.local_set, phiLocal);
+      }
+    }
+  }
+
+  return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount };
 }
 
 // ========== Op → Wasm 命令 ==========
@@ -260,6 +345,30 @@ function emitLoadValue(opId: number, body: number[], opToLocal: Map<number, numb
   // local がない場合は直前の命令で既にスタックに載ってるはず
 }
 
+// Op の値を Wasm スタックにロード (Const なら直接出力)
+function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, number>, opById: Map<number, Op>): void {
+  const local = opToLocal.get(opId);
+  if (local !== undefined) {
+    body.push(WASM_OP.local_get, local);
+    return;
+  }
+  const op = opById.get(opId);
+  if (op?.opcode === "Const") {
+    if (op.type === "f64") {
+      body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
+    } else {
+      body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value as number));
+    }
+    return;
+  }
+  if (op?.opcode === "Param" && op.index !== undefined) {
+    body.push(WASM_OP.local_get, op.index);
+    return;
+  }
+  // fallback: i32.const 0
+  body.push(WASM_OP.i32_const, 0);
+}
+
 // 複数回使われる値を local に保存
 function maybeStoreLocal(opId: number, body: number[], opToLocal: Map<number, number>, needsLocal: Set<number>): void {
   if (needsLocal.has(opId)) {
@@ -364,23 +473,7 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
     const returnType = getReturnType(irFunc);
     const results = [returnType === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32];
 
-    const bodyCode = codegenIR(irFunc);
-
-    // extra locals の数を計算
-    const opToLocal = new Map<number, number>();
-    let nextLocal = irFunc.paramCount;
-    for (const block of irFunc.blocks) {
-      for (const phi of block.phis) {
-        opToLocal.set(phi.id, nextLocal++);
-      }
-    }
-    const useCount = computeUseCount(irFunc);
-    for (const [id, count] of useCount) {
-      if (count > 1 && !opToLocal.has(id)) {
-        nextLocal++;
-      }
-    }
-    const extraLocals = nextLocal - irFunc.paramCount;
+    const { body: bodyCode, extraLocals } = codegenIR(irFunc);
 
     builder.addFunction(irFunc.name, params, results, bodyCode, extraLocals);
     const wasmBytes = builder.build();
@@ -388,8 +481,9 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
     const module = new WebAssembly.Module(wasmBytes);
     const instance = new WebAssembly.Instance(module);
     return { instance, funcName: irFunc.name };
-  } catch (e) {
+  } catch (e: any) {
     // Wasm コンパイルエラー → null (フォールバック)
+    // debug: console.error(e.message ?? e);
     return null;
   }
 }
