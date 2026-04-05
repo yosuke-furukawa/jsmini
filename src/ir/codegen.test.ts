@@ -124,6 +124,20 @@ describe("IR → Wasm codegen — loops", () => {
     assert.equal(wasmF(100), 10000);
   });
 
+  it("constant folding in loop: var seven = 3+4 → Const(7)", () => {
+    const func = getFirstFunction("function f(n) { var seven = 3+4; var sum=0; for(var i=0;i<n;i=i+1){sum=sum+i+seven;} return sum; }");
+    const ir = buildIR(func);
+    optimize(ir);
+    const dump = printIR(ir);
+    assert.ok(dump.includes("Const(7)"), "3+4 should fold to 7");
+    assert.ok(!dump.includes("Const(3)"), "Const(3) should be eliminated");
+    const compiled = compileIRToWasm(ir);
+    assert.ok(compiled !== null);
+    const wasmF = (compiled!.instance.exports as any).f;
+    assert.equal(wasmF(10), 115);   // 45 + 70
+    assert.equal(wasmF(100), 5650); // 4950 + 700
+  });
+
   it("loop with Inlining: add(i, 1) inlined", () => {
     const source = "function add(a,b){return a+b;} function f(n){var s=0;for(var i=0;i<n;i++){s=s+add(i,1);}return s;}";
     const script = compile(source);

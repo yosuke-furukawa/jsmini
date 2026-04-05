@@ -272,6 +272,7 @@ main {
     <option value="symbol-iterator">Symbol / Iterator</option>
     <option value="destructuring">Destructuring</option>
     <option value="modern-syntax">Modern Syntax</option>
+    <option value="ir-vs-direct">IR vs Direct JIT</option>
   </select>
   <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
     <option value="tree-walking">Tree-Walking</option>
@@ -969,6 +970,51 @@ console.log("arguments:", showArgs(1, 2, 3));
 
 // eval
 console.log("eval:", eval("10 * 20 + 3"));`,
+
+  "ir-vs-direct": `// IR vs Direct JIT — Compare with Wasm JIT (Direct) and Wasm JIT (IR)
+//
+// Switch between "Wasm JIT (Direct)" and "Wasm JIT (IR)" modes,
+// then check the IR tab to see how Inlining + Constant Folding work.
+
+// 1. Inlining: nested function calls get expanded
+function square(x) { return x * x; }
+function cube(x) { return x * square(x); }
+
+function benchInline(n) {
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + cube(i % 100);
+  }
+  return sum;
+}
+console.log("inline:", benchInline(1000));
+// IR tab: cube → square inlined to x*x*x
+// Direct JIT: cube and square compiled separately
+
+// 2. Constant Folding: compile-time computation
+function benchConst(n) {
+  var magic = (2 + 3) * (4 + 5);
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + i + magic;
+  }
+  return sum;
+}
+console.log("const fold:", benchConst(1000));
+// IR tab: (2+3)*(4+5) folded to 45 at compile time
+// Phi for magic eliminated (loop-invariant)
+
+// 3. Dead Code Elimination
+function benchDCE(n) {
+  var unused = 100 * 200;
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + i;
+  }
+  return sum;
+}
+console.log("DCE:", benchDCE(1000));
+// IR tab: unused = 100*200 is eliminated`,
 };
 
 // ========== CodeMirror setup ==========

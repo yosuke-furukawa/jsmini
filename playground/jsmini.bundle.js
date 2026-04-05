@@ -7890,18 +7890,27 @@ var jsmini = (() => {
       const preds = blockEdges.get(blockId).predecessors;
       for (const [slot, phi] of phis) {
         phi.inputs = [];
-        let allSame = true;
-        let firstVal;
         for (const predId of preds) {
           const exitLocals = blockExitLocals.get(predId);
           const val = exitLocals ? exitLocals[slot] : void 0;
           if (val !== void 0) {
             phi.inputs.push([predId, val]);
-            if (firstVal === void 0) firstVal = val;
-            else if (val !== firstVal) allSame = false;
           }
         }
+        const nonSelfInputs = phi.inputs.filter(([, vid]) => vid !== phi.id);
+        const allSame = nonSelfInputs.length > 0 && nonSelfInputs.every(([, vid]) => vid === nonSelfInputs[0][1]);
         if (allSame || phi.inputs.length < 2) {
+          const replacement = nonSelfInputs.length > 0 ? nonSelfInputs[0][1] : void 0;
+          if (replacement !== void 0) {
+            for (const b of irFunc.blocks) {
+              for (const op of b.ops) {
+                op.args = op.args.map((a) => a === phi.id ? replacement : a);
+              }
+              for (const p of b.phis) {
+                p.inputs = p.inputs.map(([bid, vid]) => [bid, vid === phi.id ? replacement : vid]);
+              }
+            }
+          }
           phi.inputs = [];
         }
       }
@@ -8249,9 +8258,25 @@ var jsmini = (() => {
       }
     }
     const useCount = computeUseCount(irFunc);
+    const opDefBlock = /* @__PURE__ */ new Map();
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) opDefBlock.set(op.id, block.id);
+    }
+    const opUseBlocks = /* @__PURE__ */ new Map();
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        for (const argId of op.args) {
+          if (!opUseBlocks.has(argId)) opUseBlocks.set(argId, /* @__PURE__ */ new Set());
+          opUseBlocks.get(argId).add(block.id);
+        }
+      }
+    }
     const needsLocal = /* @__PURE__ */ new Set();
     for (const [id2, count] of useCount) {
-      if (count > 1 && !opToLocal.has(id2)) {
+      if (opToLocal.has(id2)) continue;
+      const defBlock = opDefBlock.get(id2);
+      const useBlocks = opUseBlocks.get(id2);
+      if (count > 1 || defBlock !== void 0 && useBlocks && [...useBlocks].some((b) => b !== defBlock)) {
         needsLocal.add(id2);
         opToLocal.set(id2, nextLocal++);
       }
