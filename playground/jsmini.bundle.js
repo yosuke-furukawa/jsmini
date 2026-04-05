@@ -31,6 +31,7 @@ var jsmini = (() => {
     StateField: () => StateField,
     basicSetup: () => basicSetup,
     buildIR: () => buildIR,
+    codegenIR: () => codegenIR,
     compile: () => compile,
     disassemble: () => disassemble,
     disassembleToWat: () => disassembleToWat,
@@ -8233,6 +8234,52 @@ var jsmini = (() => {
   var WASM_VOID = 64;
   function codegenIR(irFunc) {
     const body = [];
+    const watLines = [];
+    let watIndent = 1;
+    function wat(line) {
+      watLines.push("  ".repeat(watIndent) + line);
+    }
+    const opNames = {
+      [WASM_OP.local_get]: "local.get",
+      [WASM_OP.local_set]: "local.set",
+      [WASM_OP.local_tee]: "local.tee",
+      [WASM_OP.i32_const]: "i32.const",
+      [WASM_OP.f64_const]: "f64.const",
+      [WASM_OP.i32_add]: "i32.add",
+      [WASM_OP.i32_sub]: "i32.sub",
+      [WASM_OP.i32_mul]: "i32.mul",
+      [WASM_OP.i32_div_s]: "i32.div_s",
+      [WASM_OP.i32_rem_s]: "i32.rem_s",
+      [WASM_OP.f64_add]: "f64.add",
+      [WASM_OP.f64_sub]: "f64.sub",
+      [WASM_OP.f64_mul]: "f64.mul",
+      [WASM_OP.f64_div]: "f64.div",
+      [WASM_OP.f64_neg]: "f64.neg",
+      [WASM_OP.i32_lt_s]: "i32.lt_s",
+      [WASM_OP.i32_gt_s]: "i32.gt_s",
+      [WASM_OP.i32_le_s]: "i32.le_s",
+      [WASM_OP.i32_ge_s]: "i32.ge_s",
+      [WASM_OP.i32_eqz]: "i32.eqz",
+      [WASM_OP.f64_lt]: "f64.lt",
+      [WASM_OP.f64_gt]: "f64.gt",
+      [WASM_OP.f64_le]: "f64.le",
+      [WASM_OP.f64_ge]: "f64.ge",
+      [WASM_OP.return]: "return",
+      [WASM_OP.end]: "end",
+      [WASM_OP.block]: "block",
+      [WASM_OP.loop]: "loop",
+      [WASM_OP.br]: "br",
+      [WASM_OP.br_if]: "br_if",
+      70: "i32.eq",
+      71: "i32.ne",
+      97: "f64.eq",
+      98: "f64.ne",
+      113: "i32.and",
+      114: "i32.or",
+      115: "i32.xor",
+      116: "i32.shl",
+      117: "i32.shr_s"
+    };
     const opToLocal = /* @__PURE__ */ new Map();
     let nextLocal = irFunc.paramCount;
     for (const block of irFunc.blocks) {
@@ -8317,22 +8364,32 @@ var jsmini = (() => {
       if (!block) continue;
       const loopInfo = cfg.loops.find((l) => l.header === blockId);
       if (loopInfo) {
+        wat(`;; B${blockId} (loop header)`);
         body.push(WASM_OP.block, WASM_VOID);
+        wat("block $exit_" + loopInfo.exitBlock);
+        watIndent++;
         controlStack.push({ kind: "block", targetBlockId: loopInfo.exitBlock });
         body.push(WASM_OP.loop, WASM_VOID);
+        wat("loop $loop_" + blockId);
+        watIndent++;
         controlStack.push({ kind: "loop", targetBlockId: blockId });
+      } else if (block.ops.length > 0) {
+        wat(`;; B${blockId}`);
       }
       for (const op of block.ops) {
         if (op.opcode === "Branch") {
           emitLoadValue(op.args[0], body, opToLocal);
           if (loopInfo) {
             body.push(WASM_OP.i32_eqz);
+            wat("i32.eqz");
             const exitDepth = controlStack.length - 1 - controlStack.findLastIndex(
               (e) => e.kind === "block" && e.targetBlockId === loopInfo.exitBlock
             );
             body.push(WASM_OP.br_if, exitDepth);
+            wat(`br_if ${exitDepth} ;; \u2192 exit`);
           } else {
             body.push(WASM_OP.br_if, 0);
+            wat("br_if 0");
           }
         } else if (op.opcode === "Jump") {
           const jumpTarget = block.successors[0];
@@ -8340,7 +8397,9 @@ var jsmini = (() => {
           if (writes) {
             for (const { phiLocal, valueId } of writes) {
               emitValueOrConst(valueId, body, opToLocal, opById);
+              wat(`;; phi write: local ${phiLocal} = v${valueId}`);
               body.push(WASM_OP.local_set, phiLocal);
+              wat(`local.set ${phiLocal}`);
             }
           }
           if (jumpTarget !== void 0 && cfg.backEdges.has(`${blockId}\u2192${jumpTarget}`)) {
@@ -8348,20 +8407,29 @@ var jsmini = (() => {
               (e) => e.kind === "loop" && e.targetBlockId === jumpTarget
             );
             body.push(WASM_OP.br, loopDepth);
+            wat(`br ${loopDepth} ;; \u2192 loop`);
           }
         } else if (op.opcode === "Return") {
           emitLoadValue(op.args[0], body, opToLocal);
+          wat(`local.get ${opToLocal.get(op.args[0]) ?? "?"} ;; v${op.args[0]}`);
           body.push(WASM_OP.return);
+          wat("return");
         } else {
+          const beforeLen = body.length;
           emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], /* @__PURE__ */ new Set(), opById, globalToLocal);
+          watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
         }
       }
       for (const loop of cfg.loops) {
         const lastBodyBlock = Math.max(...[...loop.body]);
         if (blockId === lastBodyBlock) {
+          watIndent--;
           body.push(WASM_OP.end);
+          wat("end ;; loop");
+          watIndent--;
+          body.push(WASM_OP.end);
+          wat("end ;; block");
           controlStack.pop();
-          body.push(WASM_OP.end);
           controlStack.pop();
         }
       }
@@ -8380,7 +8448,11 @@ var jsmini = (() => {
         }
       }
     }
-    return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount };
+    const paramStr = Array.from({ length: irFunc.paramCount }, (_, i) => `(param $p${i} i32)`).join(" ");
+    const header = `(func $${irFunc.name} ${paramStr} (result i32)`;
+    const localDecls = nextLocal > irFunc.paramCount ? `  (local ${Array(nextLocal - irFunc.paramCount).fill("i32").join(" ")})` : "";
+    const fullWat = [header, localDecls, ";; phi init", ...watLines, ")"].filter(Boolean).join("\n");
+    return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount, wat: fullWat };
   }
   function emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById, globalToLocal = /* @__PURE__ */ new Map()) {
     switch (op.opcode) {
@@ -8508,6 +8580,38 @@ var jsmini = (() => {
       }
       default:
         break;
+    }
+  }
+  function watFromBytes(body, startIdx, op, opToLocal, opById, opNames, wat) {
+    const comment2 = op.opcode === "Const" ? ` ;; ${op.value}` : op.opcode === "Param" ? ` ;; param ${op.index}` : op.opcode === "LoadGlobal" ? ` ;; ${op.globalName}` : op.opcode === "StoreGlobal" ? ` ;; ${op.globalName}` : ` ;; v${op.id}`;
+    let i = startIdx;
+    while (i < body.length) {
+      const byte = body[i];
+      const name2 = opNames[byte];
+      if (byte === WASM_OP.i32_const) {
+        let val = 0, shift2 = 0, b;
+        let j = i + 1;
+        do {
+          b = body[j];
+          val |= (b & 127) << shift2;
+          shift2 += 7;
+          j++;
+        } while (b & 128);
+        if (shift2 < 32 && b & 64) val |= -1 << shift2;
+        wat(`i32.const ${val}${comment2}`);
+        i = j;
+      } else if (byte === WASM_OP.f64_const) {
+        wat(`f64.const ...${comment2}`);
+        i += 9;
+      } else if (byte === WASM_OP.local_get || byte === WASM_OP.local_set || byte === WASM_OP.local_tee) {
+        wat(`${name2} ${body[i + 1]}${comment2}`);
+        i += 2;
+      } else if (name2) {
+        wat(`${name2}${comment2}`);
+        i++;
+      } else {
+        i++;
+      }
     }
   }
   function emitLoadValue(opId, body, opToLocal) {

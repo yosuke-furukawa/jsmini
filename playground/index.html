@@ -329,7 +329,7 @@ main {
 <script>
 const { basicSetup, javascript, oneDark, EditorView, keymap, Prec, StateEffect, StateField, Decoration, RangeSet,
         vmEvaluate, compile, disassemble, disassembleToWat,
-        buildIR, printIR, optimize } = jsmini;
+        buildIR, printIR, optimize, codegenIR } = jsmini;
 
 // ========== Step highlight decoration ==========
 const setStepHighlight = StateEffect.define();
@@ -1519,19 +1519,39 @@ function runCode() {
         panels.ir.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
       }
 
-      // WAT タブ: bytecode → Wasm テキスト
+      // WAT タブ
       if (mode === "wasm-jit" || mode === "wasm-jit-ir") {
         const allBcFuncs = func.constants.filter(c => c && typeof c === "object" && "bytecode" in c && "name" in c);
         let watHtml = "";
-        for (const c of allBcFuncs) {
-          const wat = disassembleToWat(c, "i32", allBcFuncs);
-          if (wat) {
-            watHtml += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">`;
-            watHtml += `<div style="font-size:11px;color:var(--green);text-transform:uppercase;font-weight:600;margin-bottom:4px;">WAT — ${escapeHtml(c.name)}</div>`;
-            watHtml += `<pre style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text);line-height:1.6;white-space:pre;">${escapeHtml(wat)}</pre>`;
-            watHtml += `</div>`;
-          } else {
-            watHtml += `<div style="margin-top:8px;color:var(--text-muted);font-size:12px;">WAT — ${escapeHtml(c.name)}: JIT 非対応 (未サポートの opcode あり)</div>`;
+        if (mode === "wasm-jit-ir") {
+          // IR モード: IR codegen の WAT を表示
+          const knownFuncs = new Map();
+          for (const f of allBcFuncs) knownFuncs.set(f.name, f);
+          for (const c of allBcFuncs) {
+            try {
+              const ir = buildIR(c, { knownFuncs });
+              optimize(ir, { knownFuncs });
+              const result = codegenIR(ir);
+              watHtml += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">`;
+              watHtml += `<div style="font-size:11px;color:var(--green);text-transform:uppercase;font-weight:600;margin-bottom:4px;">WAT (IR) — ${escapeHtml(c.name)}</div>`;
+              watHtml += `<pre style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text);line-height:1.6;white-space:pre;">${escapeHtml(result.wat)}</pre>`;
+              watHtml += `</div>`;
+            } catch (e) {
+              watHtml += `<div style="margin-top:8px;color:var(--text-muted);font-size:12px;">WAT (IR) — ${escapeHtml(c.name)}: IR codegen error</div>`;
+            }
+          }
+        } else {
+          // Direct モード: disassembleToWat
+          for (const c of allBcFuncs) {
+            const wat = disassembleToWat(c, "i32", allBcFuncs);
+            if (wat) {
+              watHtml += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">`;
+              watHtml += `<div style="font-size:11px;color:var(--green);text-transform:uppercase;font-weight:600;margin-bottom:4px;">WAT (Direct) — ${escapeHtml(c.name)}</div>`;
+              watHtml += `<pre style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text);line-height:1.6;white-space:pre;">${escapeHtml(wat)}</pre>`;
+              watHtml += `</div>`;
+            } else {
+              watHtml += `<div style="margin-top:8px;color:var(--text-muted);font-size:12px;">WAT (Direct) — ${escapeHtml(c.name)}: JIT 非対応</div>`;
+            }
           }
         }
         panels.wat.innerHTML = watHtml || `<p class="empty-msg">No WAT output</p>`;

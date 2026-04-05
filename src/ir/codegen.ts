@@ -17,8 +17,32 @@ export interface IRCodegenResult {
   funcIndex: number;
 }
 
-export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: number } {
+export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: number; wat: string } {
   const body: number[] = [];
+  const watLines: string[] = [];
+  let watIndent = 1;
+  function wat(line: string) { watLines.push("  ".repeat(watIndent) + line); }
+
+  // Wasm opcode → WAT 文字列のマップ
+  const opNames: Record<number, string> = {
+    [WASM_OP.local_get]: "local.get", [WASM_OP.local_set]: "local.set", [WASM_OP.local_tee]: "local.tee",
+    [WASM_OP.i32_const]: "i32.const", [WASM_OP.f64_const]: "f64.const",
+    [WASM_OP.i32_add]: "i32.add", [WASM_OP.i32_sub]: "i32.sub", [WASM_OP.i32_mul]: "i32.mul",
+    [WASM_OP.i32_div_s]: "i32.div_s", [WASM_OP.i32_rem_s]: "i32.rem_s",
+    [WASM_OP.f64_add]: "f64.add", [WASM_OP.f64_sub]: "f64.sub", [WASM_OP.f64_mul]: "f64.mul",
+    [WASM_OP.f64_div]: "f64.div", [WASM_OP.f64_neg]: "f64.neg",
+    [WASM_OP.i32_lt_s]: "i32.lt_s", [WASM_OP.i32_gt_s]: "i32.gt_s",
+    [WASM_OP.i32_le_s]: "i32.le_s", [WASM_OP.i32_ge_s]: "i32.ge_s",
+    [WASM_OP.i32_eqz]: "i32.eqz",
+    [WASM_OP.f64_lt]: "f64.lt", [WASM_OP.f64_gt]: "f64.gt",
+    [WASM_OP.f64_le]: "f64.le", [WASM_OP.f64_ge]: "f64.ge",
+    [WASM_OP.return]: "return", [WASM_OP.end]: "end",
+    [WASM_OP.block]: "block", [WASM_OP.loop]: "loop",
+    [WASM_OP.br]: "br", [WASM_OP.br_if]: "br_if",
+    0x46: "i32.eq", 0x47: "i32.ne", 0x61: "f64.eq", 0x62: "f64.ne",
+    0x71: "i32.and", 0x72: "i32.or", 0x73: "i32.xor",
+    0x74: "i32.shl", 0x75: "i32.shr_s",
+  };
 
   // Op ID → Wasm local index のマッピング
   // Wasm locals: [params..., phi locals..., temp locals...]
@@ -135,12 +159,17 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
     // ループヘッダ: block $exit + loop $continue を開始
     const loopInfo = cfg.loops.find(l => l.header === blockId);
     if (loopInfo) {
-      // block $exit — forward edge (条件 false) で脱出
+      wat(`;; B${blockId} (loop header)`);
       body.push(WASM_OP.block, WASM_VOID);
+      wat("block $exit_" + loopInfo.exitBlock);
+      watIndent++;
       controlStack.push({ kind: "block", targetBlockId: loopInfo.exitBlock });
-      // loop $continue — back edge で先頭に戻る
       body.push(WASM_OP.loop, WASM_VOID);
+      wat("loop $loop_" + blockId);
+      watIndent++;
       controlStack.push({ kind: "loop", targetBlockId: blockId });
+    } else if (block.ops.length > 0) {
+      wat(`;; B${blockId}`);
     }
 
     // 通常の命令を出力
@@ -152,16 +181,16 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
         // Branch は条件が true → successors[0], false → successors[1] (builder の規約に依存)
         // ループヘッダの Branch: false → exit (block 脱出)
         if (loopInfo) {
-          // 条件が false → exit (block 脱出)
           body.push(WASM_OP.i32_eqz);
+          wat("i32.eqz");
           const exitDepth = controlStack.length - 1 - controlStack.findLastIndex(
             e => e.kind === "block" && e.targetBlockId === loopInfo.exitBlock
           );
           body.push(WASM_OP.br_if, exitDepth);
+          wat(`br_if ${exitDepth} ;; → exit`);
         } else {
-          // 非ループの if: とりあえず block + br_if
-          // (シンプルに: 条件 false なら次のブロックに fall through)
-          body.push(WASM_OP.br_if, 0); // placeholder
+          body.push(WASM_OP.br_if, 0);
+          wat("br_if 0");
         }
       } else if (op.opcode === "Jump") {
         // 無条件ジャンプ
@@ -172,22 +201,29 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
         if (writes) {
           for (const { phiLocal, valueId } of writes) {
             emitValueOrConst(valueId, body, opToLocal, opById);
+            wat(`;; phi write: local ${phiLocal} = v${valueId}`);
             body.push(WASM_OP.local_set, phiLocal);
+            wat(`local.set ${phiLocal}`);
           }
         }
         if (jumpTarget !== undefined && cfg.backEdges.has(`${blockId}→${jumpTarget}`)) {
-          // back edge → br $loop
           const loopDepth = controlStack.length - 1 - controlStack.findLastIndex(
             e => e.kind === "loop" && e.targetBlockId === jumpTarget
           );
           body.push(WASM_OP.br, loopDepth);
+          wat(`br ${loopDepth} ;; → loop`);
         }
         // forward jump は fall-through
       } else if (op.opcode === "Return") {
         emitLoadValue(op.args[0], body, opToLocal);
+        wat(`local.get ${opToLocal.get(op.args[0]) ?? "?"} ;; v${op.args[0]}`);
         body.push(WASM_OP.return);
+        wat("return");
       } else {
+        const beforeLen = body.length;
         emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal);
+        // emitOp が出力した命令を WAT に変換
+        watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
       }
     }
 
@@ -195,11 +231,13 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
     for (const loop of cfg.loops) {
       const lastBodyBlock = Math.max(...[...loop.body]);
       if (blockId === lastBodyBlock) {
-        // loop end
+        watIndent--;
         body.push(WASM_OP.end);
+        wat("end ;; loop");
+        watIndent--;
+        body.push(WASM_OP.end);
+        wat("end ;; block");
         controlStack.pop();
-        // block end
-        body.push(WASM_OP.end);
         controlStack.pop();
       }
     }
@@ -223,7 +261,14 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
     }
   }
 
-  return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount };
+  const paramStr = Array.from({length: irFunc.paramCount}, (_, i) => `(param $p${i} i32)`).join(" ");
+  const header = `(func $${irFunc.name} ${paramStr} (result i32)`;
+  const localDecls = nextLocal > irFunc.paramCount
+    ? `  (local ${Array(nextLocal - irFunc.paramCount).fill("i32").join(" ")})`
+    : "";
+  const fullWat = [header, localDecls, ";; phi init", ...watLines, ")"].filter(Boolean).join("\n");
+
+  return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount, wat: fullWat };
 }
 
 // ========== Op → Wasm 命令 ==========
@@ -383,6 +428,44 @@ function emitOp(
 }
 
 // ========== ヘルパー ==========
+
+// body のバイト列変化から WAT テキストを簡易生成
+function watFromBytes(
+  body: number[], startIdx: number, op: Op,
+  opToLocal: Map<number, number>, opById: Map<number, Op>,
+  opNames: Record<number, string>, wat: (line: string) => void,
+): void {
+  const comment = op.opcode === "Const" ? ` ;; ${op.value}`
+    : op.opcode === "Param" ? ` ;; param ${op.index}`
+    : op.opcode === "LoadGlobal" ? ` ;; ${op.globalName}`
+    : op.opcode === "StoreGlobal" ? ` ;; ${op.globalName}`
+    : ` ;; v${op.id}`;
+  let i = startIdx;
+  while (i < body.length) {
+    const byte = body[i];
+    const name = opNames[byte];
+    if (byte === WASM_OP.i32_const) {
+      // LEB128 encoded value follows
+      let val = 0, shift = 0, b;
+      let j = i + 1;
+      do { b = body[j]; val |= (b & 0x7f) << shift; shift += 7; j++; } while (b & 0x80);
+      if (shift < 32 && (b & 0x40)) val |= (-1 << shift);
+      wat(`i32.const ${val}${comment}`);
+      i = j;
+    } else if (byte === WASM_OP.f64_const) {
+      wat(`f64.const ...${comment}`);
+      i += 9;
+    } else if (byte === WASM_OP.local_get || byte === WASM_OP.local_set || byte === WASM_OP.local_tee) {
+      wat(`${name} ${body[i + 1]}${comment}`);
+      i += 2;
+    } else if (name) {
+      wat(`${name}${comment}`);
+      i++;
+    } else {
+      i++;
+    }
+  }
+}
 
 // Op の値を Wasm スタックにロード
 function emitLoadValue(opId: number, body: number[], opToLocal: Map<number, number>): void {

@@ -24,6 +24,7 @@ export { disassembleToWat } from "../src/jit/wasm-compiler.ts";
 export { buildIR } from "../src/ir/builder.ts";
 export { printIR } from "../src/ir/printer.ts";
 export { optimize } from "../src/ir/optimize.ts";
+export { codegenIR } from "../src/ir/codegen.ts";
 
 // CodeMirror
 export { basicSetup } from "codemirror";
