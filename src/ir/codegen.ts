@@ -41,6 +41,18 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
     }
   }
 
+  // グローバル変数 → Wasm local に割り当て
+  const globalToLocal = new Map<string, number>();
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      if ((op.opcode === "LoadGlobal" || op.opcode === "StoreGlobal") && op.globalName) {
+        if (!globalToLocal.has(op.globalName)) {
+          globalToLocal.set(op.globalName, nextLocal++);
+        }
+      }
+    }
+  }
+
   // 中間値で複数回使われるもの → local に格納
   const useCount = computeUseCount(irFunc);
   const needsLocal = new Set<number>();
@@ -156,7 +168,7 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
         emitLoadValue(op.args[0], body, opToLocal);
         body.push(WASM_OP.return);
       } else {
-        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById);
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal);
       }
     }
 
@@ -207,6 +219,7 @@ function emitOp(
   activeBlocks: number[],
   loopHeaders: Set<number>,
   opById: Map<number, Op>,
+  globalToLocal: Map<string, number> = new Map(),
 ): void {
   switch (op.opcode) {
     case "Const": {
@@ -239,6 +252,22 @@ function emitOp(
       break;
     }
 
+    case "LoadGlobal": {
+      const gLocal = globalToLocal.get(op.globalName!);
+      if (gLocal !== undefined) {
+        body.push(WASM_OP.local_get, gLocal);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      }
+      break;
+    }
+    case "StoreGlobal": {
+      const gLocal = globalToLocal.get(op.globalName!);
+      if (gLocal !== undefined) {
+        emitLoadValue(op.args[0], body, opToLocal);
+        body.push(WASM_OP.local_set, gLocal);
+      }
+      break;
+    }
     case "TypeGuard": {
       // 型ガード: 現在は型が合ってる前提で passthrough
       // 将来: 型チェック → 失敗で deopt (unreachable or special return)
@@ -464,6 +493,16 @@ function getReturnType(irFunc: IRFunction): IRType {
 
 export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Instance; funcName: string } | null {
   try {
+    // IR に Wasm 化できない Op が含まれてたらスキップ
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "Call") return null; // 未インライン化の Call
+        if (op.opcode === "Const" && op.value !== undefined &&
+            typeof op.value !== "number" && typeof op.value !== "boolean" &&
+            op.value !== null) return null; // 非数値 Const (関数オブジェクト等)
+      }
+    }
+
     const builder = new WasmBuilder();
 
     // パラメータの型を IR から取得

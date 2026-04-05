@@ -160,8 +160,7 @@ export class JitManager {
   // OSR から IR パスで Wasm コンパイル
   tryOSRViaIR(func: BytecodeFunction, relatedFuncs: BytecodeFunction[]): ((...args: number[]) => number) | null {
     try {
-      // <script> (トップレベル) は IR 変換が複雑なのでスキップ
-      if (func.name === "<script>") return null;
+      // <script> (トップレベル) も LoadGlobal/StoreGlobal で対応
       // 関連関数を knownFuncs に登録
       const funcsMap = new Map<string, BytecodeFunction>();
       for (const f of relatedFuncs) funcsMap.set(f.name, f);

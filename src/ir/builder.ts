@@ -306,9 +306,26 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
         }
         case "LdaGlobal": {
           const name = constants[instr.operand!] as string;
-          const op = registerOp(createOp(irFunc, "Const", [], "any"));
-          op.value = name as any; op.calleeName = name;
-          block.ops.push(op); stack.push(op.id); break;
+          // knownFuncs にある関数参照 → Const + calleeName (Inlining 用)
+          if (knownFuncs?.has(name)) {
+            const op = registerOp(createOp(irFunc, "Const", [], "any"));
+            op.value = name as any; op.calleeName = name;
+            block.ops.push(op); stack.push(op.id);
+          } else {
+            // グローバル変数の読み込み
+            const op = registerOp(createOp(irFunc, "LoadGlobal", [], "any"));
+            op.globalName = name;
+            block.ops.push(op); stack.push(op.id);
+          }
+          break;
+        }
+        case "StaGlobal": {
+          const name = constants[instr.operand!] as string;
+          const val = stack[stack.length - 1]; // peek
+          const op = registerOp(createOp(irFunc, "StoreGlobal", [val], "any"));
+          op.globalName = name;
+          block.ops.push(op);
+          break;
         }
         case "Call": {
           const argc = instr.operand!;

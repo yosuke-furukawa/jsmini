@@ -31,14 +31,11 @@ const benchmarks = [
     name: "hot function add (10000 calls)",
     source: `
       function add(a, b) { return a + b; }
-      function hotAdd(n) {
-        var sum = 0;
-        for (var i = 0; i < n; i = i + 1) {
-          sum = sum + add(i, 1);
-        }
-        return sum;
+      var sum = 0;
+      for (var i = 0; i < 10000; i = i + 1) {
+        sum = sum + add(i, 1);
       }
-      hotAdd(10000);
+      sum;
     `,
     jitEligible: true,
   },
@@ -46,14 +43,11 @@ const benchmarks = [
     name: "hot function mul (10000 calls)",
     source: `
       function mul(a, b) { return a * b; }
-      function hotMul(n) {
-        var sum = 0;
-        for (var i = 0; i < n; i = i + 1) {
-          sum = sum + mul(i, 2);
-        }
-        return sum;
+      var sum = 0;
+      for (var i = 0; i < 10000; i = i + 1) {
+        sum = sum + mul(i, 2);
       }
-      hotMul(10000);
+      sum;
     `,
     jitEligible: true,
   },
