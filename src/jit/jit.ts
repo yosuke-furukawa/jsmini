@@ -145,7 +145,7 @@ export class JitManager {
       const ir = buildIR(func, { feedback: this.feedback, knownFuncs: this.knownFuncs });
       optimize(ir, {
         knownFuncs: this.knownFuncs,
-        buildIROptions: { feedback: this.feedback },
+        buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs },
       });
       const result = compileIRToWasm(ir);
       if (!result) return null;
@@ -168,7 +168,7 @@ export class JitManager {
       const ir = buildIR(func, { feedback: this.feedback, knownFuncs: funcsMap });
       optimize(ir, {
         knownFuncs: funcsMap,
-        buildIROptions: { feedback: this.feedback },
+        buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs },
       });
       const result = compileIRToWasm(ir);
       if (!result) return null;

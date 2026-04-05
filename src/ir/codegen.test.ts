@@ -138,6 +138,24 @@ describe("IR → Wasm codegen — loops", () => {
     assert.equal(wasmF(100), 5650); // 4950 + 700
   });
 
+  it("nested inlining: add3(add(a,b),c) fully inlined", () => {
+    const source = "function add(a,b){return a+b;} function add3(a,b,c){return add(add(a,b),c);} function f(n){var s=0;for(var i=0;i<n;i++){s=add3(s,i,1);}return s;}";
+    const script = compile(source);
+    const funcs = new Map<string, any>();
+    for (const c of script.constants) {
+      if (typeof c === "object" && c !== null && "bytecode" in (c as any)) funcs.set((c as any).name, c);
+    }
+    const ir = buildIR(funcs.get("f")!, { knownFuncs: funcs });
+    optimize(ir, { knownFuncs: funcs, buildIROptions: { knownFuncs: funcs } });
+    const dump = printIR(ir);
+    assert.ok(!dump.includes("Call("), "all calls should be inlined");
+    const compiled = compileIRToWasm(ir);
+    assert.ok(compiled !== null);
+    const wasmF = (compiled!.instance.exports as any).f;
+    assert.equal(wasmF(10), 55);
+    assert.equal(wasmF(100), 5050);
+  });
+
   it("loop with Inlining: add(i, 1) inlined", () => {
     const source = "function add(a,b){return a+b;} function f(n){var s=0;for(var i=0;i<n;i++){s=s+add(i,1);}return s;}";
     const script = compile(source);
