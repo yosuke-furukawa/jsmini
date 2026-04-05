@@ -95,22 +95,46 @@ IR のブロックをトポロジカル順に配置し、Wasm の block/loop/br 
 - [x] 19-3e: ネストしたループ対応 (2パス SSA builder + forward edge phiWrites)
 - [x] 19-3f: テスト (for loop, nested loop, loop+inlining — 3 tests)
 
-### 19-4: ベンチマーク
+### 19-4: ベンチマーク ✅
 
 - [x] 19-4a: bench.ts に IR JIT 列追加
-- [x] 19-4b: hot add/mul をループごと関数に包む (現実的なパターン)
+- [x] 19-4b: hot add/mul をループごと関数に包む (暫定対応)
 - [x] 19-4c: 結果:
   - hot add: IR 102x (Direct 100x)
   - for loop sum: IR 79x (Direct 77x)
   - nested loop: IR 80x (Direct 76x)
   - IR vs Direct: ~1.0-1.05x (ほぼ同等)
 
+### 19-5: back-edge counter によるホットループ判定
+
+**課題**: 現在の JIT は「関数の呼び出し回数」(tryCall の invocation count) だけでホットさを
+判定している。トップレベルのループは1回しか呼ばれないので JIT されない。
+
+V8 は **back-edge counter** (ループの繰り返し回数) でもホットさを判定し、しきい値を超えたら
+OSR (On-Stack Replacement) でループの途中から最適化コードに切り替える。
+トップレベルでも関数内でも同じ仕組み。
+
+jsmini の Phase 11 OSR は direct JIT (wasm-compiler.ts) 用に実装済み。
+これを IR パスに繋げる。
+
+- [ ] 19-5a: Phase 11 の OSR back-edge counter の仕組みを確認
+  - VM のどこでカウントしてるか
+  - しきい値はいくつか
+  - OSR 時に何を渡してるか
+- [ ] 19-5b: OSR から IR パスを呼び出す
+  - back-edge がホット → ループを含む関数の BytecodeFunction を IR → Wasm
+  - IR の Inlining でループ内の関数呼び出しが消える
+- [ ] 19-5c: bench.ts の hot add を元に戻す (関数に包まない版)
+  - トップレベルのループが OSR + IR で JIT されることを確認
+- [ ] 19-5d: ベンチマーク
+  - 期待: トップレベルの hot add でも 100x 級
+  - IR + Inlining の効果が Direct JIT との差に出る
+
 ## 目標
 
-- ループを含む関数全体が Wasm にコンパイルされる
-- hot add ベンチで有意な改善 (ループ + Inlining が Wasm 内で完結)
+- ループを含む関数全体が Wasm にコンパイルされる ✅
+- back-edge counter でトップレベルのループも JIT される
 - IR の最適化 (Inlining + ConstFold + DCE) の効果が数字に出る
-- fibonacci と同レベルの高速化
 
 ## 技術メモ
 
