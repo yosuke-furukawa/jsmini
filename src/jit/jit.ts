@@ -157,6 +157,29 @@ export class JitManager {
     }
   }
 
+  // OSR から IR パスで Wasm コンパイル
+  tryOSRViaIR(func: BytecodeFunction, relatedFuncs: BytecodeFunction[]): ((...args: number[]) => number) | null {
+    try {
+      // <script> (トップレベル) は IR 変換が複雑なのでスキップ
+      if (func.name === "<script>") return null;
+      // 関連関数を knownFuncs に登録
+      const funcsMap = new Map<string, BytecodeFunction>();
+      for (const f of relatedFuncs) funcsMap.set(f.name, f);
+      // IR 構築 + 最適化 (Inlining で関連関数を展開)
+      const ir = buildIR(func, { feedback: this.feedback, knownFuncs: funcsMap });
+      optimize(ir, {
+        knownFuncs: funcsMap,
+        buildIROptions: { feedback: this.feedback },
+      });
+      const result = compileIRToWasm(ir);
+      if (!result) return null;
+      const wasmFn = (result.instance.exports as any)[ir.name] as (...args: number[]) => number;
+      return wasmFn ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   private compileWithRelatedFuncs(
     func: BytecodeFunction,
     spec: WasmNumericType,
