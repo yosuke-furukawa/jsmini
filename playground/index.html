@@ -276,7 +276,8 @@ main {
   <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
     <option value="tree-walking">Tree-Walking</option>
     <option value="vm">Bytecode VM</option>
-    <option value="wasm-jit">Wasm JIT</option>
+    <option value="wasm-jit">Wasm JIT (Direct)</option>
+    <option value="wasm-jit-ir">Wasm JIT (IR)</option>
   </select>
   <button id="run-btn">Run</button>
   <span class="shortcut-hint">Cmd+Enter</span>
@@ -1440,7 +1441,7 @@ function runCode() {
   }
 
   const mode = document.getElementById("mode-select").value;
-  const isVM = mode === "vm" || mode === "wasm-jit";
+  const isVM = mode === "vm" || mode === "wasm-jit" || mode === "wasm-jit-ir";
 
   // Bytecode (VM / Wasm JIT mode)
   if (isVM) {
@@ -1473,7 +1474,7 @@ function runCode() {
       }
 
       // WAT タブ: bytecode → Wasm テキスト
-      if (mode === "wasm-jit") {
+      if (mode === "wasm-jit" || mode === "wasm-jit-ir") {
         const allBcFuncs = func.constants.filter(c => c && typeof c === "object" && "bytecode" in c && "name" in c);
         let watHtml = "";
         for (const c of allBcFuncs) {
@@ -1509,13 +1510,14 @@ function runCode() {
   stepIndex = -1;
   const execStart = performance.now();
   try {
-    if (mode === "wasm-jit") {
+    if (mode === "wasm-jit" || mode === "wasm-jit-ir") {
       const jitResult = vmEvaluate(source, {
         console: { log: (...args) => logs.push(args) },
         jit: true,
         jitThreshold: 5,
         collectFeedback: true,
         traceTier: true,
+        useIR: mode === "wasm-jit-ir",
       });
       returnValue = jitResult.value;
       jitInfo = { tierLog: jitResult.tierLog || [], feedback: jitResult.feedback || null };
@@ -1531,7 +1533,7 @@ function runCode() {
     error = `${e.constructor?.name || "Error"}: ${e.message}`;
   }
   const execTime = performance.now() - execStart;
-  const modeLabels = { "tree-walking": "Tree-Walking", "vm": "Bytecode VM", "wasm-jit": "Wasm JIT" };
+  const modeLabels = { "tree-walking": "Tree-Walking", "vm": "Bytecode VM", "wasm-jit": "Wasm JIT (Direct)", "wasm-jit-ir": "Wasm JIT (IR)" };
   renderResult(logs, returnValue, error, panels.result, execTime, modeLabels[mode] || mode, jitInfo);
 
   // Step 用のソース範囲を事前計算 (tree-walking only)
