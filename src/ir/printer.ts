@@ -29,6 +29,12 @@ function formatOp(op: Op, indent: string = "  "): string {
       return `${indent}v${op.id}: ${typeStr} = Phi(${inputs})`;
     }
 
+    case "LoadGlobal":
+      return `${indent}v${op.id}: ${typeStr} = LoadGlobal("${op.globalName}")`;
+
+    case "StoreGlobal":
+      return `${indent}StoreGlobal("${op.globalName}", v${op.args[0]})`;
+
     case "TypeGuard":
       return `${indent}v${op.id}: ${typeStr} = TypeGuard(v${op.args[0]}, ${op.guardType})`;
 

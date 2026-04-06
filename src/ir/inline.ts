@@ -120,6 +120,8 @@ function performInline(
       value: op.value,
       index: op.index,
       guardType: op.guardType,
+      calleeName: op.calleeName,
+      globalName: op.globalName,
     };
     newOps.push(newOp);
   }
@@ -142,12 +144,17 @@ function performInline(
         // Call の位置に Inlining した Op を挿入
         newBlockOps.push(...newOps);
 
-        // Call を参照してた Op の引数を、Inlining 結果に書き換え
+        // Call を参照してた全 Op の引数を、Inlining 結果に書き換え
         const resultId = idMap.get(callOp.id);
         if (resultId !== undefined) {
-          // Call の結果を使ってる後続の Op の引数を書き換え
-          for (const laterOp of callerBlock.ops) {
-            laterOp.args = laterOp.args.map(a => a === callOp.id ? resultId : a);
+          // callerFunc 全体の Op + Phi を書き換え
+          for (const b of callerFunc.blocks) {
+            for (const op of b.ops) {
+              op.args = op.args.map(a => a === callOp.id ? resultId : a);
+            }
+            for (const phi of b.phis) {
+              phi.inputs = phi.inputs.map(([bid, vid]) => [bid, vid === callOp.id ? resultId : vid]);
+            }
           }
           for (const newOp of newBlockOps) {
             newOp.args = newOp.args.map(a => a === callOp.id ? resultId : a);

@@ -47,6 +47,10 @@ export type IROpcode =
   | "Jump"            // 無条件ジャンプ
   | "Return"          // args[0] = 返す値
 
+  // グローバル変数
+  | "LoadGlobal"      // グローバル変数の読み込み。globalName フィールドに変数名
+  | "StoreGlobal"     // グローバル変数の書き込み。args[0] = 値、globalName に変数名
+
   // 関数呼び出し
   | "Call"            // args[0] = callee, args[1..] = 引数
 
@@ -75,6 +79,9 @@ export interface Op {
 
   // Call 用: インライン展開対象の BytecodeFunction
   calleeName?: string;
+
+  // LoadGlobal / StoreGlobal 用
+  globalName?: string;
 }
 
 // ========== Phi ノード ==========

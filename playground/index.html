@@ -272,11 +272,13 @@ main {
     <option value="symbol-iterator">Symbol / Iterator</option>
     <option value="destructuring">Destructuring</option>
     <option value="modern-syntax">Modern Syntax</option>
+    <option value="ir-vs-direct">IR vs Direct JIT</option>
   </select>
   <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
     <option value="tree-walking">Tree-Walking</option>
     <option value="vm">Bytecode VM</option>
-    <option value="wasm-jit">Wasm JIT</option>
+    <option value="wasm-jit">Wasm JIT (Direct)</option>
+    <option value="wasm-jit-ir">Wasm JIT (IR)</option>
   </select>
   <button id="run-btn">Run</button>
   <span class="shortcut-hint">Cmd+Enter</span>
@@ -294,6 +296,8 @@ main {
       <button class="tab-btn active" data-tab="tokens">Tokens <span id="badge-tokens" class="tab-badge"></span></button>
       <button class="tab-btn" data-tab="ast">AST <span id="badge-ast" class="tab-badge"></span></button>
       <button class="tab-btn" data-tab="bytecode">Bytecode</button>
+      <button class="tab-btn" data-tab="ir">IR</button>
+      <button class="tab-btn" data-tab="wat">WAT</button>
       <button class="tab-btn" data-tab="result">Result</button>
       <button class="tab-btn" data-tab="env">Env</button>
     </div>
@@ -305,6 +309,12 @@ main {
     </div>
     <div id="panel-bytecode" class="panel">
       <p class="empty-msg">Run in VM mode to see bytecode</p>
+    </div>
+    <div id="panel-ir" class="panel">
+      <p class="empty-msg">Run in VM/JIT mode to see IR (SSA)</p>
+    </div>
+    <div id="panel-wat" class="panel">
+      <p class="empty-msg">Run in JIT mode to see WAT</p>
     </div>
     <div id="panel-result" class="panel">
       <p class="empty-msg">Run to see result</p>
@@ -318,7 +328,8 @@ main {
 <script src="jsmini.bundle.js"></script>
 <script>
 const { basicSetup, javascript, oneDark, EditorView, keymap, Prec, StateEffect, StateField, Decoration, RangeSet,
-        vmEvaluate, compile, disassemble, disassembleToWat } = jsmini;
+        vmEvaluate, compile, disassemble, disassembleToWat,
+        buildIR, printIR, optimize, codegenIR } = jsmini;
 
 // ========== Step highlight decoration ==========
 const setStepHighlight = StateEffect.define();
@@ -959,6 +970,51 @@ console.log("arguments:", showArgs(1, 2, 3));
 
 // eval
 console.log("eval:", eval("10 * 20 + 3"));`,
+
+  "ir-vs-direct": `// IR vs Direct JIT — Compare with Wasm JIT (Direct) and Wasm JIT (IR)
+//
+// Switch between "Wasm JIT (Direct)" and "Wasm JIT (IR)" modes,
+// then check the IR tab to see how Inlining + Constant Folding work.
+
+// 1. Inlining: nested function calls get expanded
+function square(x) { return x * x; }
+function cube(x) { return x * square(x); }
+
+function benchInline(n) {
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + cube(i % 100);
+  }
+  return sum;
+}
+console.log("inline:", benchInline(1000));
+// IR tab: cube → square inlined to x*x*x
+// Direct JIT: cube and square compiled separately
+
+// 2. Constant Folding: compile-time computation
+function benchConst(n) {
+  var magic = (2 + 3) * (4 + 5);
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + i + magic;
+  }
+  return sum;
+}
+console.log("const fold:", benchConst(1000));
+// IR tab: (2+3)*(4+5) folded to 45 at compile time
+// Phi for magic eliminated (loop-invariant)
+
+// 3. Dead Code Elimination
+function benchDCE(n) {
+  var unused = 100 * 200;
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + i;
+  }
+  return sum;
+}
+console.log("DCE:", benchDCE(1000));
+// IR tab: unused = 100*200 is eliminated`,
 };
 
 // ========== CodeMirror setup ==========
@@ -991,6 +1047,8 @@ const panels = {
   tokens: document.getElementById("panel-tokens"),
   ast: document.getElementById("panel-ast"),
   bytecode: document.getElementById("panel-bytecode"),
+  ir: document.getElementById("panel-ir"),
+  wat: document.getElementById("panel-wat"),
   result: document.getElementById("panel-result"),
   env: document.getElementById("panel-env"),
 };
@@ -1429,7 +1487,7 @@ function runCode() {
   }
 
   const mode = document.getElementById("mode-select").value;
-  const isVM = mode === "vm" || mode === "wasm-jit";
+  const isVM = mode === "vm" || mode === "wasm-jit" || mode === "wasm-jit-ir";
 
   // Bytecode (VM / Wasm JIT mode)
   if (isVM) {
@@ -1438,31 +1496,75 @@ function runCode() {
       const dump = disassemble(func);
       renderBytecode(dump, panels.bytecode);
 
-      // Wasm JIT モード: WAT も表示
-      if (mode === "wasm-jit") {
-        // 全バイトコード関数を収集 (関連関数の解決用)
+      // IR タブ: bytecode → SSA IR
+      try {
+        const allBcFuncs = func.constants.filter(c => c && typeof c === "object" && "bytecode" in c && "name" in c);
+        const knownFuncs = new Map();
+        for (const f of allBcFuncs) knownFuncs.set(f.name, f);
+        let irHtml = "";
+        for (const c of allBcFuncs) {
+          const ir = buildIR(c, { knownFuncs });
+          const beforeDump = printIR(ir);
+          optimize(ir, { knownFuncs });
+          const afterDump = printIR(ir);
+          irHtml += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">`;
+          irHtml += `<div style="font-size:11px;color:var(--orange);text-transform:uppercase;font-weight:600;margin-bottom:4px;">IR — ${escapeHtml(c.name)} (before optimize)</div>`;
+          irHtml += `<pre style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text-muted);line-height:1.6;white-space:pre;">${escapeHtml(beforeDump)}</pre>`;
+          irHtml += `<div style="font-size:11px;color:var(--green);text-transform:uppercase;font-weight:600;margin-bottom:4px;margin-top:8px;">IR — ${escapeHtml(c.name)} (after optimize)</div>`;
+          irHtml += `<pre style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text);line-height:1.6;white-space:pre;">${escapeHtml(afterDump)}</pre>`;
+          irHtml += `</div>`;
+        }
+        panels.ir.innerHTML = irHtml || `<p class="empty-msg">No functions to show IR for</p>`;
+      } catch (e) {
+        panels.ir.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
+      }
+
+      // WAT タブ
+      if (mode === "wasm-jit" || mode === "wasm-jit-ir") {
         const allBcFuncs = func.constants.filter(c => c && typeof c === "object" && "bytecode" in c && "name" in c);
         let watHtml = "";
-        for (const c of allBcFuncs) {
-          const wat = disassembleToWat(c, "i32", allBcFuncs);
-          if (wat) {
-            watHtml += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">`;
-            watHtml += `<div style="font-size:11px;color:var(--green);text-transform:uppercase;font-weight:600;margin-bottom:4px;">WAT — ${escapeHtml(c.name)}</div>`;
-            watHtml += `<pre style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text);line-height:1.6;white-space:pre;">${escapeHtml(wat)}</pre>`;
-            watHtml += `</div>`;
-          } else {
-            watHtml += `<div style="margin-top:8px;color:var(--text-muted);font-size:12px;">WAT — ${escapeHtml(c.name)}: JIT 非対応 (未サポートの opcode あり)</div>`;
+        if (mode === "wasm-jit-ir") {
+          // IR モード: IR codegen の WAT を表示
+          const knownFuncs = new Map();
+          for (const f of allBcFuncs) knownFuncs.set(f.name, f);
+          for (const c of allBcFuncs) {
+            try {
+              const ir = buildIR(c, { knownFuncs });
+              optimize(ir, { knownFuncs });
+              const result = codegenIR(ir);
+              watHtml += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">`;
+              watHtml += `<div style="font-size:11px;color:var(--green);text-transform:uppercase;font-weight:600;margin-bottom:4px;">WAT (IR) — ${escapeHtml(c.name)}</div>`;
+              watHtml += `<pre style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text);line-height:1.6;white-space:pre;">${escapeHtml(result.wat)}</pre>`;
+              watHtml += `</div>`;
+            } catch (e) {
+              watHtml += `<div style="margin-top:8px;color:var(--text-muted);font-size:12px;">WAT (IR) — ${escapeHtml(c.name)}: IR codegen error</div>`;
+            }
+          }
+        } else {
+          // Direct モード: disassembleToWat
+          for (const c of allBcFuncs) {
+            const wat = disassembleToWat(c, "i32", allBcFuncs);
+            if (wat) {
+              watHtml += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">`;
+              watHtml += `<div style="font-size:11px;color:var(--green);text-transform:uppercase;font-weight:600;margin-bottom:4px;">WAT (Direct) — ${escapeHtml(c.name)}</div>`;
+              watHtml += `<pre style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text);line-height:1.6;white-space:pre;">${escapeHtml(wat)}</pre>`;
+              watHtml += `</div>`;
+            } else {
+              watHtml += `<div style="margin-top:8px;color:var(--text-muted);font-size:12px;">WAT (Direct) — ${escapeHtml(c.name)}: JIT 非対応</div>`;
+            }
           }
         }
-        if (watHtml) {
-          panels.bytecode.innerHTML += watHtml;
-        }
+        panels.wat.innerHTML = watHtml || `<p class="empty-msg">No WAT output</p>`;
+      } else {
+        panels.wat.innerHTML = `<p class="empty-msg">Switch to Wasm JIT mode to see WAT</p>`;
       }
     } catch (e) {
       panels.bytecode.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
     }
   } else {
     panels.bytecode.innerHTML = `<p class="empty-msg">Switch to VM or Wasm JIT mode to see bytecode</p>`;
+    panels.ir.innerHTML = `<p class="empty-msg">Switch to VM or Wasm JIT mode to see IR</p>`;
+    panels.wat.innerHTML = `<p class="empty-msg">Switch to Wasm JIT mode to see WAT</p>`;
   }
 
   // Result + Step 記録
@@ -1474,13 +1576,14 @@ function runCode() {
   stepIndex = -1;
   const execStart = performance.now();
   try {
-    if (mode === "wasm-jit") {
+    if (mode === "wasm-jit" || mode === "wasm-jit-ir") {
       const jitResult = vmEvaluate(source, {
         console: { log: (...args) => logs.push(args) },
         jit: true,
         jitThreshold: 5,
         collectFeedback: true,
         traceTier: true,
+        useIR: mode === "wasm-jit-ir",
       });
       returnValue = jitResult.value;
       jitInfo = { tierLog: jitResult.tierLog || [], feedback: jitResult.feedback || null };
@@ -1496,7 +1599,7 @@ function runCode() {
     error = `${e.constructor?.name || "Error"}: ${e.message}`;
   }
   const execTime = performance.now() - execStart;
-  const modeLabels = { "tree-walking": "Tree-Walking", "vm": "Bytecode VM", "wasm-jit": "Wasm JIT" };
+  const modeLabels = { "tree-walking": "Tree-Walking", "vm": "Bytecode VM", "wasm-jit": "Wasm JIT (Direct)", "wasm-jit-ir": "Wasm JIT (IR)" };
   renderResult(logs, returnValue, error, panels.result, execTime, modeLabels[mode] || mode, jitInfo);
 
   // Step 用のソース範囲を事前計算 (tree-walking only)

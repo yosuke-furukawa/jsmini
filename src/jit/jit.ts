@@ -145,7 +145,7 @@ export class JitManager {
       const ir = buildIR(func, { feedback: this.feedback, knownFuncs: this.knownFuncs });
       optimize(ir, {
         knownFuncs: this.knownFuncs,
-        buildIROptions: { feedback: this.feedback },
+        buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs },
       });
       const result = compileIRToWasm(ir);
       if (!result) return null;
@@ -154,6 +154,28 @@ export class JitManager {
       return { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
     } catch {
       return null; // IR コンパイル失敗 → フォールバック
+    }
+  }
+
+  // OSR から IR パスで Wasm コンパイル
+  tryOSRViaIR(func: BytecodeFunction, relatedFuncs: BytecodeFunction[]): ((...args: number[]) => number) | null {
+    try {
+      // <script> (トップレベル) も LoadGlobal/StoreGlobal で対応
+      // 関連関数を knownFuncs に登録
+      const funcsMap = new Map<string, BytecodeFunction>();
+      for (const f of relatedFuncs) funcsMap.set(f.name, f);
+      // IR 構築 + 最適化 (Inlining で関連関数を展開)
+      const ir = buildIR(func, { feedback: this.feedback, knownFuncs: funcsMap });
+      optimize(ir, {
+        knownFuncs: funcsMap,
+        buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs },
+      });
+      const result = compileIRToWasm(ir);
+      if (!result) return null;
+      const wasmFn = (result.instance.exports as any)[ir.name] as (...args: number[]) => number;
+      return wasmFn ?? null;
+    } catch {
+      return null;
     }
   }
 

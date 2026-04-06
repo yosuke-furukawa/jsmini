@@ -168,15 +168,24 @@ export class VM {
       }
     }
 
-    // Wasm にコンパイル (upvalue 付きクロージャも含む)
-    const result = compileMultiSync(relatedFuncs, "i32");
-    if (!result) {
-      (frame as any).__osrDone = true; // 再試行しない
-      return null;
+    // IR パスが有効なら IR → Wasm、そうでなければ direct
+    let wasmFn: ((...args: number[]) => number) | undefined;
+    if (this.jit?.useIR) {
+      const irResult = this.jit.tryOSRViaIR(func, relatedFuncs);
+      if (irResult) {
+        wasmFn = irResult;
+      }
     }
-
-    const wasmFn = result.get(func.name);
-    if (!wasmFn) return null;
+    if (!wasmFn) {
+      // direct JIT (従来)
+      const result = compileMultiSync(relatedFuncs, "i32");
+      if (!result) {
+        (frame as any).__osrDone = true;
+        return null;
+      }
+      wasmFn = result.get(func.name);
+      if (!wasmFn) return null;
+    }
 
     // 今の locals を Wasm のパラメータとして渡す
     // func.paramCount 個が通常パラメータ、残りは extra locals
