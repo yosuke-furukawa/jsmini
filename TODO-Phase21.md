@@ -46,11 +46,11 @@ x + 0   → x
 
 ### 21-1: LICM
 
-- [ ] 21-1a: `src/ir/licm.ts` — ループ不変判定 (`isLoopInvariant(op, loopBlocks)`)
-- [ ] 21-1b: ループヘッダの直前 (preheader) に不変 Op を移動
-- [ ] 21-1c: ネストしたループ対応 (内側から外側へ段階的に巻き上げ)
-- [ ] 21-1d: optimize() パイプラインに LICM を追加
-- [ ] 21-1e: テスト (不変式巻き上げ、ループ依存は移動しない、ネストループ)
+- [x] 21-1a: `src/ir/licm.ts` — ループ不変判定 (`isLoopInvariant(op, loopBlocks)`)
+- [x] 21-1b: ループヘッダの直前 (preheader) に不変 Op を移動
+- [x] 21-1c: ネストしたループ対応 (内側から外側へ段階的に巻き上げ)
+- [x] 21-1d: optimize() パイプラインに LICM を追加
+- [x] 21-1e: テスト (不変式巻き上げ、ループ依存は移動しない、ネストループ)
 
 ### 21-2: CSE
 
