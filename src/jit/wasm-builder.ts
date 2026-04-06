@@ -109,7 +109,7 @@ type ArrayDef = {
   mutable: boolean;
 };
 
-type LocalGroup = {
+export type LocalGroup = {
   count: number;
   type: number[];  // type bytes (single byte for i32/f64, multi-byte for ref types)
 };

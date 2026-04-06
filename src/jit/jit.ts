@@ -112,20 +112,21 @@ export class JitManager {
     const allSame = wasmArgTypes.length === 0 || wasmArgTypes.every(t => t === wasmArgTypes[0]);
     const spec: WasmNumericType = allSame && (wasmArgTypes.length === 0 || wasmArgTypes[0] === "i32") ? "i32" : "f64";
 
-    // 配列引数がある場合: 関連関数をまとめてコンパイル
+    // IR パスを優先 (配列対応含む)
     let compiled: CachedWasm | null = null;
-    if (arrayArgIndices.length > 0) {
-      compiled = this.compileWithRelatedFuncs(func, spec, arrayArgIndices);
-      if (compiled) compiled.stringArgIndices = stringArgIndices;
-    } else if (this.useIR) {
-      // IR パス: bytecode → IR → optimize → Wasm
+    if (this.useIR) {
       compiled = this.compileViaIR(func, spec, stringArgIndices);
     }
     // IR パスが失敗 or useIR=false → direct パス
-    if (!compiled && arrayArgIndices.length === 0) {
-      const wasmFn = compileToWasmSync(func, spec);
-      if (wasmFn) {
-        compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
+    if (!compiled) {
+      if (arrayArgIndices.length > 0) {
+        compiled = this.compileWithRelatedFuncs(func, spec, arrayArgIndices);
+        if (compiled) compiled.stringArgIndices = stringArgIndices;
+      } else {
+        const wasmFn = compileToWasmSync(func, spec);
+        if (wasmFn) {
+          compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
+        }
       }
     }
 
@@ -151,9 +152,16 @@ export class JitManager {
       if (!result) return null;
       const wasmFn = (result.instance.exports as any)[ir.name] as (...args: number[]) => number;
       if (!wasmFn) return null;
-      return { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
+
+      // 配列ヘルパー
+      const arrayArgIndices = result.arrayParams ?? [];
+      const createArray = result.hasArrayOps ? (result.instance.exports as any).__create_array as ((len: number) => unknown) ?? null : null;
+      const getArray = result.hasArrayOps ? (result.instance.exports as any).__get_array as ((arr: unknown, idx: number) => number) ?? null : null;
+      const setArray = result.hasArrayOps ? (result.instance.exports as any).__set_array as ((arr: unknown, idx: number, val: number) => void) ?? null : null;
+
+      return { fn: wasmFn, memory: null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
     } catch {
-      return null; // IR コンパイル失敗 → フォールバック
+      return null;
     }
   }
 

@@ -5,10 +5,11 @@
 
 import type { IRFunction, Block, Op, PhiOp, IRType } from "./types.js";
 import { isPhi } from "./types.js";
-import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, f64ToBytes } from "../jit/wasm-builder.js";
+import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, f64ToBytes, type LocalGroup, WASM_GC_OP, refType } from "../jit/wasm-builder.js";
 
 const WASM_VOID = 0x40; // void block type
 import { analyzeCFG, type CFGAnalysis, type LoopInfo } from "./loop-analysis.js";
+import { functionNeedsF64 } from "./range.js";
 
 // ========== Wasm Codegen ==========
 
@@ -17,7 +18,7 @@ export interface IRCodegenResult {
   funcIndex: number;
 }
 
-export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: number; wat: string } {
+export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1): { body: number[]; extraLocals: number; wat: string } {
   const body: number[] = [];
   const watLines: string[] = [];
   let watIndent = 1;
@@ -176,7 +177,7 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
     for (const op of block.ops) {
       if (op.opcode === "Branch") {
         // 条件分岐: Branch の条件を出力
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         // Phi の値を書き込み (fall-through = body 方向の場合)
         // Branch は条件が true → successors[0], false → successors[1] (builder の規約に依存)
         // ループヘッダの Branch: false → exit (block 脱出)
@@ -215,13 +216,13 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
         }
         // forward jump は fall-through
       } else if (op.opcode === "Return") {
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         wat(`local.get ${opToLocal.get(op.args[0]) ?? "?"} ;; v${op.args[0]}`);
         body.push(WASM_OP.return);
         wat("return");
       } else {
         const beforeLen = body.length;
-        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal);
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx);
         // emitOp が出力した命令を WAT に変換
         watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
       }
@@ -284,28 +285,31 @@ function emitOp(
   loopHeaders: Set<number>,
   opById: Map<number, Op>,
   globalToLocal: Map<string, number> = new Map(),
+  forceF64 = false,
+  arrayTypeIdx = -1,
 ): void {
+  // forceF64 なら全演算を f64 として扱う
+  const effectiveType = forceF64 ? "f64" : op.type;
   switch (op.opcode) {
     case "Const": {
-      if (op.type === "f64") {
-        body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
-      } else if (op.type === "bool") {
-        body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
-      } else {
-        body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value as number));
+      // needsLocal に入ってる場合だけ出力して local に保存
+      // そうでなければ使用時に emitLoadValue/emitValueOrConst で直接出力
+      if (needsLocal.has(op.id)) {
+        if (effectiveType === "f64" && typeof op.value === "number") {
+          body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
+        } else if (op.type === "bool") {
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
+        } else {
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value as number));
+        }
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       }
-      maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
 
     case "Param": {
-      // パラメータは既に local にある → 何もしない (使用時に local.get)
-      // ただし命令列に出現したら local.get を発行
-      const local = opToLocal.get(op.id);
-      if (local !== undefined) {
-        body.push(WASM_OP.local_get, local);
-        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
-      }
+      // パラメータは既に local にある。使用時に emitLoadValue で local.get される。
+      // ここでは何もしない。
       break;
     }
 
@@ -324,10 +328,42 @@ function emitOp(
       }
       break;
     }
+    // 配列操作 (WasmGC array)
+    case "ArrayGet": {
+      if (arrayTypeIdx >= 0) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
+        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // index
+        if (forceF64) body.push(0xab); // i32.trunc_f64_s (index must be i32 for array.get)
+        body.push(0xfb, WASM_GC_OP.array_get, arrayTypeIdx);
+        // f64 array → result is already f64, no conversion needed
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      }
+      break;
+    }
+    case "ArraySet": {
+      if (arrayTypeIdx >= 0) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
+        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // index
+        if (forceF64) body.push(0xab); // i32.trunc_f64_s
+        emitLoadValue(op.args[2], body, opToLocal, opById, forceF64); // value (f64 array takes f64)
+        body.push(0xfb, WASM_GC_OP.array_set, arrayTypeIdx);
+      }
+      break;
+    }
+    case "ArrayLength": {
+      if (arrayTypeIdx >= 0) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
+        body.push(0xfb, WASM_GC_OP.array_len);
+        if (forceF64) body.push(0xb7); // f64.convert_i32_s
+      }
+      maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      break;
+    }
+
     case "StoreGlobal": {
       const gLocal = globalToLocal.get(op.globalName!);
       if (gLocal !== undefined) {
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         body.push(WASM_OP.local_set, gLocal);
       }
       break;
@@ -335,7 +371,7 @@ function emitOp(
     case "TypeGuard": {
       // 型ガード: 現在は型が合ってる前提で passthrough
       // 将来: 型チェック → 失敗で deopt (unreachable or special return)
-      emitLoadValue(op.args[0], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
@@ -344,9 +380,9 @@ function emitOp(
     case "Add": case "Sub": case "Mul": case "Div": case "Mod":
     case "BitAnd": case "BitOr": case "BitXor":
     case "ShiftLeft": case "ShiftRight": {
-      emitLoadValue(op.args[0], body, opToLocal);
-      emitLoadValue(op.args[1], body, opToLocal);
-      body.push(getWasmBinOp(op.opcode, op.type));
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+      emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+      body.push(getWasmBinOp(op.opcode, effectiveType));
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
@@ -356,23 +392,21 @@ function emitOp(
     case "GreaterThan": case "GreaterEqual":
     case "Equal": case "StrictEqual":
     case "NotEqual": case "StrictNotEqual": {
-      emitLoadValue(op.args[0], body, opToLocal);
-      emitLoadValue(op.args[1], body, opToLocal);
-      const argOp = opById.get(op.args[0]);
-      body.push(getWasmCmpOp(op.opcode, argOp?.type ?? "i32"));
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+      emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+      body.push(getWasmCmpOp(op.opcode, forceF64 ? "f64" : (opById.get(op.args[0])?.type ?? "i32")));
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
 
     // 単項
     case "Negate": {
-      const argOp = opById.get(op.args[0]);
-      if (argOp?.type === "f64") {
-        emitLoadValue(op.args[0], body, opToLocal);
+      if (forceF64 || opById.get(op.args[0])?.type === "f64") {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         body.push(WASM_OP.f64_neg);
       } else {
         body.push(WASM_OP.i32_const, ...i32ToLEB128(0));
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         body.push(WASM_OP.i32_sub);
       }
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
@@ -380,7 +414,7 @@ function emitOp(
     }
     case "BitNot": {
       // ~x = x ^ -1
-      emitLoadValue(op.args[0], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       body.push(WASM_OP.i32_const, ...i32ToLEB128(-1));
       body.push(0x73); // i32.xor
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
@@ -388,7 +422,7 @@ function emitOp(
     }
     case "Not": {
       // !x = x == 0
-      emitLoadValue(op.args[0], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       body.push(WASM_OP.i32_eqz);
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
@@ -396,14 +430,14 @@ function emitOp(
 
     // 制御フロー
     case "Return": {
-      emitLoadValue(op.args[0], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       body.push(WASM_OP.return);
       break;
     }
 
     case "Branch": {
       // 条件分岐: 条件値をスタックに積んで br_if
-      emitLoadValue(op.args[0], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       // どの successors に飛ぶかはブロックの successors で決まる
       // Branch の親ブロックの successors[0] = true先, successors[1] = false先
       // (JumpIfFalse の場合は逆だが、builder で正規化済み)
@@ -468,12 +502,29 @@ function watFromBytes(
 }
 
 // Op の値を Wasm スタックにロード
-function emitLoadValue(opId: number, body: number[], opToLocal: Map<number, number>): void {
+function emitLoadValue(opId: number, body: number[], opToLocal: Map<number, number>, opById?: Map<number, Op>, forceF64 = false): void {
   const local = opToLocal.get(opId);
   if (local !== undefined) {
     body.push(WASM_OP.local_get, local);
+    return;
   }
-  // local がない場合は直前の命令で既にスタックに載ってるはず
+  // local がない場合: Const なら直接出力
+  if (opById) {
+    const op = opById.get(opId);
+    if (op?.opcode === "Const" && typeof op.value === "number") {
+      if (forceF64) {
+        body.push(WASM_OP.f64_const, ...f64ToBytes(op.value));
+      } else {
+        body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value));
+      }
+      return;
+    }
+    if (op?.opcode === "Const" && typeof op.value === "boolean") {
+      body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
+      return;
+    }
+  }
+  // fallback: 直前の命令でスタックに載ってるはず
 }
 
 // Op の値を Wasm スタックにロード (Const なら直接出力)
@@ -593,12 +644,17 @@ function getReturnType(irFunc: IRFunction): IRType {
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
-export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Instance; funcName: string } | null {
+export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[] } | null {
   try {
     // IR に Wasm 化できない Op が含まれてたらスキップ
+    let hasArrayOps = false;
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if (op.opcode === "Call") return null; // 未インライン化の Call
+        // 配列 Op を検出 (WasmGC array 構築が必要)
+        if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") {
+          hasArrayOps = true;
+        }
         if (op.opcode === "Const" && op.value !== undefined &&
             typeof op.value !== "number" && typeof op.value !== "boolean" &&
             op.value !== null) return null; // 非数値 Const (関数オブジェクト等)
@@ -607,21 +663,97 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
 
     const builder = new WasmBuilder();
 
-    // パラメータの型を IR から取得
-    const paramTypes = getParamTypes(irFunc);
-    const params = paramTypes.map(t => t === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32);
-    // 戻り値の型: Return の引数の型から推論
-    const returnType = getReturnType(irFunc);
-    const results = [returnType === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32];
+    // Range Analysis: i32 で overflow するなら全体を f64 に昇格
+    const useF64 = functionNeedsF64(irFunc);
+    const wasmType = useF64 ? WASM_TYPE.f64 : WASM_TYPE.i32;
 
-    const { body: bodyCode, extraLocals } = codegenIR(irFunc);
+    // WasmGC array 型定義
+    let arrayTypeIdx = -1;
+    if (hasArrayOps) {
+      arrayTypeIdx = builder.addArray(wasmType);
+    }
 
-    builder.addFunction(irFunc.name, params, results, bodyCode, extraLocals);
+    // 配列パラメータの特定: IR の ArrayGet/ArraySet の args[0] が Param なら配列パラメータ
+    const arrayParams = new Set<number>(); // Param index
+    if (hasArrayOps) {
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if ((op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") && op.args[0] !== undefined) {
+            // args[0] が Param かどうか
+            for (const b of irFunc.blocks) {
+              for (const o of b.ops) {
+                if (o.opcode === "Param" && o.id === op.args[0] && o.index !== undefined) {
+                  arrayParams.add(o.index);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // パラメータ: 配列は ref $array、他は i32/f64
+    const params: number[] = [];
+    for (let i = 0; i < irFunc.paramCount; i++) {
+      if (arrayParams.has(i)) {
+        params.push(...refType(arrayTypeIdx));
+      } else {
+        params.push(wasmType);
+      }
+    }
+    const results = [wasmType];
+
+    const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx);
+
+    const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
+    const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: localType }] : undefined;
+    builder.addFunction(irFunc.name, params, results, bodyCode,
+      extraLocals > 0 ? extraLocals : 0,
+      irFunc.paramCount, 1, extraLocalGroups);
+    // WasmGC 配列ヘルパー関数
+    if (hasArrayOps && arrayTypeIdx >= 0) {
+      // __create_array(len) → ref $array
+      const initValue = useF64
+        ? [WASM_OP.f64_const, ...f64ToBytes(0)]
+        : [WASM_OP.i32_const, ...i32ToLEB128(0)];
+      const createBody = [
+        ...initValue,
+        WASM_OP.local_get, 0,
+        0xfb, WASM_GC_OP.array_new, arrayTypeIdx,
+        WASM_OP.end,
+      ];
+      builder.addFunction("__create_array", [WASM_TYPE.i32], refType(arrayTypeIdx), createBody, 0, 1, 1);
+
+      // __get_array(arr, idx) → i32/f64
+      const getBody = [
+        WASM_OP.local_get, 0,
+        WASM_OP.local_get, 1,
+        0xfb, WASM_GC_OP.array_get, arrayTypeIdx,
+        WASM_OP.end,
+      ];
+      builder.addFunction("__get_array", [...refType(arrayTypeIdx), WASM_TYPE.i32], [wasmType], getBody, 0, 2, 1);
+
+      // __set_array(arr, idx, val) → void
+      const setBody = [
+        WASM_OP.local_get, 0,
+        WASM_OP.local_get, 1,
+        WASM_OP.local_get, 2,
+        0xfb, WASM_GC_OP.array_set, arrayTypeIdx,
+        WASM_OP.end,
+      ];
+      builder.addFunction("__set_array", [...refType(arrayTypeIdx), WASM_TYPE.i32, wasmType], [], setBody, 0, 3, 0);
+    }
+
     const wasmBytes = builder.build();
 
     const module = new WebAssembly.Module(wasmBytes);
     const instance = new WebAssembly.Instance(module);
-    return { instance, funcName: irFunc.name };
+    return {
+      instance,
+      funcName: irFunc.name,
+      hasArrayOps,
+      arrayParams: [...arrayParams],
+    };
   } catch (e: any) {
     // Wasm コンパイルエラー → null (フォールバック)
     // Wasm コンパイルエラー → フォールバック

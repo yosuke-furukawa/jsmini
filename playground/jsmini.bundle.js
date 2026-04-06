@@ -7873,6 +7873,39 @@ var jsmini = (() => {
             stack.push(op.id);
             break;
           }
+          // 配列アクセス
+          case "GetPropertyComputed": {
+            const index = stack.pop();
+            const arr = stack.pop();
+            const op = registerOp(createOp(irFunc, "ArrayGet", [arr, index], "i32"));
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "SetPropertyComputed": {
+            const value = stack.pop();
+            const index = stack.pop();
+            const arr = stack[stack.length - 1];
+            const op = registerOp(createOp(irFunc, "ArraySet", [arr, index, value], "any"));
+            block.ops.push(op);
+            break;
+          }
+          // arr.length
+          case "GetProperty": {
+            const obj = stack.pop();
+            const name2 = constants[instr.operand];
+            if (name2 === "length") {
+              const op = registerOp(createOp(irFunc, "ArrayLength", [obj], "i32"));
+              block.ops.push(op);
+              stack.push(op.id);
+            } else {
+              const op = registerOp(createOp(irFunc, "Const", [], "any"));
+              op.value = void 0;
+              block.ops.push(op);
+              stack.push(op.id);
+            }
+            break;
+          }
           default:
             break;
         }
@@ -7989,7 +8022,9 @@ var jsmini = (() => {
         type: op.type,
         value: op.value,
         index: op.index,
-        guardType: op.guardType
+        guardType: op.guardType,
+        calleeName: op.calleeName,
+        globalName: op.globalName
       };
       newOps.push(newOp);
     }
@@ -8006,8 +8041,13 @@ var jsmini = (() => {
           newBlockOps.push(...newOps);
           const resultId = idMap.get(callOp.id);
           if (resultId !== void 0) {
-            for (const laterOp of callerBlock.ops) {
-              laterOp.args = laterOp.args.map((a) => a === callOp.id ? resultId : a);
+            for (const b of callerFunc.blocks) {
+              for (const op2 of b.ops) {
+                op2.args = op2.args.map((a) => a === callOp.id ? resultId : a);
+              }
+              for (const phi of b.phis) {
+                phi.inputs = phi.inputs.map(([bid, vid]) => [bid, vid === callOp.id ? resultId : vid]);
+              }
             }
             for (const newOp of newBlockOps) {
               newOp.args = newOp.args.map((a) => a === callOp.id ? resultId : a);
@@ -8230,9 +8270,154 @@ var jsmini = (() => {
     return { loops, backEdges, topoOrder, loopHeaders };
   }
 
+  // src/ir/range.ts
+  var I32_MIN = -(2 ** 31);
+  var I32_MAX = 2 ** 31 - 1;
+  var RANGE_I32 = { min: I32_MIN, max: I32_MAX };
+  function canFitI32(range) {
+    return range.min >= I32_MIN && range.max <= I32_MAX;
+  }
+  function analyzeRanges(irFunc) {
+    const ranges = /* @__PURE__ */ new Map();
+    const opById = /* @__PURE__ */ new Map();
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) opById.set(phi.id, phi);
+      for (const op of block.ops) opById.set(op.id, op);
+    }
+    function getRange(opId) {
+      return ranges.get(opId) ?? RANGE_I32;
+    }
+    for (let iter = 0; iter < 10; iter++) {
+      let changed = false;
+      for (const block of irFunc.blocks) {
+        for (const phi of block.phis) {
+          const newRange = computePhiRange(phi, ranges);
+          if (updateRange(ranges, phi.id, newRange)) changed = true;
+        }
+        for (const op of block.ops) {
+          const newRange = computeOpRange(op, getRange, opById);
+          if (newRange && updateRange(ranges, op.id, newRange)) changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    return ranges;
+  }
+  function updateRange(ranges, id2, newRange) {
+    const old = ranges.get(id2);
+    if (old && old.min === newRange.min && old.max === newRange.max) return false;
+    ranges.set(id2, newRange);
+    return true;
+  }
+  function computeOpRange(op, getRange, opById) {
+    switch (op.opcode) {
+      case "Const": {
+        if (typeof op.value === "number") {
+          return { min: op.value, max: op.value };
+        }
+        if (typeof op.value === "boolean") {
+          return { min: op.value ? 1 : 0, max: op.value ? 1 : 0 };
+        }
+        return null;
+      }
+      case "Param":
+        return RANGE_I32;
+      case "Undefined":
+        return { min: 0, max: 0 };
+      case "Add": {
+        const l = getRange(op.args[0]), r = getRange(op.args[1]);
+        return { min: l.min + r.min, max: l.max + r.max };
+      }
+      case "Sub": {
+        const l = getRange(op.args[0]), r = getRange(op.args[1]);
+        return { min: l.min - r.max, max: l.max - r.min };
+      }
+      case "Mul": {
+        const l = getRange(op.args[0]), r = getRange(op.args[1]);
+        const products = [l.min * r.min, l.min * r.max, l.max * r.min, l.max * r.max];
+        return { min: Math.min(...products), max: Math.max(...products) };
+      }
+      case "Div": {
+        const r = getRange(op.args[1]);
+        if (r.min > 0 || r.max < 0) {
+          const l = getRange(op.args[0]);
+          const quotients = [l.min / r.min, l.min / r.max, l.max / r.min, l.max / r.max];
+          return {
+            min: Math.min(...quotients.map(Math.floor)),
+            max: Math.max(...quotients.map(Math.ceil))
+          };
+        }
+        return RANGE_I32;
+      }
+      case "Mod": {
+        const r = getRange(op.args[1]);
+        if (r.min > 0) {
+          return { min: 0, max: r.max - 1 };
+        }
+        return RANGE_I32;
+      }
+      case "Negate": {
+        const a = getRange(op.args[0]);
+        return { min: -a.max, max: -a.min };
+      }
+      // 比較 → 結果は 0 or 1
+      case "LessThan":
+      case "LessEqual":
+      case "GreaterThan":
+      case "GreaterEqual":
+      case "Equal":
+      case "StrictEqual":
+      case "NotEqual":
+      case "StrictNotEqual":
+      case "Not":
+        return { min: 0, max: 1 };
+      // ビット演算は i32 に収まる
+      case "BitAnd":
+      case "BitOr":
+      case "BitXor":
+      case "BitNot":
+      case "ShiftLeft":
+      case "ShiftRight":
+        return RANGE_I32;
+      // TypeGuard: 元の値と同じ range
+      case "TypeGuard":
+        return getRange(op.args[0]);
+      // 配列: 値がわからない → 全範囲
+      case "ArrayGet":
+      case "ArrayLength":
+        return RANGE_I32;
+      case "ArraySet":
+        return null;
+      // LoadGlobal: 全範囲 (値がわからない)
+      case "LoadGlobal":
+        return RANGE_I32;
+      // Increment/Decrement は builder で Add/Sub に展開されるので来ないはず
+      default:
+        return null;
+    }
+  }
+  function computePhiRange(phi, ranges) {
+    if (phi.inputs.length === 0) return RANGE_I32;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const [, valueId] of phi.inputs) {
+      const r = ranges.get(valueId) ?? RANGE_I32;
+      if (r.min < min) min = r.min;
+      if (r.max > max) max = r.max;
+    }
+    return { min, max };
+  }
+  function functionNeedsF64(irFunc) {
+    const ranges = analyzeRanges(irFunc);
+    for (const [, range] of ranges) {
+      if (!canFitI32(range)) return true;
+    }
+    return false;
+  }
+
   // src/ir/codegen.ts
   var WASM_VOID = 64;
-  function codegenIR(irFunc) {
+  function codegenIR(irFunc, forceF64 = false, arrayTypeIdx = -1) {
     const body = [];
     const watLines = [];
     let watIndent = 1;
@@ -8378,7 +8563,7 @@ var jsmini = (() => {
       }
       for (const op of block.ops) {
         if (op.opcode === "Branch") {
-          emitLoadValue(op.args[0], body, opToLocal);
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
           if (loopInfo) {
             body.push(WASM_OP.i32_eqz);
             wat("i32.eqz");
@@ -8410,13 +8595,13 @@ var jsmini = (() => {
             wat(`br ${loopDepth} ;; \u2192 loop`);
           }
         } else if (op.opcode === "Return") {
-          emitLoadValue(op.args[0], body, opToLocal);
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
           wat(`local.get ${opToLocal.get(op.args[0]) ?? "?"} ;; v${op.args[0]}`);
           body.push(WASM_OP.return);
           wat("return");
         } else {
           const beforeLen = body.length;
-          emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], /* @__PURE__ */ new Set(), opById, globalToLocal);
+          emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], /* @__PURE__ */ new Set(), opById, globalToLocal, forceF64, arrayTypeIdx);
           watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
         }
       }
@@ -8454,25 +8639,23 @@ var jsmini = (() => {
     const fullWat = [header, localDecls, ";; phi init", ...watLines, ")"].filter(Boolean).join("\n");
     return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount, wat: fullWat };
   }
-  function emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById, globalToLocal = /* @__PURE__ */ new Map()) {
+  function emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById, globalToLocal = /* @__PURE__ */ new Map(), forceF64 = false, arrayTypeIdx = -1) {
+    const effectiveType = forceF64 ? "f64" : op.type;
     switch (op.opcode) {
       case "Const": {
-        if (op.type === "f64") {
-          body.push(WASM_OP.f64_const, ...f64ToBytes(op.value));
-        } else if (op.type === "bool") {
-          body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
-        } else {
-          body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value));
+        if (needsLocal.has(op.id)) {
+          if (effectiveType === "f64" && typeof op.value === "number") {
+            body.push(WASM_OP.f64_const, ...f64ToBytes(op.value));
+          } else if (op.type === "bool") {
+            body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
+          } else {
+            body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value));
+          }
+          maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         }
-        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
       case "Param": {
-        const local = opToLocal.get(op.id);
-        if (local !== void 0) {
-          body.push(WASM_OP.local_get, local);
-          maybeStoreLocal(op.id, body, opToLocal, needsLocal);
-        }
         break;
       }
       case "Undefined": {
@@ -8488,16 +8671,46 @@ var jsmini = (() => {
         }
         break;
       }
+      // 配列操作 (WasmGC array)
+      case "ArrayGet": {
+        if (arrayTypeIdx >= 0) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+          if (forceF64) body.push(171);
+          body.push(251, WASM_GC_OP.array_get, arrayTypeIdx);
+          maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        }
+        break;
+      }
+      case "ArraySet": {
+        if (arrayTypeIdx >= 0) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+          if (forceF64) body.push(171);
+          emitLoadValue(op.args[2], body, opToLocal, opById, forceF64);
+          body.push(251, WASM_GC_OP.array_set, arrayTypeIdx);
+        }
+        break;
+      }
+      case "ArrayLength": {
+        if (arrayTypeIdx >= 0) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          body.push(251, WASM_GC_OP.array_len);
+          if (forceF64) body.push(183);
+        }
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
       case "StoreGlobal": {
         const gLocal = globalToLocal.get(op.globalName);
         if (gLocal !== void 0) {
-          emitLoadValue(op.args[0], body, opToLocal);
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
           body.push(WASM_OP.local_set, gLocal);
         }
         break;
       }
       case "TypeGuard": {
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
@@ -8512,9 +8725,9 @@ var jsmini = (() => {
       case "BitXor":
       case "ShiftLeft":
       case "ShiftRight": {
-        emitLoadValue(op.args[0], body, opToLocal);
-        emitLoadValue(op.args[1], body, opToLocal);
-        body.push(getWasmBinOp(op.opcode, op.type));
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+        body.push(getWasmBinOp(op.opcode, effectiveType));
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
@@ -8527,48 +8740,46 @@ var jsmini = (() => {
       case "StrictEqual":
       case "NotEqual":
       case "StrictNotEqual": {
-        emitLoadValue(op.args[0], body, opToLocal);
-        emitLoadValue(op.args[1], body, opToLocal);
-        const argOp = opById.get(op.args[0]);
-        body.push(getWasmCmpOp(op.opcode, argOp?.type ?? "i32"));
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+        body.push(getWasmCmpOp(op.opcode, forceF64 ? "f64" : opById.get(op.args[0])?.type ?? "i32"));
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
       // 単項
       case "Negate": {
-        const argOp = opById.get(op.args[0]);
-        if (argOp?.type === "f64") {
-          emitLoadValue(op.args[0], body, opToLocal);
+        if (forceF64 || opById.get(op.args[0])?.type === "f64") {
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
           body.push(WASM_OP.f64_neg);
         } else {
           body.push(WASM_OP.i32_const, ...i32ToLEB128(0));
-          emitLoadValue(op.args[0], body, opToLocal);
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
           body.push(WASM_OP.i32_sub);
         }
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
       case "BitNot": {
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         body.push(WASM_OP.i32_const, ...i32ToLEB128(-1));
         body.push(115);
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
       case "Not": {
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         body.push(WASM_OP.i32_eqz);
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
       // 制御フロー
       case "Return": {
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         body.push(WASM_OP.return);
         break;
       }
       case "Branch": {
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         body.push(WASM_OP.br_if, 0);
         break;
       }
@@ -8614,10 +8825,26 @@ var jsmini = (() => {
       }
     }
   }
-  function emitLoadValue(opId, body, opToLocal) {
+  function emitLoadValue(opId, body, opToLocal, opById, forceF64 = false) {
     const local = opToLocal.get(opId);
     if (local !== void 0) {
       body.push(WASM_OP.local_get, local);
+      return;
+    }
+    if (opById) {
+      const op = opById.get(opId);
+      if (op?.opcode === "Const" && typeof op.value === "number") {
+        if (forceF64) {
+          body.push(WASM_OP.f64_const, ...f64ToBytes(op.value));
+        } else {
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value));
+        }
+        return;
+      }
+      if (op?.opcode === "Const" && typeof op.value === "boolean") {
+        body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
+        return;
+      }
     }
   }
   function emitValueOrConst(opId, body, opToLocal, opById) {
@@ -8718,54 +8945,109 @@ var jsmini = (() => {
         return WASM_OP.i32_lt_s;
     }
   }
-  function getParamTypes(irFunc) {
-    const types2 = [];
-    for (const block of irFunc.blocks) {
-      for (const op of block.ops) {
-        if (op.opcode === "Param" && op.index !== void 0) {
-          types2[op.index] = op.type;
-        }
-      }
-    }
-    for (let i = 0; i < irFunc.paramCount; i++) {
-      if (!types2[i]) types2[i] = "i32";
-    }
-    return types2;
-  }
-  function getReturnType(irFunc) {
-    const opById = /* @__PURE__ */ new Map();
-    for (const block of irFunc.blocks) {
-      for (const op of block.ops) opById.set(op.id, op);
-    }
-    for (const block of irFunc.blocks) {
-      for (const op of block.ops) {
-        if (op.opcode === "Return" && op.args.length > 0) {
-          const retVal = opById.get(op.args[0]);
-          if (retVal) return retVal.type;
-        }
-      }
-    }
-    return "i32";
-  }
   function compileIRToWasm(irFunc) {
     try {
+      let hasArrayOps = false;
       for (const block of irFunc.blocks) {
         for (const op of block.ops) {
           if (op.opcode === "Call") return null;
+          if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") {
+            hasArrayOps = true;
+          }
           if (op.opcode === "Const" && op.value !== void 0 && typeof op.value !== "number" && typeof op.value !== "boolean" && op.value !== null) return null;
         }
       }
       const builder = new WasmBuilder();
-      const paramTypes = getParamTypes(irFunc);
-      const params = paramTypes.map((t2) => t2 === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32);
-      const returnType = getReturnType(irFunc);
-      const results = [returnType === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32];
-      const { body: bodyCode, extraLocals } = codegenIR(irFunc);
-      builder.addFunction(irFunc.name, params, results, bodyCode, extraLocals);
+      const useF64 = functionNeedsF64(irFunc);
+      const wasmType = useF64 ? WASM_TYPE.f64 : WASM_TYPE.i32;
+      let arrayTypeIdx = -1;
+      if (hasArrayOps) {
+        arrayTypeIdx = builder.addArray(wasmType);
+      }
+      const arrayParams = /* @__PURE__ */ new Set();
+      if (hasArrayOps) {
+        for (const block of irFunc.blocks) {
+          for (const op of block.ops) {
+            if ((op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") && op.args[0] !== void 0) {
+              for (const b of irFunc.blocks) {
+                for (const o of b.ops) {
+                  if (o.opcode === "Param" && o.id === op.args[0] && o.index !== void 0) {
+                    arrayParams.add(o.index);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      const params = [];
+      for (let i = 0; i < irFunc.paramCount; i++) {
+        if (arrayParams.has(i)) {
+          params.push(...refType(arrayTypeIdx));
+        } else {
+          params.push(wasmType);
+        }
+      }
+      const results = [wasmType];
+      const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx);
+      const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
+      const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: localType }] : void 0;
+      builder.addFunction(
+        irFunc.name,
+        params,
+        results,
+        bodyCode,
+        extraLocals > 0 ? extraLocals : 0,
+        irFunc.paramCount,
+        1,
+        extraLocalGroups
+      );
+      if (hasArrayOps && arrayTypeIdx >= 0) {
+        const initValue = useF64 ? [WASM_OP.f64_const, ...f64ToBytes(0)] : [WASM_OP.i32_const, ...i32ToLEB128(0)];
+        const createBody = [
+          ...initValue,
+          WASM_OP.local_get,
+          0,
+          251,
+          WASM_GC_OP.array_new,
+          arrayTypeIdx,
+          WASM_OP.end
+        ];
+        builder.addFunction("__create_array", [WASM_TYPE.i32], refType(arrayTypeIdx), createBody, 0, 1, 1);
+        const getBody = [
+          WASM_OP.local_get,
+          0,
+          WASM_OP.local_get,
+          1,
+          251,
+          WASM_GC_OP.array_get,
+          arrayTypeIdx,
+          WASM_OP.end
+        ];
+        builder.addFunction("__get_array", [...refType(arrayTypeIdx), WASM_TYPE.i32], [wasmType], getBody, 0, 2, 1);
+        const setBody = [
+          WASM_OP.local_get,
+          0,
+          WASM_OP.local_get,
+          1,
+          WASM_OP.local_get,
+          2,
+          251,
+          WASM_GC_OP.array_set,
+          arrayTypeIdx,
+          WASM_OP.end
+        ];
+        builder.addFunction("__set_array", [...refType(arrayTypeIdx), WASM_TYPE.i32, wasmType], [], setBody, 0, 3, 0);
+      }
       const wasmBytes = builder.build();
       const module = new WebAssembly.Module(wasmBytes);
       const instance = new WebAssembly.Instance(module);
-      return { instance, funcName: irFunc.name };
+      return {
+        instance,
+        funcName: irFunc.name,
+        hasArrayOps,
+        arrayParams: [...arrayParams]
+      };
     } catch (e) {
       return null;
     }
@@ -8839,16 +9121,18 @@ var jsmini = (() => {
       const allSame = wasmArgTypes.length === 0 || wasmArgTypes.every((t2) => t2 === wasmArgTypes[0]);
       const spec = allSame && (wasmArgTypes.length === 0 || wasmArgTypes[0] === "i32") ? "i32" : "f64";
       let compiled = null;
-      if (arrayArgIndices.length > 0) {
-        compiled = this.compileWithRelatedFuncs(func, spec, arrayArgIndices);
-        if (compiled) compiled.stringArgIndices = stringArgIndices;
-      } else if (this.useIR) {
+      if (this.useIR) {
         compiled = this.compileViaIR(func, spec, stringArgIndices);
       }
-      if (!compiled && arrayArgIndices.length === 0) {
-        const wasmFn = compileToWasmSync(func, spec);
-        if (wasmFn) {
-          compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
+      if (!compiled) {
+        if (arrayArgIndices.length > 0) {
+          compiled = this.compileWithRelatedFuncs(func, spec, arrayArgIndices);
+          if (compiled) compiled.stringArgIndices = stringArgIndices;
+        } else {
+          const wasmFn = compileToWasmSync(func, spec);
+          if (wasmFn) {
+            compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
+          }
         }
       }
       this.wasmCache.set(func, compiled);
@@ -8864,13 +9148,17 @@ var jsmini = (() => {
         const ir = buildIR(func, { feedback: this.feedback, knownFuncs: this.knownFuncs });
         optimize(ir, {
           knownFuncs: this.knownFuncs,
-          buildIROptions: { feedback: this.feedback }
+          buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs }
         });
         const result = compileIRToWasm(ir);
         if (!result) return null;
         const wasmFn = result.instance.exports[ir.name];
         if (!wasmFn) return null;
-        return { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
+        const arrayArgIndices = result.arrayParams ?? [];
+        const createArray = result.hasArrayOps ? result.instance.exports.__create_array ?? null : null;
+        const getArray = result.hasArrayOps ? result.instance.exports.__get_array ?? null : null;
+        const setArray = result.hasArrayOps ? result.instance.exports.__set_array ?? null : null;
+        return { fn: wasmFn, memory: null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
       } catch {
         return null;
       }
@@ -8883,7 +9171,7 @@ var jsmini = (() => {
         const ir = buildIR(func, { feedback: this.feedback, knownFuncs: funcsMap });
         optimize(ir, {
           knownFuncs: funcsMap,
-          buildIROptions: { feedback: this.feedback }
+          buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs }
         });
         const result = compileIRToWasm(ir);
         if (!result) return null;
@@ -9594,6 +9882,12 @@ var jsmini = (() => {
         const inputs = phi.inputs.map(([blockId, valId]) => `B${blockId}:v${valId}`).join(", ");
         return `${indent}v${op.id}: ${typeStr} = Phi(${inputs})`;
       }
+      case "ArrayGet":
+        return `${indent}v${op.id}: ${typeStr} = ArrayGet(v${op.args[0]}, v${op.args[1]})`;
+      case "ArraySet":
+        return `${indent}ArraySet(v${op.args[0]}, v${op.args[1]}, v${op.args[2]})`;
+      case "ArrayLength":
+        return `${indent}v${op.id}: ${typeStr} = ArrayLength(v${op.args[0]})`;
       case "LoadGlobal":
         return `${indent}v${op.id}: ${typeStr} = LoadGlobal("${op.globalName}")`;
       case "StoreGlobal":
