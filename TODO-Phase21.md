@@ -54,19 +54,20 @@ x + 0   → x
 
 ### 21-2: CSE
 
-- [ ] 21-2a: `src/ir/cse.ts` — 同一ブロック内の CSE (Local CSE)
-- [ ] 21-2b: ハッシュ: `opcode + args.join(",")` で同値判定
-- [ ] 21-2c: 重複 Op を最初の Op に置換 (uses の付け替え)
-- [ ] 21-2d: optimize() パイプラインに CSE を追加
-- [ ] 21-2e: テスト (同一式の除去、副作用ありは除外、ブロックまたぎ)
+- [x] 21-2a: `src/ir/cse.ts` — 同一ブロック内の CSE (Local CSE)
+- [x] 21-2b: ハッシュ: `opcode + args.join(",")` で同値判定
+- [x] 21-2c: 重複 Op を最初の Op に置換 (uses の付け替え)
+- [x] 21-2d: optimize() パイプラインに CSE を追加
+- [x] 21-2e: テスト (同一式の除去、副作用ありは除外、ブロックまたぎ)
 
 ### 21-3: Strength Reduction
 
-- [ ] 21-3a: `src/ir/strength-reduce.ts` — Mul/Div/Mod の 2 冪変換
-- [ ] 21-3b: 恒等変換 (x*0→0, x*1→x, x+0→x, x-0→x)
-- [ ] 21-3c: Range 情報を使った安全判定 (右シフトは正の整数のみ)
-- [ ] 21-3d: optimize() パイプラインに追加 (Constant Folding の後)
-- [ ] 21-3e: テスト (2冪変換、恒等変換、負数で変換しないケース)
+- [x] 21-3a: `src/ir/strength-reduce.ts` — Mul/Div/Mod の 2 冪変換
+- [x] 21-3b: 恒等変換 (x*0→0, x*1→x, x+0→x, x-0→x)
+- [x] 21-3c: Range 情報を使った安全判定 (右シフトは正の整数のみ)
+- [x] 21-3d: optimize() パイプラインに追加 (Constant Folding の後)
+- [x] 21-3e: テスト (2冪変換、恒等変換、負数で変換しないケース)
+- [x] 21-3f: f64 モードで ShiftLeft/BitAnd を Mul/i32変換する codegen 対応
 
 ### 21-4: ベンチマーク + 統合テスト
 
