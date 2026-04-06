@@ -5,7 +5,7 @@
 
 import type { IRFunction, Block, Op, PhiOp, IRType } from "./types.js";
 import { isPhi } from "./types.js";
-import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, f64ToBytes, type LocalGroup } from "../jit/wasm-builder.js";
+import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, f64ToBytes, type LocalGroup, WASM_GC_OP, refType } from "../jit/wasm-builder.js";
 
 const WASM_VOID = 0x40; // void block type
 import { analyzeCFG, type CFGAnalysis, type LoopInfo } from "./loop-analysis.js";
@@ -18,7 +18,7 @@ export interface IRCodegenResult {
   funcIndex: number;
 }
 
-export function codegenIR(irFunc: IRFunction, forceF64 = false): { body: number[]; extraLocals: number; wat: string } {
+export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1): { body: number[]; extraLocals: number; wat: string } {
   const body: number[] = [];
   const watLines: string[] = [];
   let watIndent = 1;
@@ -222,7 +222,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false): { body: number[
         wat("return");
       } else {
         const beforeLen = body.length;
-        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64);
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx);
         // emitOp が出力した命令を WAT に変換
         watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
       }
@@ -286,6 +286,7 @@ function emitOp(
   opById: Map<number, Op>,
   globalToLocal: Map<string, number> = new Map(),
   forceF64 = false,
+  arrayTypeIdx = -1,
 ): void {
   // forceF64 なら全演算を f64 として扱う
   const effectiveType = forceF64 ? "f64" : op.type;
@@ -327,6 +328,38 @@ function emitOp(
       }
       break;
     }
+    // 配列操作 (WasmGC array)
+    case "ArrayGet": {
+      if (arrayTypeIdx >= 0) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
+        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // index
+        if (forceF64) body.push(0xab); // i32.trunc_f64_s (index must be i32 for array.get)
+        body.push(0xfb, WASM_GC_OP.array_get, arrayTypeIdx);
+        // f64 array → result is already f64, no conversion needed
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      }
+      break;
+    }
+    case "ArraySet": {
+      if (arrayTypeIdx >= 0) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
+        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // index
+        if (forceF64) body.push(0xab); // i32.trunc_f64_s
+        emitLoadValue(op.args[2], body, opToLocal, opById, forceF64); // value (f64 array takes f64)
+        body.push(0xfb, WASM_GC_OP.array_set, arrayTypeIdx);
+      }
+      break;
+    }
+    case "ArrayLength": {
+      if (arrayTypeIdx >= 0) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
+        body.push(0xfb, WASM_GC_OP.array_len);
+        if (forceF64) body.push(0xb7); // f64.convert_i32_s
+      }
+      maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      break;
+    }
+
     case "StoreGlobal": {
       const gLocal = globalToLocal.get(op.globalName!);
       if (gLocal !== undefined) {
@@ -611,13 +644,17 @@ function getReturnType(irFunc: IRFunction): IRType {
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
-export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Instance; funcName: string } | null {
+export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[] } | null {
   try {
     // IR に Wasm 化できない Op が含まれてたらスキップ
+    let hasArrayOps = false;
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if (op.opcode === "Call") return null; // 未インライン化の Call
-        if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") return null; // 配列は codegen 未対応 → direct JIT
+        // 配列 Op を検出 (WasmGC array 構築が必要)
+        if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") {
+          hasArrayOps = true;
+        }
         if (op.opcode === "Const" && op.value !== undefined &&
             typeof op.value !== "number" && typeof op.value !== "boolean" &&
             op.value !== null) return null; // 非数値 Const (関数オブジェクト等)
@@ -630,24 +667,93 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
     const useF64 = functionNeedsF64(irFunc);
     const wasmType = useF64 ? WASM_TYPE.f64 : WASM_TYPE.i32;
 
-    // パラメータ: Range Analysis の結果に従う
-    const params = new Array(irFunc.paramCount).fill(wasmType);
+    // WasmGC array 型定義
+    let arrayTypeIdx = -1;
+    if (hasArrayOps) {
+      arrayTypeIdx = builder.addArray(wasmType);
+    }
+
+    // 配列パラメータの特定: IR の ArrayGet/ArraySet の args[0] が Param なら配列パラメータ
+    const arrayParams = new Set<number>(); // Param index
+    if (hasArrayOps) {
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if ((op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") && op.args[0] !== undefined) {
+            // args[0] が Param かどうか
+            for (const b of irFunc.blocks) {
+              for (const o of b.ops) {
+                if (o.opcode === "Param" && o.id === op.args[0] && o.index !== undefined) {
+                  arrayParams.add(o.index);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // パラメータ: 配列は ref $array、他は i32/f64
+    const params: number[] = [];
+    for (let i = 0; i < irFunc.paramCount; i++) {
+      if (arrayParams.has(i)) {
+        params.push(...refType(arrayTypeIdx));
+      } else {
+        params.push(wasmType);
+      }
+    }
     const results = [wasmType];
 
-    const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64);
+    const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx);
 
-    if (useF64) {
-      // f64 モード: extra locals も f64 で宣言
-      builder.addFunction(irFunc.name, params, results, bodyCode, 0, undefined, undefined,
-        extraLocals > 0 ? [{ count: extraLocals, type: [WASM_TYPE.f64] }] : undefined);
-    } else {
-      builder.addFunction(irFunc.name, params, results, bodyCode, extraLocals);
+    const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
+    const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: localType }] : undefined;
+    builder.addFunction(irFunc.name, params, results, bodyCode,
+      extraLocals > 0 ? extraLocals : 0,
+      irFunc.paramCount, 1, extraLocalGroups);
+    // WasmGC 配列ヘルパー関数
+    if (hasArrayOps && arrayTypeIdx >= 0) {
+      // __create_array(len) → ref $array
+      const initValue = useF64
+        ? [WASM_OP.f64_const, ...f64ToBytes(0)]
+        : [WASM_OP.i32_const, ...i32ToLEB128(0)];
+      const createBody = [
+        ...initValue,
+        WASM_OP.local_get, 0,
+        0xfb, WASM_GC_OP.array_new, arrayTypeIdx,
+        WASM_OP.end,
+      ];
+      builder.addFunction("__create_array", [WASM_TYPE.i32], refType(arrayTypeIdx), createBody, 0, 1, 1);
+
+      // __get_array(arr, idx) → i32/f64
+      const getBody = [
+        WASM_OP.local_get, 0,
+        WASM_OP.local_get, 1,
+        0xfb, WASM_GC_OP.array_get, arrayTypeIdx,
+        WASM_OP.end,
+      ];
+      builder.addFunction("__get_array", [...refType(arrayTypeIdx), WASM_TYPE.i32], [wasmType], getBody, 0, 2, 1);
+
+      // __set_array(arr, idx, val) → void
+      const setBody = [
+        WASM_OP.local_get, 0,
+        WASM_OP.local_get, 1,
+        WASM_OP.local_get, 2,
+        0xfb, WASM_GC_OP.array_set, arrayTypeIdx,
+        WASM_OP.end,
+      ];
+      builder.addFunction("__set_array", [...refType(arrayTypeIdx), WASM_TYPE.i32, wasmType], [], setBody, 0, 3, 0);
     }
+
     const wasmBytes = builder.build();
 
     const module = new WebAssembly.Module(wasmBytes);
     const instance = new WebAssembly.Instance(module);
-    return { instance, funcName: irFunc.name };
+    return {
+      instance,
+      funcName: irFunc.name,
+      hasArrayOps,
+      arrayParams: [...arrayParams],
+    };
   } catch (e: any) {
     // Wasm コンパイルエラー → null (フォールバック)
     // Wasm コンパイルエラー → フォールバック
