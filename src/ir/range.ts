@@ -156,6 +156,12 @@ function computeOpRange(
     case "TypeGuard":
       return getRange(op.args[0]);
 
+    // 配列: 値がわからない → 全範囲
+    case "ArrayGet": case "ArrayLength":
+      return RANGE_I32;
+    case "ArraySet":
+      return null;
+
     // LoadGlobal: 全範囲 (値がわからない)
     case "LoadGlobal":
       return RANGE_I32;

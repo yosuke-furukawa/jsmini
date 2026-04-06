@@ -47,6 +47,11 @@ export type IROpcode =
   | "Jump"            // 無条件ジャンプ
   | "Return"          // args[0] = 返す値
 
+  // 配列
+  | "ArrayGet"        // args[0] = array, args[1] = index → 要素値
+  | "ArraySet"        // args[0] = array, args[1] = index, args[2] = value
+  | "ArrayLength"     // args[0] = array → 長さ
+
   // グローバル変数
   | "LoadGlobal"      // グローバル変数の読み込み。globalName フィールドに変数名
   | "StoreGlobal"     // グローバル変数の書き込み。args[0] = 値、globalName に変数名

@@ -617,6 +617,7 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if (op.opcode === "Call") return null; // 未インライン化の Call
+        if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") return null; // 配列は codegen 未対応 → direct JIT
         if (op.opcode === "Const" && op.value !== undefined &&
             typeof op.value !== "number" && typeof op.value !== "boolean" &&
             op.value !== null) return null; // 非数値 Const (関数オブジェクト等)

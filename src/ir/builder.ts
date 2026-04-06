@@ -337,6 +337,35 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           if (calleeOp?.calleeName) op.calleeName = calleeOp.calleeName;
           block.ops.push(op); stack.push(op.id); break;
         }
+        // 配列アクセス
+        case "GetPropertyComputed": {
+          const index = stack.pop()!;
+          const arr = stack.pop()!;
+          const op = registerOp(createOp(irFunc, "ArrayGet", [arr, index], "i32"));
+          block.ops.push(op); stack.push(op.id); break;
+        }
+        case "SetPropertyComputed": {
+          const value = stack.pop()!;
+          const index = stack.pop()!;
+          const arr = stack[stack.length - 1]; // peek (arr stays on stack)
+          const op = registerOp(createOp(irFunc, "ArraySet", [arr, index, value], "any"));
+          block.ops.push(op); break;
+        }
+        // arr.length
+        case "GetProperty": {
+          const obj = stack.pop()!;
+          const name = constants[instr.operand!] as string;
+          if (name === "length") {
+            const op = registerOp(createOp(irFunc, "ArrayLength", [obj], "i32"));
+            block.ops.push(op); stack.push(op.id);
+          } else {
+            // 他のプロパティは未対応 → any
+            const op = registerOp(createOp(irFunc, "Const", [], "any"));
+            op.value = undefined as any;
+            block.ops.push(op); stack.push(op.id);
+          }
+          break;
+        }
         default: break;
       }
     }

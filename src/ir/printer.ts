@@ -29,6 +29,13 @@ function formatOp(op: Op, indent: string = "  "): string {
       return `${indent}v${op.id}: ${typeStr} = Phi(${inputs})`;
     }
 
+    case "ArrayGet":
+      return `${indent}v${op.id}: ${typeStr} = ArrayGet(v${op.args[0]}, v${op.args[1]})`;
+    case "ArraySet":
+      return `${indent}ArraySet(v${op.args[0]}, v${op.args[1]}, v${op.args[2]})`;
+    case "ArrayLength":
+      return `${indent}v${op.id}: ${typeStr} = ArrayLength(v${op.args[0]})`;
+
     case "LoadGlobal":
       return `${indent}v${op.id}: ${typeStr} = LoadGlobal("${op.globalName}")`;
 
