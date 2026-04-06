@@ -177,7 +177,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false): { body: number[
     for (const op of block.ops) {
       if (op.opcode === "Branch") {
         // 条件分岐: Branch の条件を出力
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         // Phi の値を書き込み (fall-through = body 方向の場合)
         // Branch は条件が true → successors[0], false → successors[1] (builder の規約に依存)
         // ループヘッダの Branch: false → exit (block 脱出)
@@ -216,7 +216,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false): { body: number[
         }
         // forward jump は fall-through
       } else if (op.opcode === "Return") {
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         wat(`local.get ${opToLocal.get(op.args[0]) ?? "?"} ;; v${op.args[0]}`);
         body.push(WASM_OP.return);
         wat("return");
@@ -291,25 +291,24 @@ function emitOp(
   const effectiveType = forceF64 ? "f64" : op.type;
   switch (op.opcode) {
     case "Const": {
-      if (effectiveType === "f64" && typeof op.value === "number") {
-        body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
-      } else if (op.type === "bool") {
-        body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
-      } else {
-        body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value as number));
+      // needsLocal に入ってる場合だけ出力して local に保存
+      // そうでなければ使用時に emitLoadValue/emitValueOrConst で直接出力
+      if (needsLocal.has(op.id)) {
+        if (effectiveType === "f64" && typeof op.value === "number") {
+          body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
+        } else if (op.type === "bool") {
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
+        } else {
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value as number));
+        }
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       }
-      maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
 
     case "Param": {
-      // パラメータは既に local にある → 何もしない (使用時に local.get)
-      // ただし命令列に出現したら local.get を発行
-      const local = opToLocal.get(op.id);
-      if (local !== undefined) {
-        body.push(WASM_OP.local_get, local);
-        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
-      }
+      // パラメータは既に local にある。使用時に emitLoadValue で local.get される。
+      // ここでは何もしない。
       break;
     }
 
@@ -331,7 +330,7 @@ function emitOp(
     case "StoreGlobal": {
       const gLocal = globalToLocal.get(op.globalName!);
       if (gLocal !== undefined) {
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         body.push(WASM_OP.local_set, gLocal);
       }
       break;
@@ -339,7 +338,7 @@ function emitOp(
     case "TypeGuard": {
       // 型ガード: 現在は型が合ってる前提で passthrough
       // 将来: 型チェック → 失敗で deopt (unreachable or special return)
-      emitLoadValue(op.args[0], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
@@ -348,8 +347,8 @@ function emitOp(
     case "Add": case "Sub": case "Mul": case "Div": case "Mod":
     case "BitAnd": case "BitOr": case "BitXor":
     case "ShiftLeft": case "ShiftRight": {
-      emitLoadValue(op.args[0], body, opToLocal);
-      emitLoadValue(op.args[1], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+      emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
       body.push(getWasmBinOp(op.opcode, effectiveType));
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
@@ -360,8 +359,8 @@ function emitOp(
     case "GreaterThan": case "GreaterEqual":
     case "Equal": case "StrictEqual":
     case "NotEqual": case "StrictNotEqual": {
-      emitLoadValue(op.args[0], body, opToLocal);
-      emitLoadValue(op.args[1], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+      emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
       body.push(getWasmCmpOp(op.opcode, forceF64 ? "f64" : (opById.get(op.args[0])?.type ?? "i32")));
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
@@ -370,11 +369,11 @@ function emitOp(
     // 単項
     case "Negate": {
       if (forceF64 || opById.get(op.args[0])?.type === "f64") {
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         body.push(WASM_OP.f64_neg);
       } else {
         body.push(WASM_OP.i32_const, ...i32ToLEB128(0));
-        emitLoadValue(op.args[0], body, opToLocal);
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         body.push(WASM_OP.i32_sub);
       }
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
@@ -382,7 +381,7 @@ function emitOp(
     }
     case "BitNot": {
       // ~x = x ^ -1
-      emitLoadValue(op.args[0], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       body.push(WASM_OP.i32_const, ...i32ToLEB128(-1));
       body.push(0x73); // i32.xor
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
@@ -390,7 +389,7 @@ function emitOp(
     }
     case "Not": {
       // !x = x == 0
-      emitLoadValue(op.args[0], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       body.push(WASM_OP.i32_eqz);
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
@@ -398,14 +397,14 @@ function emitOp(
 
     // 制御フロー
     case "Return": {
-      emitLoadValue(op.args[0], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       body.push(WASM_OP.return);
       break;
     }
 
     case "Branch": {
       // 条件分岐: 条件値をスタックに積んで br_if
-      emitLoadValue(op.args[0], body, opToLocal);
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       // どの successors に飛ぶかはブロックの successors で決まる
       // Branch の親ブロックの successors[0] = true先, successors[1] = false先
       // (JumpIfFalse の場合は逆だが、builder で正規化済み)
@@ -470,12 +469,29 @@ function watFromBytes(
 }
 
 // Op の値を Wasm スタックにロード
-function emitLoadValue(opId: number, body: number[], opToLocal: Map<number, number>): void {
+function emitLoadValue(opId: number, body: number[], opToLocal: Map<number, number>, opById?: Map<number, Op>, forceF64 = false): void {
   const local = opToLocal.get(opId);
   if (local !== undefined) {
     body.push(WASM_OP.local_get, local);
+    return;
   }
-  // local がない場合は直前の命令で既にスタックに載ってるはず
+  // local がない場合: Const なら直接出力
+  if (opById) {
+    const op = opById.get(opId);
+    if (op?.opcode === "Const" && typeof op.value === "number") {
+      if (forceF64) {
+        body.push(WASM_OP.f64_const, ...f64ToBytes(op.value));
+      } else {
+        body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value));
+      }
+      return;
+    }
+    if (op?.opcode === "Const" && typeof op.value === "boolean") {
+      body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
+      return;
+    }
+  }
+  // fallback: 直前の命令でスタックに載ってるはず
 }
 
 // Op の値を Wasm スタックにロード (Const なら直接出力)
