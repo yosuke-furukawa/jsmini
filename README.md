@@ -144,6 +144,27 @@ Source Code
 - `--print-ir` で IR ダンプ (最適化前後を表示)
 - IR JIT は Direct JIT より 1.6-1.9x 高速 (定数畳み込みの効果)
 
+### Phase 17 — Type Specialization in IR
+
+- 型フィードバックを IR に接続 (パラメータ型、演算型の伝播)
+- TypeGuard ノード (型の仮定を明示的に記録)
+- f64 パラメータ/演算/比較に対応
+- Deoptimization: 既存の JitManager 経路でそのまま動作
+
+### Phase 18 — Inlining in IR
+
+- Call ノードを呼び出し先の IR で展開 (SSA だから安全にコピペ)
+- ネストした Inlining 対応 (add3(add(a,b),c) → Add(Add(a,b),c))
+- cube(square(x)) で IR が Direct JIT より 1.47x 高速
+
+### Phase 19 — Stackifier + ループ Wasm 化
+
+- 2パス SSA Builder (Phi 予約 → 抽象解釈 → inputs 埋め)
+- Stackifier: CFG → Wasm structured control flow (block/loop/br)
+- ネストしたループ対応
+- LoadGlobal/StoreGlobal で トップレベル変数を IR で追跡
+- for loop sum 79x、nested loop 80x、inlining 1.84x
+
 ## パフォーマンス比較
 
 V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run bench`):
@@ -311,6 +332,9 @@ src/
 - [x] **Phase 14** — WasmGC Array + ビルトイン自前実装 (quicksort JIT 5.4x, VM/TW差 284→66件)
 - [x] **Phase 15** — 構文対応拡大 (test262: 41% → 52%, assert ハーネス正直化)
 - [x] **Phase 16** — SSA IR + Constant Folding (IR JIT 1.6-1.9x, `--print-ir`)
+- [x] **Phase 17** — Type Specialization in IR (f64 + deopt)
+- [x] **Phase 18** — Inlining in IR (cube(square(x)) 1.47x faster)
+- [x] **Phase 19** — Stackifier + ループ Wasm 化 (for loop 79x, nested 80x)
 
 詳細は [PLAN.md](./PLAN.md) を参照。
 
@@ -322,6 +346,7 @@ src/
 - [LEARN-Phase14.md](./LEARN-Phase14.md) — WasmGC Array + ビルトイン自前実装
 - [LEARN-Phase15.md](./LEARN-Phase15.md) — 構文対応拡大 + test262 ハーネス正直化 + V8 の歴史
 - [LEARN-Phase16.md](./LEARN-Phase16.md) — SSA IR + Constant Folding + CFG/SSA/Phi の解説
+- [LEARN-Phase17-19.md](./LEARN-Phase17-19.md) — Type Specialization + Inlining + Stackifier
 - [RESEARCH-IR.md](./RESEARCH-IR.md) — V8, JSC, SpiderMonkey の IR 設計調査
 - [BENCHMARK.md](./BENCHMARK.md) — 全ベンチマーク結果
 - [RESEARCH-WHY-BYTECODE-IS-SLOW.md](./RESEARCH-WHY-BYTECODE-IS-SLOW.md) — なぜ Object VM は TW より遅いのか
