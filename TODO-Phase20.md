@@ -41,12 +41,10 @@ jsmini 側で bounds check する必要はない。
 
 Range に基づいてコンパイル時に決定。実行時チェックなし。
 
-- [ ] 20-2a: `canFitI32(range)`: [min, max] が [-2^31, 2^31) 内か
-- [ ] 20-2b: 安全 → i32 演算のまま (チェック不要)
-- [ ] 20-2c: 危険 → 関数全体を f64 で再コンパイル
-  - Op の type を i32 → f64 に変更
-  - codegen が f64.add / f64.mul 等を出力
-- [ ] 20-2d: テスト (addUp(100) = i32, addUp(50000) = f64)
+- [x] 20-2a: `canFitI32(range)` + `functionNeedsF64` で判定
+- [x] 20-2b: 安全 → i32 演算のまま
+- [x] 20-2c: 危険 → codegen に forceF64 フラグ、params/locals/results 全て f64
+- [x] 20-2d: 全 634 テストパス、addUp(50000) 正しい結果
 
 ### 20-3: 配列 IR 対応
 
