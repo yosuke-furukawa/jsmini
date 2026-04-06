@@ -10,6 +10,7 @@ import type { IRFunction, Block, Op } from "./types.js";
 import { isPhi } from "./types.js";
 import { inlinePass } from "./inline.js";
 import { licm } from "./licm.js";
+import { cse } from "./cse.js";
 export type { InlineOptions } from "./inline.js";
 
 // ========== Constant Folding ==========
@@ -145,6 +146,7 @@ export function optimize(func: IRFunction, inlineOptions?: InlineOptions): void 
       changed = inlinePass(func, inlineOptions) || changed;
     }
     changed = constantFolding(func) || changed;
+    changed = cse(func) || changed;
     changed = deadCodeElimination(func) || changed;
     changed = licm(func) || changed;
     if (!changed) break;
