@@ -82,6 +82,9 @@ export interface Op {
 
   // LoadGlobal / StoreGlobal 用
   globalName?: string;
+
+  // Range Analysis 用
+  range?: { min: number; max: number };
 }
 
 // ========== Phi ノード ==========
