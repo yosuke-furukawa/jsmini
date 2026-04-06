@@ -273,6 +273,7 @@ main {
     <option value="destructuring">Destructuring</option>
     <option value="modern-syntax">Modern Syntax</option>
     <option value="ir-vs-direct">IR vs Direct JIT</option>
+    <option value="array-jit">Array JIT</option>
   </select>
   <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
     <option value="tree-walking">Tree-Walking</option>
@@ -1015,6 +1016,54 @@ function benchDCE(n) {
 }
 console.log("DCE:", benchDCE(1000));
 // IR tab: unused = 100*200 is eliminated`,
+
+  "array-jit": `// Array JIT — WasmGC array operations
+// Try with "Wasm JIT (IR)" mode and check the IR tab!
+
+// 1. Array sum — basic array access in a loop
+function sumArr(arr, n) {
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + arr[i];
+  }
+  return sum;
+}
+var a = [10, 20, 30, 40, 50];
+console.log("sum:", sumArr(a, 5));
+// IR tab: ArrayGet(v0, v6) → WasmGC array.get
+
+// 2. Array + Inlining
+function double(x) { return x * 2; }
+function doubleSum(arr, n) {
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + double(arr[i]);
+  }
+  return sum;
+}
+console.log("doubleSum:", doubleSum(a, 5));
+// IR tab: double() inlined → arr[i] * 2
+
+// 3. Array write (swap)
+function swap(arr, i, j) {
+  var tmp = arr[i];
+  arr[i] = arr[j];
+  arr[j] = tmp;
+}
+var b = [3, 1, 4, 1, 5];
+swap(b, 0, 2);
+console.log("after swap:", b[0], b[1], b[2]);
+
+// 4. Large values — Range Analysis promotes to f64
+function sumSquares(arr, n) {
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + arr[i] * arr[i];
+  }
+  return sum;
+}
+console.log("sumSquares:", sumSquares([50000, 50000, 50000], 3));
+// 50000^2 * 3 = 7.5 billion — overflows i32, auto-promoted to f64`,
 };
 
 // ========== CodeMirror setup ==========
