@@ -5,10 +5,11 @@
 
 import type { IRFunction, Block, Op, PhiOp, IRType } from "./types.js";
 import { isPhi } from "./types.js";
-import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, f64ToBytes } from "../jit/wasm-builder.js";
+import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, f64ToBytes, type LocalGroup } from "../jit/wasm-builder.js";
 
 const WASM_VOID = 0x40; // void block type
 import { analyzeCFG, type CFGAnalysis, type LoopInfo } from "./loop-analysis.js";
+import { functionNeedsF64 } from "./range.js";
 
 // ========== Wasm Codegen ==========
 
@@ -17,7 +18,7 @@ export interface IRCodegenResult {
   funcIndex: number;
 }
 
-export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: number; wat: string } {
+export function codegenIR(irFunc: IRFunction, forceF64 = false): { body: number[]; extraLocals: number; wat: string } {
   const body: number[] = [];
   const watLines: string[] = [];
   let watIndent = 1;
@@ -221,7 +222,7 @@ export function codegenIR(irFunc: IRFunction): { body: number[]; extraLocals: nu
         wat("return");
       } else {
         const beforeLen = body.length;
-        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal);
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64);
         // emitOp が出力した命令を WAT に変換
         watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
       }
@@ -284,10 +285,13 @@ function emitOp(
   loopHeaders: Set<number>,
   opById: Map<number, Op>,
   globalToLocal: Map<string, number> = new Map(),
+  forceF64 = false,
 ): void {
+  // forceF64 なら全演算を f64 として扱う
+  const effectiveType = forceF64 ? "f64" : op.type;
   switch (op.opcode) {
     case "Const": {
-      if (op.type === "f64") {
+      if (effectiveType === "f64" && typeof op.value === "number") {
         body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
       } else if (op.type === "bool") {
         body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
@@ -346,7 +350,7 @@ function emitOp(
     case "ShiftLeft": case "ShiftRight": {
       emitLoadValue(op.args[0], body, opToLocal);
       emitLoadValue(op.args[1], body, opToLocal);
-      body.push(getWasmBinOp(op.opcode, op.type));
+      body.push(getWasmBinOp(op.opcode, effectiveType));
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
@@ -358,16 +362,14 @@ function emitOp(
     case "NotEqual": case "StrictNotEqual": {
       emitLoadValue(op.args[0], body, opToLocal);
       emitLoadValue(op.args[1], body, opToLocal);
-      const argOp = opById.get(op.args[0]);
-      body.push(getWasmCmpOp(op.opcode, argOp?.type ?? "i32"));
+      body.push(getWasmCmpOp(op.opcode, forceF64 ? "f64" : (opById.get(op.args[0])?.type ?? "i32")));
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
 
     // 単項
     case "Negate": {
-      const argOp = opById.get(op.args[0]);
-      if (argOp?.type === "f64") {
+      if (forceF64 || opById.get(op.args[0])?.type === "f64") {
         emitLoadValue(op.args[0], body, opToLocal);
         body.push(WASM_OP.f64_neg);
       } else {
@@ -607,16 +609,23 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
 
     const builder = new WasmBuilder();
 
-    // パラメータの型を IR から取得
-    const paramTypes = getParamTypes(irFunc);
-    const params = paramTypes.map(t => t === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32);
-    // 戻り値の型: Return の引数の型から推論
-    const returnType = getReturnType(irFunc);
-    const results = [returnType === "f64" ? WASM_TYPE.f64 : WASM_TYPE.i32];
+    // Range Analysis: i32 で overflow するなら全体を f64 に昇格
+    const useF64 = functionNeedsF64(irFunc);
+    const wasmType = useF64 ? WASM_TYPE.f64 : WASM_TYPE.i32;
 
-    const { body: bodyCode, extraLocals } = codegenIR(irFunc);
+    // パラメータ: Range Analysis の結果に従う
+    const params = new Array(irFunc.paramCount).fill(wasmType);
+    const results = [wasmType];
 
-    builder.addFunction(irFunc.name, params, results, bodyCode, extraLocals);
+    const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64);
+
+    if (useF64) {
+      // f64 モード: extra locals も f64 で宣言
+      builder.addFunction(irFunc.name, params, results, bodyCode, 0, undefined, undefined,
+        extraLocals > 0 ? [{ count: extraLocals, type: [WASM_TYPE.f64] }] : undefined);
+    } else {
+      builder.addFunction(irFunc.name, params, results, bodyCode, extraLocals);
+    }
     const wasmBytes = builder.build();
 
     const module = new WebAssembly.Module(wasmBytes);

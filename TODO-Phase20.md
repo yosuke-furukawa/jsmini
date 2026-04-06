@@ -32,17 +32,10 @@ jsmini 側で bounds check する必要はない。
 
 ### 20-1: Range 型 + 伝播
 
-- [ ] 20-1a: `src/ir/range.ts` — Range 型 `{ min: number, max: number }`
-- [ ] 20-1b: Op に range フィールドを追加
-- [ ] 20-1c: Range 伝播パス
-  - Const(n) → [n, n]
-  - Param → [-2^31, 2^31) (i32 全範囲)
-  - Add(a, b) → [a.min + b.min, a.max + b.max]
-  - Sub(a, b) → [a.min - b.max, a.max - b.min]
-  - Mul(a, b) → 4通りの min/max
-  - Mod(a, b) → [0, |b|-1] (b > 0)
-  - Phi → predecessor の range の union
-- [ ] 20-1d: テスト
+- [x] 20-1a: `src/ir/range.ts` — Range 型, analyzeRanges (fixpoint), canFitI32, functionNeedsF64
+- [x] 20-1b: Op に range フィールドを追加
+- [x] 20-1c: Range 伝播 (Const, Param, Add, Sub, Mul, Div, Mod, Negate, 比較, ビット, Phi, TypeGuard, LoadGlobal)
+- [x] 20-1d: テスト (8 tests)
 
 ### 20-2: i32 安全判定 + f64 昇格
 
