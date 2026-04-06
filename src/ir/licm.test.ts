@@ -154,8 +154,11 @@ describe("LICM", () => {
 
     optimize(ir);
 
-    // constant folding + LICM の結果、Mul が B0 に移動
+    // LICM + Strength Reduction の結果、Mul→ShiftLeft が B0 に移動
     const b0Opcodes = blockOpcodes(ir, 0);
-    assert.ok(b0Opcodes.includes("Mul"), "optimize() should include LICM");
+    assert.ok(
+      b0Opcodes.includes("Mul") || b0Opcodes.includes("ShiftLeft"),
+      "optimize() should include LICM (Mul or ShiftLeft in B0)"
+    );
   });
 });

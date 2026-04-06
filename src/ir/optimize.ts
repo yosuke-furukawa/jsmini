@@ -11,6 +11,7 @@ import { isPhi } from "./types.js";
 import { inlinePass } from "./inline.js";
 import { licm } from "./licm.js";
 import { cse } from "./cse.js";
+import { strengthReduce } from "./strength-reduce.js";
 export type { InlineOptions } from "./inline.js";
 
 // ========== Constant Folding ==========
@@ -149,6 +150,7 @@ export function optimize(func: IRFunction, inlineOptions?: InlineOptions): void 
     changed = cse(func) || changed;
     changed = deadCodeElimination(func) || changed;
     changed = licm(func) || changed;
+    changed = strengthReduce(func) || changed;
     if (!changed) break;
   }
 }

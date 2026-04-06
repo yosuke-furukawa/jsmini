@@ -380,9 +380,29 @@ function emitOp(
     case "Add": case "Sub": case "Mul": case "Div": case "Mod":
     case "BitAnd": case "BitOr": case "BitXor":
     case "ShiftLeft": case "ShiftRight": {
-      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
-      emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
-      body.push(getWasmBinOp(op.opcode, effectiveType));
+      if (forceF64 && (op.opcode === "ShiftLeft" || op.opcode === "ShiftRight")) {
+        // f64 にビットシフトは存在しない → Mul/Div に戻す
+        // ShiftLeft(x, n) → Mul(x, 2^n), ShiftRight(x, n) → Div(x, 2^n)
+        const shiftArg = opById?.get(op.args[1]);
+        const shiftAmount = shiftArg?.opcode === "Const" && typeof shiftArg.value === "number" ? shiftArg.value : 1;
+        const multiplier = 2 ** shiftAmount;
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+        body.push(WASM_OP.f64_const, ...f64ToBytes(multiplier));
+        body.push(op.opcode === "ShiftLeft" ? WASM_OP.f64_mul : WASM_OP.f64_div);
+      } else if (forceF64 && (op.opcode === "BitAnd" || op.opcode === "BitOr" || op.opcode === "BitXor"
+          || op.opcode === "Mod")) {
+        // f64 にビット演算/剰余がない → i32 に変換して計算し f64 に戻す
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+        body.push(WASM_OP.i32_trunc_f64_s);
+        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+        body.push(WASM_OP.i32_trunc_f64_s);
+        body.push(getWasmBinOp(op.opcode, "i32"));
+        body.push(WASM_OP.f64_convert_i32_s);
+      } else {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+        body.push(getWasmBinOp(op.opcode, effectiveType));
+      }
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
