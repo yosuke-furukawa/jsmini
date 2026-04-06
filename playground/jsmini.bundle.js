@@ -4897,6 +4897,8 @@ var jsmini = (() => {
     f64_le: 101,
     f64_ge: 102,
     f64_neg: 154,
+    i32_trunc_f64_s: 170,
+    f64_convert_i32_s: 183,
     end: 11,
     return: 15,
     if: 4,
@@ -8062,6 +8064,436 @@ var jsmini = (() => {
     return true;
   }
 
+  // src/ir/loop-analysis.ts
+  function findBackEdges(irFunc) {
+    const backEdges = /* @__PURE__ */ new Set();
+    const visited = /* @__PURE__ */ new Set();
+    const inStack = /* @__PURE__ */ new Set();
+    const blockMap = /* @__PURE__ */ new Map();
+    for (const b of irFunc.blocks) blockMap.set(b.id, b);
+    function dfs(blockId) {
+      visited.add(blockId);
+      inStack.add(blockId);
+      const block = blockMap.get(blockId);
+      if (!block) return;
+      for (const succId of block.successors) {
+        if (inStack.has(succId)) {
+          backEdges.add(`${blockId}\u2192${succId}`);
+        } else if (!visited.has(succId)) {
+          dfs(succId);
+        }
+      }
+      inStack.delete(blockId);
+    }
+    if (irFunc.blocks.length > 0) {
+      dfs(irFunc.blocks[0].id);
+    }
+    return backEdges;
+  }
+  function topoSort(irFunc, _backEdges) {
+    return irFunc.blocks.filter((b) => b.ops.length > 0 || b.phis.length > 0).map((b) => b.id).sort((a, b) => a - b);
+  }
+  function findLoops(irFunc, backEdges) {
+    const loops = [];
+    const blockMap = /* @__PURE__ */ new Map();
+    for (const b of irFunc.blocks) blockMap.set(b.id, b);
+    for (const edge of backEdges) {
+      const [fromStr, toStr] = edge.split("\u2192");
+      const backFrom = parseInt(fromStr);
+      const header = parseInt(toStr);
+      const body = /* @__PURE__ */ new Set();
+      body.add(header);
+      body.add(backFrom);
+      const queue = [backFrom];
+      while (queue.length > 0) {
+        const bid = queue.shift();
+        const block = blockMap.get(bid);
+        if (!block) continue;
+        for (const predId of block.predecessors) {
+          if (!body.has(predId) && predId !== header) {
+            body.add(predId);
+            queue.push(predId);
+          }
+        }
+      }
+      const headerBlock = blockMap.get(header);
+      let exitBlock = -1;
+      if (headerBlock) {
+        for (const succId of headerBlock.successors) {
+          if (!body.has(succId)) {
+            exitBlock = succId;
+            break;
+          }
+        }
+      }
+      loops.push({ header, body, backEdgeFrom: backFrom, exitBlock });
+    }
+    return loops;
+  }
+  function analyzeCFG(irFunc) {
+    const backEdges = findBackEdges(irFunc);
+    const topoOrder = topoSort(irFunc, backEdges);
+    const loops = findLoops(irFunc, backEdges);
+    const loopHeaders = new Set(loops.map((l) => l.header));
+    return { loops, backEdges, topoOrder, loopHeaders };
+  }
+
+  // src/ir/licm.ts
+  var UNMOVABLE = /* @__PURE__ */ new Set([
+    "Branch",
+    "Jump",
+    "Return",
+    // 制御フロー
+    "Call",
+    // 副作用あり
+    "StoreGlobal",
+    // 副作用あり
+    "ArraySet",
+    // 副作用あり
+    "Phi",
+    // ループの merge 点
+    "TypeGuard"
+    // deopt 位置が変わると意味が変わる
+  ]);
+  function licm(func) {
+    const cfg = analyzeCFG(func);
+    if (cfg.loops.length === 0) return false;
+    const blockMap = /* @__PURE__ */ new Map();
+    for (const b of func.blocks) blockMap.set(b.id, b);
+    const defBlock = /* @__PURE__ */ new Map();
+    for (const b of func.blocks) {
+      for (const phi of b.phis) defBlock.set(phi.id, b.id);
+      for (const op of b.ops) defBlock.set(op.id, b.id);
+    }
+    const sortedLoops = [...cfg.loops].sort((a, b) => a.body.size - b.body.size);
+    let changed = false;
+    for (const loop of sortedLoops) {
+      if (hoistFromLoop(func, loop, blockMap, defBlock)) {
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  function hoistFromLoop(func, loop, blockMap, defBlock) {
+    const headerBlock = blockMap.get(loop.header);
+    if (!headerBlock) return false;
+    let preheaterId = -1;
+    for (const predId of headerBlock.predecessors) {
+      if (!loop.body.has(predId)) {
+        preheaterId = predId;
+        break;
+      }
+    }
+    if (preheaterId === -1) return false;
+    const preheader = blockMap.get(preheaterId);
+    if (!preheader) return false;
+    const loopOps = /* @__PURE__ */ new Set();
+    for (const bid of loop.body) {
+      const block = blockMap.get(bid);
+      if (!block) continue;
+      for (const phi of block.phis) loopOps.add(phi.id);
+      for (const op of block.ops) loopOps.add(op.id);
+    }
+    const invariant = /* @__PURE__ */ new Set();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const bid of loop.body) {
+        const block = blockMap.get(bid);
+        if (!block) continue;
+        for (const op of block.ops) {
+          if (invariant.has(op.id)) continue;
+          if (UNMOVABLE.has(op.opcode)) continue;
+          if (isLoopInvariant(op, loopOps, invariant)) {
+            invariant.add(op.id);
+            changed = true;
+          }
+        }
+      }
+    }
+    if (invariant.size === 0) return false;
+    const opsToMove = [];
+    for (const bid of loop.body) {
+      const block = blockMap.get(bid);
+      if (!block) continue;
+      const remaining = [];
+      for (const op of block.ops) {
+        if (invariant.has(op.id)) {
+          opsToMove.push(op);
+          defBlock.set(op.id, preheaterId);
+        } else {
+          remaining.push(op);
+        }
+      }
+      block.ops = remaining;
+    }
+    const terminatorIdx = preheader.ops.findIndex(
+      (op) => op.opcode === "Jump" || op.opcode === "Branch" || op.opcode === "Return"
+    );
+    if (terminatorIdx >= 0) {
+      preheader.ops.splice(terminatorIdx, 0, ...opsToMove);
+    } else {
+      preheader.ops.push(...opsToMove);
+    }
+    return true;
+  }
+  function isLoopInvariant(op, loopOps, invariant) {
+    for (const argId of op.args) {
+      if (loopOps.has(argId) && !invariant.has(argId)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // src/ir/cse.ts
+  var NOT_CSE_TARGET = /* @__PURE__ */ new Set([
+    "Branch",
+    "Jump",
+    "Return",
+    // 制御フロー
+    "Call",
+    // 副作用あり
+    "StoreGlobal",
+    // 副作用あり
+    "ArraySet",
+    // 副作用あり
+    "Phi",
+    // 合流点
+    "Param",
+    // パラメータ (ユニーク)
+    "Const",
+    // 定数 (constant folding で処理)
+    "Undefined",
+    // ユニーク
+    "TypeGuard",
+    // 型ガード (位置が重要)
+    "LoadGlobal",
+    // グローバル読み込み (副作用の間で値が変わりうる)
+    "ArrayGet",
+    // 配列読み込み (ArraySet で値が変わりうる)
+    "ArrayLength"
+    // 配列長 (変わりうる)
+  ]);
+  function opKey(op) {
+    return `${op.opcode}:${op.args.join(",")}`;
+  }
+  function cse(func) {
+    let changed = false;
+    const opById = /* @__PURE__ */ new Map();
+    for (const block of func.blocks) {
+      for (const phi of block.phis) opById.set(phi.id, phi);
+      for (const op of block.ops) opById.set(op.id, op);
+    }
+    for (const block of func.blocks) {
+      const seen = /* @__PURE__ */ new Map();
+      for (const op of block.ops) {
+        if (NOT_CSE_TARGET.has(op.opcode)) continue;
+        if (op.args.length === 0) continue;
+        const key = opKey(op);
+        const firstId = seen.get(key);
+        if (firstId !== void 0) {
+          replaceUses(func, op.id, firstId);
+          changed = true;
+        } else {
+          seen.set(key, op.id);
+        }
+      }
+    }
+    return changed;
+  }
+  function replaceUses(func, oldId, newId) {
+    for (const block of func.blocks) {
+      for (const phi of block.phis) {
+        for (let i = 0; i < phi.inputs.length; i++) {
+          if (phi.inputs[i][1] === oldId) {
+            phi.inputs[i][1] = newId;
+          }
+        }
+      }
+      for (const op of block.ops) {
+        for (let i = 0; i < op.args.length; i++) {
+          if (op.args[i] === oldId) {
+            op.args[i] = newId;
+          }
+        }
+      }
+    }
+  }
+
+  // src/ir/strength-reduce.ts
+  function log2IfPow2(n) {
+    if (n <= 0 || !Number.isInteger(n)) return -1;
+    if ((n & n - 1) !== 0) return -1;
+    return Math.log2(n);
+  }
+  function strengthReduce(func) {
+    let changed = false;
+    const opById = /* @__PURE__ */ new Map();
+    for (const block of func.blocks) {
+      for (const phi of block.phis) opById.set(phi.id, phi);
+      for (const op of block.ops) opById.set(op.id, op);
+    }
+    const insertBefore = /* @__PURE__ */ new Map();
+    for (const block of func.blocks) {
+      for (const op of block.ops) {
+        if (op.args.length !== 2) continue;
+        const left = opById.get(op.args[0]);
+        const right = opById.get(op.args[1]);
+        if (!left || !right) continue;
+        if (right.opcode === "Const" && typeof right.value === "number") {
+          const val = right.value;
+          switch (op.opcode) {
+            case "Mul": {
+              if (val === 0) {
+                op.opcode = "Const";
+                op.value = 0;
+                op.args = [];
+                op.type = "i32";
+                changed = true;
+              } else if (val === 1) {
+                replaceWithArg(func, op, op.args[0]);
+                changed = true;
+              } else {
+                const shift2 = log2IfPow2(val);
+                if (shift2 > 0) {
+                  const shiftConst = createConst(func, shift2);
+                  opById.set(shiftConst.id, shiftConst);
+                  addInsert(insertBefore, op, shiftConst);
+                  op.opcode = "ShiftLeft";
+                  op.args[1] = shiftConst.id;
+                  changed = true;
+                }
+              }
+              break;
+            }
+            case "Div": {
+              if (val === 1) {
+                replaceWithArg(func, op, op.args[0]);
+                changed = true;
+              } else {
+                const shift2 = log2IfPow2(val);
+                if (shift2 > 0 && isNonNegative(left)) {
+                  const shiftConst = createConst(func, shift2);
+                  opById.set(shiftConst.id, shiftConst);
+                  addInsert(insertBefore, op, shiftConst);
+                  op.opcode = "ShiftRight";
+                  op.args[1] = shiftConst.id;
+                  changed = true;
+                }
+              }
+              break;
+            }
+            case "Mod": {
+              const shift2 = log2IfPow2(val);
+              if (shift2 > 0 && isNonNegative(left)) {
+                const maskConst = createConst(func, val - 1);
+                opById.set(maskConst.id, maskConst);
+                addInsert(insertBefore, op, maskConst);
+                op.opcode = "BitAnd";
+                op.args[1] = maskConst.id;
+                changed = true;
+              }
+              break;
+            }
+            case "Add": {
+              if (val === 0) {
+                replaceWithArg(func, op, op.args[0]);
+                changed = true;
+              }
+              break;
+            }
+            case "Sub": {
+              if (val === 0) {
+                replaceWithArg(func, op, op.args[0]);
+                changed = true;
+              }
+              break;
+            }
+          }
+          continue;
+        }
+        if (left.opcode === "Const" && typeof left.value === "number") {
+          const val = left.value;
+          switch (op.opcode) {
+            case "Mul": {
+              if (val === 0) {
+                op.opcode = "Const";
+                op.value = 0;
+                op.args = [];
+                op.type = "i32";
+                changed = true;
+              } else if (val === 1) {
+                replaceWithArg(func, op, op.args[1]);
+                changed = true;
+              } else {
+                const shift2 = log2IfPow2(val);
+                if (shift2 > 0) {
+                  const shiftConst = createConst(func, shift2);
+                  opById.set(shiftConst.id, shiftConst);
+                  addInsert(insertBefore, op, shiftConst);
+                  op.opcode = "ShiftLeft";
+                  op.args = [op.args[1], shiftConst.id];
+                  changed = true;
+                }
+              }
+              break;
+            }
+            case "Add": {
+              if (val === 0) {
+                replaceWithArg(func, op, op.args[1]);
+                changed = true;
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+    for (const block of func.blocks) {
+      const newOps = [];
+      for (const op of block.ops) {
+        const toInsert = insertBefore.get(op);
+        if (toInsert) {
+          newOps.push(...toInsert);
+        }
+        newOps.push(op);
+      }
+      block.ops = newOps;
+    }
+    return changed;
+  }
+  function addInsert(map, before, newOp) {
+    const list = map.get(before);
+    if (list) list.push(newOp);
+    else map.set(before, [newOp]);
+  }
+  function isNonNegative(op) {
+    if (op.range && op.range.min >= 0) return true;
+    if (op.opcode === "Const" && typeof op.value === "number" && op.value >= 0) return true;
+    return false;
+  }
+  function replaceWithArg(func, op, targetId) {
+    const oldId = op.id;
+    for (const block of func.blocks) {
+      for (const phi of block.phis) {
+        for (let i = 0; i < phi.inputs.length; i++) {
+          if (phi.inputs[i][1] === oldId) {
+            phi.inputs[i][1] = targetId;
+          }
+        }
+      }
+      for (const other of block.ops) {
+        if (other === op) continue;
+        for (let i = 0; i < other.args.length; i++) {
+          if (other.args[i] === oldId) {
+            other.args[i] = targetId;
+          }
+        }
+      }
+    }
+  }
+
   // src/ir/optimize.ts
   function constantFolding(func) {
     let changed = false;
@@ -8191,83 +8623,12 @@ var jsmini = (() => {
         changed = inlinePass(func, inlineOptions) || changed;
       }
       changed = constantFolding(func) || changed;
+      changed = cse(func) || changed;
       changed = deadCodeElimination(func) || changed;
+      changed = licm(func) || changed;
+      changed = strengthReduce(func) || changed;
       if (!changed) break;
     }
-  }
-
-  // src/ir/loop-analysis.ts
-  function findBackEdges(irFunc) {
-    const backEdges = /* @__PURE__ */ new Set();
-    const visited = /* @__PURE__ */ new Set();
-    const inStack = /* @__PURE__ */ new Set();
-    const blockMap = /* @__PURE__ */ new Map();
-    for (const b of irFunc.blocks) blockMap.set(b.id, b);
-    function dfs(blockId) {
-      visited.add(blockId);
-      inStack.add(blockId);
-      const block = blockMap.get(blockId);
-      if (!block) return;
-      for (const succId of block.successors) {
-        if (inStack.has(succId)) {
-          backEdges.add(`${blockId}\u2192${succId}`);
-        } else if (!visited.has(succId)) {
-          dfs(succId);
-        }
-      }
-      inStack.delete(blockId);
-    }
-    if (irFunc.blocks.length > 0) {
-      dfs(irFunc.blocks[0].id);
-    }
-    return backEdges;
-  }
-  function topoSort(irFunc, _backEdges) {
-    return irFunc.blocks.filter((b) => b.ops.length > 0 || b.phis.length > 0).map((b) => b.id).sort((a, b) => a - b);
-  }
-  function findLoops(irFunc, backEdges) {
-    const loops = [];
-    const blockMap = /* @__PURE__ */ new Map();
-    for (const b of irFunc.blocks) blockMap.set(b.id, b);
-    for (const edge of backEdges) {
-      const [fromStr, toStr] = edge.split("\u2192");
-      const backFrom = parseInt(fromStr);
-      const header = parseInt(toStr);
-      const body = /* @__PURE__ */ new Set();
-      body.add(header);
-      body.add(backFrom);
-      const queue = [backFrom];
-      while (queue.length > 0) {
-        const bid = queue.shift();
-        const block = blockMap.get(bid);
-        if (!block) continue;
-        for (const predId of block.predecessors) {
-          if (!body.has(predId) && predId !== header) {
-            body.add(predId);
-            queue.push(predId);
-          }
-        }
-      }
-      const headerBlock = blockMap.get(header);
-      let exitBlock = -1;
-      if (headerBlock) {
-        for (const succId of headerBlock.successors) {
-          if (!body.has(succId)) {
-            exitBlock = succId;
-            break;
-          }
-        }
-      }
-      loops.push({ header, body, backEdgeFrom: backFrom, exitBlock });
-    }
-    return loops;
-  }
-  function analyzeCFG(irFunc) {
-    const backEdges = findBackEdges(irFunc);
-    const topoOrder = topoSort(irFunc, backEdges);
-    const loops = findLoops(irFunc, backEdges);
-    const loopHeaders = new Set(loops.map((l) => l.header));
-    return { loops, backEdges, topoOrder, loopHeaders };
   }
 
   // src/ir/range.ts
@@ -8725,9 +9086,25 @@ var jsmini = (() => {
       case "BitXor":
       case "ShiftLeft":
       case "ShiftRight": {
-        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
-        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
-        body.push(getWasmBinOp(op.opcode, effectiveType));
+        if (forceF64 && (op.opcode === "ShiftLeft" || op.opcode === "ShiftRight")) {
+          const shiftArg = opById?.get(op.args[1]);
+          const shiftAmount = shiftArg?.opcode === "Const" && typeof shiftArg.value === "number" ? shiftArg.value : 1;
+          const multiplier = 2 ** shiftAmount;
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          body.push(WASM_OP.f64_const, ...f64ToBytes(multiplier));
+          body.push(op.opcode === "ShiftLeft" ? WASM_OP.f64_mul : WASM_OP.f64_div);
+        } else if (forceF64 && (op.opcode === "BitAnd" || op.opcode === "BitOr" || op.opcode === "BitXor" || op.opcode === "Mod")) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          body.push(WASM_OP.i32_trunc_f64_s);
+          emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+          body.push(WASM_OP.i32_trunc_f64_s);
+          body.push(getWasmBinOp(op.opcode, "i32"));
+          body.push(WASM_OP.f64_convert_i32_s);
+        } else {
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+          body.push(getWasmBinOp(op.opcode, effectiveType));
+        }
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
@@ -10862,7 +11239,7 @@ var jsmini = (() => {
           let ins = iter.ins == -1 ? -1 : iter.off == 0 ? iter.ins : 0;
           addSection(resultSections, len, ins);
           if (ins > 0)
-            addInsert(resultInserted, resultSections, iter.text);
+            addInsert2(resultInserted, resultSections, iter.text);
           iter.forward(len);
           pos += len;
         }
@@ -10938,7 +11315,7 @@ var jsmini = (() => {
           if (from > pos)
             addSection(sections, from - pos, -1);
           addSection(sections, to - from, insLen);
-          addInsert(inserted, sections, insText);
+          addInsert2(inserted, sections, insText);
           pos = to;
         }
       }
@@ -10998,7 +11375,7 @@ var jsmini = (() => {
     } else
       sections.push(len, ins);
   }
-  function addInsert(values, sections, value) {
+  function addInsert2(values, sections, value) {
     if (value.length == 0)
       return;
     let index = sections.length - 2 >> 1;
@@ -11054,7 +11431,7 @@ var jsmini = (() => {
           if (a.ins >= 0 && inserted < a.i && a.len <= piece) {
             addSection(sections, 0, a.ins);
             if (insert2)
-              addInsert(insert2, sections, a.text);
+              addInsert2(insert2, sections, a.text);
             inserted = a.i;
           }
           a.forward(piece);
@@ -11078,7 +11455,7 @@ var jsmini = (() => {
         }
         addSection(sections, len, inserted < a.i ? a.ins : 0);
         if (insert2 && inserted < a.i)
-          addInsert(insert2, sections, a.text);
+          addInsert2(insert2, sections, a.text);
         inserted = a.i;
         a.forward(a.len - left);
       } else if (a.done && b.done) {
@@ -11101,7 +11478,7 @@ var jsmini = (() => {
       } else if (b.len == 0 && !b.done) {
         addSection(sections, 0, b.ins, open);
         if (insert2)
-          addInsert(insert2, sections, b.text);
+          addInsert2(insert2, sections, b.text);
         b.next();
       } else if (a.done || b.done) {
         throw new Error("Mismatched change set lengths");
@@ -11111,15 +11488,15 @@ var jsmini = (() => {
           let insB = b.ins == -1 ? -1 : b.off ? 0 : b.ins;
           addSection(sections, len, insB, open);
           if (insert2 && insB)
-            addInsert(insert2, sections, b.text);
+            addInsert2(insert2, sections, b.text);
         } else if (b.ins == -1) {
           addSection(sections, a.off ? 0 : a.len, len, open);
           if (insert2)
-            addInsert(insert2, sections, a.textBit(len));
+            addInsert2(insert2, sections, a.textBit(len));
         } else {
           addSection(sections, a.off ? 0 : a.len, b.off ? 0 : b.ins, open);
           if (insert2 && !b.off)
-            addInsert(insert2, sections, b.text);
+            addInsert2(insert2, sections, b.text);
         }
         open = (a.ins > len || b.ins >= 0 && b.len > len) && (open || sections.length > sectionLen);
         a.forward2(len);

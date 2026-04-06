@@ -71,11 +71,11 @@ x + 0   → x
 
 ### 21-4: ベンチマーク + 統合テスト
 
-- [ ] 21-4a: LICM ベンチ: ループ内定数計算が巻き上がることを確認
-- [ ] 21-4b: CSE ベンチ: 冗長計算除去の効果を計測
-- [ ] 21-4c: Strength Reduction ベンチ: 2冪 Mul → Shift の効果
-- [ ] 21-4d: 全テストパス (既存 634+ テスト)
-- [ ] 21-4e: Playground プリセット追加 (LICM / CSE / Strength Reduction の可視化)
+- [x] 21-4a: LICM ベンチ: x*2 ループ外移動、TW 11.96ms → IR 0.61ms
+- [x] 21-4b: CSE ベンチ: 冗長 (i+1)*(i+2)、Direct JIT overflow → IR 正確
+- [x] 21-4c: Strength Reduction ベンチ: x*4 → x<<2、TW 10.67ms → IR 0.30ms
+- [x] 21-4d: 全 658 テストパス
+- [x] 21-4e: Playground プリセット「IR Optimizations (LICM/CSE/SR)」追加
 
 ## 目標
 
