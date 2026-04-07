@@ -9,6 +9,9 @@
 import type { IRFunction, Block, Op } from "./types.js";
 import { isPhi } from "./types.js";
 import { inlinePass } from "./inline.js";
+import { licm } from "./licm.js";
+import { cse } from "./cse.js";
+import { strengthReduce } from "./strength-reduce.js";
 export type { InlineOptions } from "./inline.js";
 
 // ========== Constant Folding ==========
@@ -113,7 +116,7 @@ export function deadCodeElimination(func: IRFunction): boolean {
   }
 
   // use count == 0 の Op を除去 (制御フロー命令は除外)
-  const controlOps = new Set(["Return", "Branch", "Jump"]);
+  const controlOps = new Set(["Return", "Branch", "Jump", "StoreGlobal", "ArraySet", "StoreUpvalue", "StoreProperty", "Call"]);
 
   for (const block of func.blocks) {
     const newOps: Op[] = [];
@@ -137,14 +140,17 @@ export function deadCodeElimination(func: IRFunction): boolean {
 // ========== 最適化パイプライン ==========
 
 export function optimize(func: IRFunction, inlineOptions?: InlineOptions): void {
-  // Inlining → Constant Folding → DCE を繰り返す (fixpoint)
+  // Inlining → Constant Folding → DCE → LICM を繰り返す (fixpoint)
   for (let iter = 0; iter < 10; iter++) {
     let changed = false;
     if (inlineOptions) {
       changed = inlinePass(func, inlineOptions) || changed;
     }
     changed = constantFolding(func) || changed;
+    changed = cse(func) || changed;
     changed = deadCodeElimination(func) || changed;
+    changed = licm(func) || changed;
+    changed = strengthReduce(func) || changed;
     if (!changed) break;
   }
 }

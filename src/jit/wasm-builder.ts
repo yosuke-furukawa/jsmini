@@ -56,6 +56,8 @@ export const WASM_OP = {
   f64_le: 0x65,
   f64_ge: 0x66,
   f64_neg: 0x9a,
+  i32_trunc_f64_s: 0xaa,
+  f64_convert_i32_s: 0xb7,
   end: 0x0b,
   return: 0x0f,
   if: 0x04,

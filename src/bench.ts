@@ -328,6 +328,52 @@ const benchmarks = [
     jitEligible: true,
   },
   {
+    name: "LICM: loop-invariant x*2 hoisted (10K iter)",
+    source: `
+      function bench(n, x) {
+        var sum = 0;
+        for (var i = 0; i < n; i = i + 1) {
+          sum = sum + x * 2;
+        }
+        return sum;
+      }
+      var r = 0;
+      for (var j = 0; j < 200; j = j + 1) { r = bench(10000, 7); }
+      r;
+    `,
+    jitEligible: true,
+  },
+  {
+    name: "CSE: duplicate a*b eliminated",
+    source: `
+      function bench(n) {
+        var sum = 0;
+        for (var i = 0; i < n; i = i + 1) {
+          var x = (i + 1) * (i + 2);
+          var y = (i + 1) * (i + 2);
+          sum = sum + x + y;
+        }
+        return sum;
+      }
+      bench(10000);
+    `,
+    jitEligible: true,
+  },
+  {
+    name: "strength reduction: x*4 → x<<2 (10K iter)",
+    source: `
+      function bench(n) {
+        var sum = 0;
+        for (var i = 0; i < n; i = i + 1) {
+          sum = sum + i * 4;
+        }
+        return sum;
+      }
+      bench(10000);
+    `,
+    jitEligible: true,
+  },
+  {
     name: "i32 overflow → deopt (IR gives wrong result)",
     source: `
       function addUp(n) {

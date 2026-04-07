@@ -46,41 +46,77 @@ x + 0   → x
 
 ### 21-1: LICM
 
-- [ ] 21-1a: `src/ir/licm.ts` — ループ不変判定 (`isLoopInvariant(op, loopBlocks)`)
-- [ ] 21-1b: ループヘッダの直前 (preheader) に不変 Op を移動
-- [ ] 21-1c: ネストしたループ対応 (内側から外側へ段階的に巻き上げ)
-- [ ] 21-1d: optimize() パイプラインに LICM を追加
-- [ ] 21-1e: テスト (不変式巻き上げ、ループ依存は移動しない、ネストループ)
+- [x] 21-1a: `src/ir/licm.ts` — ループ不変判定 (`isLoopInvariant(op, loopBlocks)`)
+- [x] 21-1b: ループヘッダの直前 (preheader) に不変 Op を移動
+- [x] 21-1c: ネストしたループ対応 (内側から外側へ段階的に巻き上げ)
+- [x] 21-1d: optimize() パイプラインに LICM を追加
+- [x] 21-1e: テスト (不変式巻き上げ、ループ依存は移動しない、ネストループ)
 
 ### 21-2: CSE
 
-- [ ] 21-2a: `src/ir/cse.ts` — 同一ブロック内の CSE (Local CSE)
-- [ ] 21-2b: ハッシュ: `opcode + args.join(",")` で同値判定
-- [ ] 21-2c: 重複 Op を最初の Op に置換 (uses の付け替え)
-- [ ] 21-2d: optimize() パイプラインに CSE を追加
-- [ ] 21-2e: テスト (同一式の除去、副作用ありは除外、ブロックまたぎ)
+- [x] 21-2a: `src/ir/cse.ts` — 同一ブロック内の CSE (Local CSE)
+- [x] 21-2b: ハッシュ: `opcode + args.join(",")` で同値判定
+- [x] 21-2c: 重複 Op を最初の Op に置換 (uses の付け替え)
+- [x] 21-2d: optimize() パイプラインに CSE を追加
+- [x] 21-2e: テスト (同一式の除去、副作用ありは除外、ブロックまたぎ)
 
 ### 21-3: Strength Reduction
 
-- [ ] 21-3a: `src/ir/strength-reduce.ts` — Mul/Div/Mod の 2 冪変換
-- [ ] 21-3b: 恒等変換 (x*0→0, x*1→x, x+0→x, x-0→x)
-- [ ] 21-3c: Range 情報を使った安全判定 (右シフトは正の整数のみ)
-- [ ] 21-3d: optimize() パイプラインに追加 (Constant Folding の後)
-- [ ] 21-3e: テスト (2冪変換、恒等変換、負数で変換しないケース)
+- [x] 21-3a: `src/ir/strength-reduce.ts` — Mul/Div/Mod の 2 冪変換
+- [x] 21-3b: 恒等変換 (x*0→0, x*1→x, x+0→x, x-0→x)
+- [x] 21-3c: Range 情報を使った安全判定 (右シフトは正の整数のみ)
+- [x] 21-3d: optimize() パイプラインに追加 (Constant Folding の後)
+- [x] 21-3e: テスト (2冪変換、恒等変換、負数で変換しないケース)
+- [x] 21-3f: f64 モードで ShiftLeft/BitAnd を Mul/i32変換する codegen 対応
 
 ### 21-4: ベンチマーク + 統合テスト
 
-- [ ] 21-4a: LICM ベンチ: ループ内定数計算が巻き上がることを確認
-- [ ] 21-4b: CSE ベンチ: 冗長計算除去の効果を計測
-- [ ] 21-4c: Strength Reduction ベンチ: 2冪 Mul → Shift の効果
-- [ ] 21-4d: 全テストパス (既存 634+ テスト)
-- [ ] 21-4e: Playground プリセット追加 (LICM / CSE / Strength Reduction の可視化)
+- [x] 21-4a: LICM ベンチ: x*2 ループ外移動、TW 11.96ms → IR 0.61ms
+- [x] 21-4b: CSE ベンチ: 冗長 (i+1)*(i+2)、Direct JIT overflow → IR 正確
+- [x] 21-4c: Strength Reduction ベンチ: x*4 → x<<2、TW 10.67ms → IR 0.30ms
+- [x] 21-4d: 全 658 テストパス
+- [x] 21-4e: Playground プリセット「IR Optimizations (LICM/CSE/SR)」追加
+
+### 21-5: クロージャ IR 対応
+
+Direct JIT では upvalue を追加パラメータとして Wasm 関数に渡す仕組みがあるが、
+IR パスでは `LdaUpvalue` / `StaUpvalue` を扱えず VM フォールバックしていた。
+
+- [x] 21-5a: IR opcode `LoadUpvalue` / `StoreUpvalue` を追加
+- [x] 21-5b: Builder: `LdaUpvalue` → `LoadUpvalue`、`StaUpvalue` → `StoreUpvalue` 変換
+- [x] 21-5c: Codegen: upvalue を追加パラメータとして Wasm 関数に渡す (Direct JIT と同方式)
+- [x] 21-5d: JitManager の executeWasm が既に upvalue 対応済み → 変更不要
+- [x] 21-5e: makeAdder, makeMul, makeLinear が IR パスで動作確認
+
+### 21-6: プロパティアクセス IR 対応
+
+Direct JIT では `this.x` を linear memory 上の固定オフセットで i32.load/store しているが、
+IR パスでは `GetProperty("length")` → `ArrayLength` 以外の named property が未対応。
+
+- [x] 21-6a: IR opcode `LoadThis`, `LoadProperty`, `StoreProperty` を追加
+- [x] 21-6b: Builder: `LoadThis` → `LoadThis`、`GetProperty` → `LoadProperty`、`SetPropertyAssign` → `StoreProperty`
+- [x] 21-6c: Codegen: linear memory + プロパティ名→オフセットマップ + i32.load/store
+- [x] 21-6d: `compileIRToWasm`: WebAssembly.Memory 追加、プロパティオフセット算出
+- [x] 21-6e: JitManager: executeWasm が既に memory + this 対応済み → memory 渡しのみ修正
+- [x] 21-6f: Point.sum(), Point.dist() が IR パスで動作確認
+
+### 21-7: Construct + CallMethod IR 対応
+
+- [x] 21-7a: Builder: `Construct` → Alloc + Call(ctor, args, this=alloc)
+- [x] 21-7b: Builder: `CallMethod` → Call(methodRef, args, this) 変換
+- [x] 21-7c: Builder: `Dup` は既に対応済み (stack 複製)
+- [x] 21-7d: Codegen: Alloc → bump allocator (global heapPtr + objectSize)
+- [x] 21-7e: new Point(3,4) + p.dist() x100 = 2500 が IR パスで動作確認
+- [x] 21-7f: ベンチ: closure accum VM 12.73ms → IR 0.95ms (13.4x)、Point.heavy は呼び出しオーバーヘッド支配で差なし
 
 ## 目標
 
 - ループ内の冗長な計算を除去 (LICM)
 - 重複計算を共有 (CSE)
 - 高コスト演算を低コストに置換 (Strength Reduction)
+- クロージャが IR パスで動く (upvalue 対応)
+- プロパティアクセスが IR パスで動く (linear memory)
+- Construct / CallMethod が IR パスで動く
 - IR の printIR / Playground で最適化の before/after が見える
 
 ## 技術メモ

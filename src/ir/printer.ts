@@ -42,6 +42,24 @@ function formatOp(op: Op, indent: string = "  "): string {
     case "StoreGlobal":
       return `${indent}StoreGlobal("${op.globalName}", v${op.args[0]})`;
 
+    case "LoadUpvalue":
+      return `${indent}v${op.id}: ${typeStr} = LoadUpvalue(${op.index})`;
+
+    case "StoreUpvalue":
+      return `${indent}StoreUpvalue(${op.index}, v${op.args[0]})`;
+
+    case "LoadThis":
+      return `${indent}v${op.id}: ${typeStr} = LoadThis`;
+
+    case "LoadProperty":
+      return `${indent}v${op.id}: ${typeStr} = LoadProperty(v${op.args[0]}, "${op.globalName}")`;
+
+    case "StoreProperty":
+      return `${indent}StoreProperty(v${op.args[0]}, "${op.globalName}", v${op.args[1]})`;
+
+    case "Alloc":
+      return `${indent}v${op.id}: ${typeStr} = Alloc`;
+
     case "TypeGuard":
       return `${indent}v${op.id}: ${typeStr} = TypeGuard(v${op.args[0]}, ${op.guardType})`;
 

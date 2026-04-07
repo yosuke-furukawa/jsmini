@@ -327,6 +327,21 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           block.ops.push(op);
           break;
         }
+        case "LdaUpvalue": {
+          const uvIndex = instr.operand!;
+          const op = registerOp(createOp(irFunc, "LoadUpvalue", [], "any"));
+          op.index = uvIndex;
+          block.ops.push(op); stack.push(op.id);
+          break;
+        }
+        case "StaUpvalue": {
+          const uvIndex = instr.operand!;
+          const val = stack[stack.length - 1]; // peek
+          const op = registerOp(createOp(irFunc, "StoreUpvalue", [val], "any"));
+          op.index = uvIndex;
+          block.ops.push(op);
+          break;
+        }
         case "Call": {
           const argc = instr.operand!;
           const calleeId = stack.pop()!;
@@ -335,6 +350,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           const calleeOp = opById.get(calleeId);
           const op = registerOp(createOp(irFunc, "Call", [calleeId, ...args], "any"));
           if (calleeOp?.calleeName) op.calleeName = calleeOp.calleeName;
+          else if (calleeOp?.globalName) op.calleeName = calleeOp.globalName;
           block.ops.push(op); stack.push(op.id); break;
         }
         // 配列アクセス
@@ -351,7 +367,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           const op = registerOp(createOp(irFunc, "ArraySet", [arr, index, value], "any"));
           block.ops.push(op); break;
         }
-        // arr.length
+        // プロパティアクセス
         case "GetProperty": {
           const obj = stack.pop()!;
           const name = constants[instr.operand!] as string;
@@ -359,11 +375,60 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
             const op = registerOp(createOp(irFunc, "ArrayLength", [obj], "i32"));
             block.ops.push(op); stack.push(op.id);
           } else {
-            // 他のプロパティは未対応 → any
-            const op = registerOp(createOp(irFunc, "Const", [], "any"));
-            op.value = undefined as any;
+            // named property: obj.name
+            const op = registerOp(createOp(irFunc, "LoadProperty", [obj], "i32"));
+            op.globalName = name;
             block.ops.push(op); stack.push(op.id);
           }
+          break;
+        }
+        case "SetPropertyAssign": {
+          // スタック: [value, obj] → obj.name = value
+          const obj = stack.pop()!;
+          const value = stack.pop()!;
+          const name = constants[instr.operand!] as string;
+          const op = registerOp(createOp(irFunc, "StoreProperty", [obj, value], "any"));
+          op.globalName = name;
+          block.ops.push(op);
+          // SetPropertyAssign は value をスタックに残す
+          stack.push(value);
+          break;
+        }
+        case "CallMethod": {
+          const argc = instr.operand!;
+          // スタック: [args..., thisObj(Dup), methodRef(GetProperty)]
+          const methodRef = stack.pop()!; // GetProperty の結果 (LoadProperty op)
+          const thisObj = stack.pop()!;    // Dup の結果 (thisObj)
+          const args: number[] = [];
+          for (let j = 0; j < argc; j++) args.unshift(stack.pop()!);
+          // methodRef から calleeName を取得
+          const methodOp = opById.get(methodRef);
+          const methodName = methodOp?.globalName;
+          // Call(methodRef, args..., thisObj) として表現
+          const op = registerOp(createOp(irFunc, "Call", [methodRef, ...args, thisObj], "any"));
+          if (methodName) op.calleeName = methodName;
+          block.ops.push(op); stack.push(op.id); break;
+        }
+        case "Construct": {
+          const argc = instr.operand!;
+          const ctorRef = stack.pop()!; // コンストラクタ参照
+          const args: number[] = [];
+          for (let j = 0; j < argc; j++) args.unshift(stack.pop()!);
+          // Alloc: オブジェクト領域確保
+          const alloc = registerOp(createOp(irFunc, "Alloc", [], "i32"));
+          block.ops.push(alloc);
+          // Call: コンストラクタ呼び出し (args + this=alloc)
+          const ctorOp = opById.get(ctorRef);
+          const call = registerOp(createOp(irFunc, "Call", [ctorRef, ...args, alloc.id], "any"));
+          if (ctorOp?.calleeName) call.calleeName = ctorOp.calleeName;
+          block.ops.push(call);
+          // Construct の結果は alloc (base address)
+          stack.push(alloc.id);
+          break;
+        }
+        case "LoadThis": {
+          const op = registerOp(createOp(irFunc, "LoadThis", [], "i32"));
+          block.ops.push(op); stack.push(op.id);
           break;
         }
         default: break;

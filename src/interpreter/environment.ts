@@ -1,3 +1,5 @@
+import { isJSString, jsStringToString } from "../vm/js-string.js";
+
 // TDZ を表す特別な値
 const TDZ_SENTINEL = Symbol("TDZ");
 
@@ -88,6 +90,10 @@ export class Environment {
         if (env.readOnly.has(key)) continue; // undefined, console 等の組み込みはスキップ
         if (typeof val === "object" && val !== null && "params" in val && "body" in val) {
           variables[key] = "[Function]";
+        } else if (isJSString(val)) {
+          variables[key] = jsStringToString(val);
+        } else if (Array.isArray(val)) {
+          variables[key] = val.map(v => isJSString(v) ? jsStringToString(v) : v);
         } else {
           variables[key] = val;
         }

@@ -274,6 +274,7 @@ main {
     <option value="modern-syntax">Modern Syntax</option>
     <option value="ir-vs-direct">IR vs Direct JIT</option>
     <option value="array-jit">Array JIT</option>
+    <option value="ir-optimizations">IR Optimizations (LICM/CSE/SR)</option>
   </select>
   <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
     <option value="tree-walking">Tree-Walking</option>
@@ -1064,6 +1065,66 @@ function sumSquares(arr, n) {
 }
 console.log("sumSquares:", sumSquares([50000, 50000, 50000], 3));
 // 50000^2 * 3 = 7.5 billion — overflows i32, auto-promoted to f64`,
+
+  "ir-optimizations": `// IR Optimizations — LICM, CSE, Strength Reduction
+// Use "Wasm JIT (IR)" mode and check the IR tab!
+
+// 1. LICM: Loop-Invariant Code Motion
+// x * 2 is computed once, outside the loop
+function benchLICM(n, x) {
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + x * 2;
+  }
+  return sum;
+}
+console.log("LICM:", benchLICM(1000, 7));
+// IR tab: Mul(x, 2) is in B0 (preheader), not in loop body
+
+// 2. CSE: Common Subexpression Elimination
+// (a+b) computed once, second use reuses first result
+function benchCSE(a, b) {
+  var x = a + b;
+  var y = a + b;
+  return x * y;
+}
+console.log("CSE:", benchCSE(3, 4));
+// IR tab: only one Add op, second eliminated by CSE
+
+// 3. Strength Reduction
+// x * 8 becomes x << 3 (shift is faster than multiply)
+function benchSR(n) {
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    sum = sum + i * 8;
+  }
+  return sum;
+}
+console.log("SR:", benchSR(1000));
+// IR tab: Mul → ShiftLeft, WAT tab: i32.shl instead of i32.mul
+
+// 4. Identity elimination
+// x + 0 and x * 1 are removed entirely
+function benchIdentity(a) {
+  var x = a + 0;
+  var y = x * 1;
+  return y;
+}
+console.log("identity:", benchIdentity(42));
+// IR tab: Add and Mul eliminated, just returns Param(0)
+
+// 5. Combined: all optimizations working together
+function benchCombined(n, x) {
+  var sum = 0;
+  for (var i = 0; i < n; i = i + 1) {
+    // LICM hoists x * 4 out of loop
+    // SR converts x * 4 to x << 2
+    sum = sum + x * 4 + i * 2;
+    // SR converts i * 2 to i << 1
+  }
+  return sum;
+}
+console.log("combined:", benchCombined(1000, 5));`,
 };
 
 // ========== CodeMirror setup ==========

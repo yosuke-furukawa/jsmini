@@ -1641,6 +1641,105 @@ var jsmini = (() => {
     return parseProgram();
   }
 
+  // src/vm/js-string.ts
+  var CONS_MIN_LENGTH = 13;
+  var JS_STRING_BRAND = /* @__PURE__ */ Symbol("JSString");
+  function createSeqString(str) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(str);
+    const s = {
+      kind: "seq",
+      data,
+      length: data.length,
+      [JS_STRING_BRAND]: true
+    };
+    return s;
+  }
+  var EMPTY_STRING = createSeqString("");
+  function isJSString(value) {
+    return typeof value === "object" && value !== null && JS_STRING_BRAND in value;
+  }
+  function jsStringConcat(a, b) {
+    if (a.length === 0) return b;
+    if (b.length === 0) return a;
+    const totalLength = a.length + b.length;
+    if (totalLength < CONS_MIN_LENGTH) {
+      const flat = flatten(a);
+      const flatB = flatten(b);
+      const data = new Uint8Array(totalLength);
+      data.set(flat.data, 0);
+      data.set(flatB.data, flat.length);
+      const s2 = { kind: "seq", data, length: totalLength, [JS_STRING_BRAND]: true };
+      return s2;
+    }
+    const s = { kind: "cons", left: a, right: b, length: totalLength, [JS_STRING_BRAND]: true };
+    return s;
+  }
+  function flatten(str) {
+    if (str.kind === "seq") return str;
+    const buf = new Uint8Array(str.length);
+    flattenInto(str, buf, 0);
+    const flat = {
+      kind: "seq",
+      data: buf,
+      length: str.length,
+      [JS_STRING_BRAND]: true
+    };
+    str.kind = "seq";
+    str.data = buf;
+    str.left = null;
+    str.right = null;
+    str.parent = null;
+    return flat;
+  }
+  function flattenInto(str, buf, offset) {
+    switch (str.kind) {
+      case "seq":
+        buf.set(str.data, offset);
+        break;
+      case "cons":
+        flattenInto(str.left, buf, offset);
+        flattenInto(str.right, buf, offset + str.left.length);
+        break;
+      case "sliced": {
+        const flat = flatten(str.parent);
+        buf.set(flat.data.subarray(str.offset, str.offset + str.length), offset);
+        break;
+      }
+    }
+  }
+  function jsStringToString(str) {
+    const flat = flatten(str);
+    const decoder = new TextDecoder();
+    return decoder.decode(flat.data);
+  }
+  function jsStringEquals(a, b) {
+    if (a === b) return true;
+    if (a.length !== b.length) return false;
+    const flatA = flatten(a);
+    const flatB = flatten(b);
+    for (let i = 0; i < flatA.length; i++) {
+      if (flatA.data[i] !== flatB.data[i]) return false;
+    }
+    return true;
+  }
+  function getInternId(str) {
+    return internIndex.get(str) ?? -1;
+  }
+  var internTable = /* @__PURE__ */ new Map();
+  var internIndex = /* @__PURE__ */ new Map();
+  var internById = [];
+  function internString(str) {
+    const existing = internTable.get(str);
+    if (existing) return existing;
+    const jsStr = createSeqString(str);
+    internTable.set(str, jsStr);
+    const id2 = internById.length;
+    internIndex.set(jsStr, id2);
+    internById.push(jsStr);
+    return jsStr;
+  }
+
   // src/interpreter/environment.ts
   var TDZ_SENTINEL = /* @__PURE__ */ Symbol("TDZ");
   var Environment = class {
@@ -1718,6 +1817,10 @@ var jsmini = (() => {
           if (env.readOnly.has(key)) continue;
           if (typeof val === "object" && val !== null && "params" in val && "body" in val) {
             variables[key] = "[Function]";
+          } else if (isJSString(val)) {
+            variables[key] = jsStringToString(val);
+          } else if (Array.isArray(val)) {
+            variables[key] = val.map((v) => isJSString(v) ? jsStringToString(v) : v);
           } else {
             variables[key] = val;
           }
@@ -1916,105 +2019,6 @@ var jsmini = (() => {
         assignPattern(el, arr?.[i], env);
       }
     }
-  }
-
-  // src/vm/js-string.ts
-  var CONS_MIN_LENGTH = 13;
-  var JS_STRING_BRAND = /* @__PURE__ */ Symbol("JSString");
-  function createSeqString(str) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(str);
-    const s = {
-      kind: "seq",
-      data,
-      length: data.length,
-      [JS_STRING_BRAND]: true
-    };
-    return s;
-  }
-  var EMPTY_STRING = createSeqString("");
-  function isJSString(value) {
-    return typeof value === "object" && value !== null && JS_STRING_BRAND in value;
-  }
-  function jsStringConcat(a, b) {
-    if (a.length === 0) return b;
-    if (b.length === 0) return a;
-    const totalLength = a.length + b.length;
-    if (totalLength < CONS_MIN_LENGTH) {
-      const flat = flatten(a);
-      const flatB = flatten(b);
-      const data = new Uint8Array(totalLength);
-      data.set(flat.data, 0);
-      data.set(flatB.data, flat.length);
-      const s2 = { kind: "seq", data, length: totalLength, [JS_STRING_BRAND]: true };
-      return s2;
-    }
-    const s = { kind: "cons", left: a, right: b, length: totalLength, [JS_STRING_BRAND]: true };
-    return s;
-  }
-  function flatten(str) {
-    if (str.kind === "seq") return str;
-    const buf = new Uint8Array(str.length);
-    flattenInto(str, buf, 0);
-    const flat = {
-      kind: "seq",
-      data: buf,
-      length: str.length,
-      [JS_STRING_BRAND]: true
-    };
-    str.kind = "seq";
-    str.data = buf;
-    str.left = null;
-    str.right = null;
-    str.parent = null;
-    return flat;
-  }
-  function flattenInto(str, buf, offset) {
-    switch (str.kind) {
-      case "seq":
-        buf.set(str.data, offset);
-        break;
-      case "cons":
-        flattenInto(str.left, buf, offset);
-        flattenInto(str.right, buf, offset + str.left.length);
-        break;
-      case "sliced": {
-        const flat = flatten(str.parent);
-        buf.set(flat.data.subarray(str.offset, str.offset + str.length), offset);
-        break;
-      }
-    }
-  }
-  function jsStringToString(str) {
-    const flat = flatten(str);
-    const decoder = new TextDecoder();
-    return decoder.decode(flat.data);
-  }
-  function jsStringEquals(a, b) {
-    if (a === b) return true;
-    if (a.length !== b.length) return false;
-    const flatA = flatten(a);
-    const flatB = flatten(b);
-    for (let i = 0; i < flatA.length; i++) {
-      if (flatA.data[i] !== flatB.data[i]) return false;
-    }
-    return true;
-  }
-  function getInternId(str) {
-    return internIndex.get(str) ?? -1;
-  }
-  var internTable = /* @__PURE__ */ new Map();
-  var internIndex = /* @__PURE__ */ new Map();
-  var internById = [];
-  function internString(str) {
-    const existing = internTable.get(str);
-    if (existing) return existing;
-    const jsStr = createSeqString(str);
-    internTable.set(str, jsStr);
-    const id2 = internById.length;
-    internIndex.set(jsStr, id2);
-    internById.push(jsStr);
-    return jsStr;
   }
 
   // src/vm/js-symbol.ts
@@ -4897,6 +4901,8 @@ var jsmini = (() => {
     f64_le: 101,
     f64_ge: 102,
     f64_neg: 154,
+    i32_trunc_f64_s: 170,
+    f64_convert_i32_s: 183,
     end: 11,
     return: 15,
     if: 4,
@@ -7861,6 +7867,22 @@ var jsmini = (() => {
             block.ops.push(op);
             break;
           }
+          case "LdaUpvalue": {
+            const uvIndex = instr.operand;
+            const op = registerOp(createOp(irFunc, "LoadUpvalue", [], "any"));
+            op.index = uvIndex;
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "StaUpvalue": {
+            const uvIndex = instr.operand;
+            const val = stack[stack.length - 1];
+            const op = registerOp(createOp(irFunc, "StoreUpvalue", [val], "any"));
+            op.index = uvIndex;
+            block.ops.push(op);
+            break;
+          }
           case "Call": {
             const argc = instr.operand;
             const calleeId = stack.pop();
@@ -7869,6 +7891,7 @@ var jsmini = (() => {
             const calleeOp = opById.get(calleeId);
             const op = registerOp(createOp(irFunc, "Call", [calleeId, ...args], "any"));
             if (calleeOp?.calleeName) op.calleeName = calleeOp.calleeName;
+            else if (calleeOp?.globalName) op.calleeName = calleeOp.globalName;
             block.ops.push(op);
             stack.push(op.id);
             break;
@@ -7890,7 +7913,7 @@ var jsmini = (() => {
             block.ops.push(op);
             break;
           }
-          // arr.length
+          // プロパティアクセス
           case "GetProperty": {
             const obj = stack.pop();
             const name2 = constants[instr.operand];
@@ -7899,11 +7922,55 @@ var jsmini = (() => {
               block.ops.push(op);
               stack.push(op.id);
             } else {
-              const op = registerOp(createOp(irFunc, "Const", [], "any"));
-              op.value = void 0;
+              const op = registerOp(createOp(irFunc, "LoadProperty", [obj], "i32"));
+              op.globalName = name2;
               block.ops.push(op);
               stack.push(op.id);
             }
+            break;
+          }
+          case "SetPropertyAssign": {
+            const obj = stack.pop();
+            const value = stack.pop();
+            const name2 = constants[instr.operand];
+            const op = registerOp(createOp(irFunc, "StoreProperty", [obj, value], "any"));
+            op.globalName = name2;
+            block.ops.push(op);
+            stack.push(value);
+            break;
+          }
+          case "CallMethod": {
+            const argc = instr.operand;
+            const methodRef = stack.pop();
+            const thisObj = stack.pop();
+            const args = [];
+            for (let j = 0; j < argc; j++) args.unshift(stack.pop());
+            const methodOp = opById.get(methodRef);
+            const methodName = methodOp?.globalName;
+            const op = registerOp(createOp(irFunc, "Call", [methodRef, ...args, thisObj], "any"));
+            if (methodName) op.calleeName = methodName;
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "Construct": {
+            const argc = instr.operand;
+            const ctorRef = stack.pop();
+            const args = [];
+            for (let j = 0; j < argc; j++) args.unshift(stack.pop());
+            const alloc = registerOp(createOp(irFunc, "Alloc", [], "i32"));
+            block.ops.push(alloc);
+            const ctorOp = opById.get(ctorRef);
+            const call = registerOp(createOp(irFunc, "Call", [ctorRef, ...args, alloc.id], "any"));
+            if (ctorOp?.calleeName) call.calleeName = ctorOp.calleeName;
+            block.ops.push(call);
+            stack.push(alloc.id);
+            break;
+          }
+          case "LoadThis": {
+            const op = registerOp(createOp(irFunc, "LoadThis", [], "i32"));
+            block.ops.push(op);
+            stack.push(op.id);
             break;
           }
           default:
@@ -8062,6 +8129,436 @@ var jsmini = (() => {
     return true;
   }
 
+  // src/ir/loop-analysis.ts
+  function findBackEdges(irFunc) {
+    const backEdges = /* @__PURE__ */ new Set();
+    const visited = /* @__PURE__ */ new Set();
+    const inStack = /* @__PURE__ */ new Set();
+    const blockMap = /* @__PURE__ */ new Map();
+    for (const b of irFunc.blocks) blockMap.set(b.id, b);
+    function dfs(blockId) {
+      visited.add(blockId);
+      inStack.add(blockId);
+      const block = blockMap.get(blockId);
+      if (!block) return;
+      for (const succId of block.successors) {
+        if (inStack.has(succId)) {
+          backEdges.add(`${blockId}\u2192${succId}`);
+        } else if (!visited.has(succId)) {
+          dfs(succId);
+        }
+      }
+      inStack.delete(blockId);
+    }
+    if (irFunc.blocks.length > 0) {
+      dfs(irFunc.blocks[0].id);
+    }
+    return backEdges;
+  }
+  function topoSort(irFunc, _backEdges) {
+    return irFunc.blocks.filter((b) => b.ops.length > 0 || b.phis.length > 0).map((b) => b.id).sort((a, b) => a - b);
+  }
+  function findLoops(irFunc, backEdges) {
+    const loops = [];
+    const blockMap = /* @__PURE__ */ new Map();
+    for (const b of irFunc.blocks) blockMap.set(b.id, b);
+    for (const edge of backEdges) {
+      const [fromStr, toStr] = edge.split("\u2192");
+      const backFrom = parseInt(fromStr);
+      const header = parseInt(toStr);
+      const body = /* @__PURE__ */ new Set();
+      body.add(header);
+      body.add(backFrom);
+      const queue = [backFrom];
+      while (queue.length > 0) {
+        const bid = queue.shift();
+        const block = blockMap.get(bid);
+        if (!block) continue;
+        for (const predId of block.predecessors) {
+          if (!body.has(predId) && predId !== header) {
+            body.add(predId);
+            queue.push(predId);
+          }
+        }
+      }
+      const headerBlock = blockMap.get(header);
+      let exitBlock = -1;
+      if (headerBlock) {
+        for (const succId of headerBlock.successors) {
+          if (!body.has(succId)) {
+            exitBlock = succId;
+            break;
+          }
+        }
+      }
+      loops.push({ header, body, backEdgeFrom: backFrom, exitBlock });
+    }
+    return loops;
+  }
+  function analyzeCFG(irFunc) {
+    const backEdges = findBackEdges(irFunc);
+    const topoOrder = topoSort(irFunc, backEdges);
+    const loops = findLoops(irFunc, backEdges);
+    const loopHeaders = new Set(loops.map((l) => l.header));
+    return { loops, backEdges, topoOrder, loopHeaders };
+  }
+
+  // src/ir/licm.ts
+  var UNMOVABLE = /* @__PURE__ */ new Set([
+    "Branch",
+    "Jump",
+    "Return",
+    // 制御フロー
+    "Call",
+    // 副作用あり
+    "StoreGlobal",
+    // 副作用あり
+    "ArraySet",
+    // 副作用あり
+    "Phi",
+    // ループの merge 点
+    "TypeGuard"
+    // deopt 位置が変わると意味が変わる
+  ]);
+  function licm(func) {
+    const cfg = analyzeCFG(func);
+    if (cfg.loops.length === 0) return false;
+    const blockMap = /* @__PURE__ */ new Map();
+    for (const b of func.blocks) blockMap.set(b.id, b);
+    const defBlock = /* @__PURE__ */ new Map();
+    for (const b of func.blocks) {
+      for (const phi of b.phis) defBlock.set(phi.id, b.id);
+      for (const op of b.ops) defBlock.set(op.id, b.id);
+    }
+    const sortedLoops = [...cfg.loops].sort((a, b) => a.body.size - b.body.size);
+    let changed = false;
+    for (const loop of sortedLoops) {
+      if (hoistFromLoop(func, loop, blockMap, defBlock)) {
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  function hoistFromLoop(func, loop, blockMap, defBlock) {
+    const headerBlock = blockMap.get(loop.header);
+    if (!headerBlock) return false;
+    let preheaterId = -1;
+    for (const predId of headerBlock.predecessors) {
+      if (!loop.body.has(predId)) {
+        preheaterId = predId;
+        break;
+      }
+    }
+    if (preheaterId === -1) return false;
+    const preheader = blockMap.get(preheaterId);
+    if (!preheader) return false;
+    const loopOps = /* @__PURE__ */ new Set();
+    for (const bid of loop.body) {
+      const block = blockMap.get(bid);
+      if (!block) continue;
+      for (const phi of block.phis) loopOps.add(phi.id);
+      for (const op of block.ops) loopOps.add(op.id);
+    }
+    const invariant = /* @__PURE__ */ new Set();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const bid of loop.body) {
+        const block = blockMap.get(bid);
+        if (!block) continue;
+        for (const op of block.ops) {
+          if (invariant.has(op.id)) continue;
+          if (UNMOVABLE.has(op.opcode)) continue;
+          if (isLoopInvariant(op, loopOps, invariant)) {
+            invariant.add(op.id);
+            changed = true;
+          }
+        }
+      }
+    }
+    if (invariant.size === 0) return false;
+    const opsToMove = [];
+    for (const bid of loop.body) {
+      const block = blockMap.get(bid);
+      if (!block) continue;
+      const remaining = [];
+      for (const op of block.ops) {
+        if (invariant.has(op.id)) {
+          opsToMove.push(op);
+          defBlock.set(op.id, preheaterId);
+        } else {
+          remaining.push(op);
+        }
+      }
+      block.ops = remaining;
+    }
+    const terminatorIdx = preheader.ops.findIndex(
+      (op) => op.opcode === "Jump" || op.opcode === "Branch" || op.opcode === "Return"
+    );
+    if (terminatorIdx >= 0) {
+      preheader.ops.splice(terminatorIdx, 0, ...opsToMove);
+    } else {
+      preheader.ops.push(...opsToMove);
+    }
+    return true;
+  }
+  function isLoopInvariant(op, loopOps, invariant) {
+    for (const argId of op.args) {
+      if (loopOps.has(argId) && !invariant.has(argId)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // src/ir/cse.ts
+  var NOT_CSE_TARGET = /* @__PURE__ */ new Set([
+    "Branch",
+    "Jump",
+    "Return",
+    // 制御フロー
+    "Call",
+    // 副作用あり
+    "StoreGlobal",
+    // 副作用あり
+    "ArraySet",
+    // 副作用あり
+    "Phi",
+    // 合流点
+    "Param",
+    // パラメータ (ユニーク)
+    "Const",
+    // 定数 (constant folding で処理)
+    "Undefined",
+    // ユニーク
+    "TypeGuard",
+    // 型ガード (位置が重要)
+    "LoadGlobal",
+    // グローバル読み込み (副作用の間で値が変わりうる)
+    "ArrayGet",
+    // 配列読み込み (ArraySet で値が変わりうる)
+    "ArrayLength"
+    // 配列長 (変わりうる)
+  ]);
+  function opKey(op) {
+    return `${op.opcode}:${op.args.join(",")}`;
+  }
+  function cse(func) {
+    let changed = false;
+    const opById = /* @__PURE__ */ new Map();
+    for (const block of func.blocks) {
+      for (const phi of block.phis) opById.set(phi.id, phi);
+      for (const op of block.ops) opById.set(op.id, op);
+    }
+    for (const block of func.blocks) {
+      const seen = /* @__PURE__ */ new Map();
+      for (const op of block.ops) {
+        if (NOT_CSE_TARGET.has(op.opcode)) continue;
+        if (op.args.length === 0) continue;
+        const key = opKey(op);
+        const firstId = seen.get(key);
+        if (firstId !== void 0) {
+          replaceUses(func, op.id, firstId);
+          changed = true;
+        } else {
+          seen.set(key, op.id);
+        }
+      }
+    }
+    return changed;
+  }
+  function replaceUses(func, oldId, newId) {
+    for (const block of func.blocks) {
+      for (const phi of block.phis) {
+        for (let i = 0; i < phi.inputs.length; i++) {
+          if (phi.inputs[i][1] === oldId) {
+            phi.inputs[i][1] = newId;
+          }
+        }
+      }
+      for (const op of block.ops) {
+        for (let i = 0; i < op.args.length; i++) {
+          if (op.args[i] === oldId) {
+            op.args[i] = newId;
+          }
+        }
+      }
+    }
+  }
+
+  // src/ir/strength-reduce.ts
+  function log2IfPow2(n) {
+    if (n <= 0 || !Number.isInteger(n)) return -1;
+    if ((n & n - 1) !== 0) return -1;
+    return Math.log2(n);
+  }
+  function strengthReduce(func) {
+    let changed = false;
+    const opById = /* @__PURE__ */ new Map();
+    for (const block of func.blocks) {
+      for (const phi of block.phis) opById.set(phi.id, phi);
+      for (const op of block.ops) opById.set(op.id, op);
+    }
+    const insertBefore = /* @__PURE__ */ new Map();
+    for (const block of func.blocks) {
+      for (const op of block.ops) {
+        if (op.args.length !== 2) continue;
+        const left = opById.get(op.args[0]);
+        const right = opById.get(op.args[1]);
+        if (!left || !right) continue;
+        if (right.opcode === "Const" && typeof right.value === "number") {
+          const val = right.value;
+          switch (op.opcode) {
+            case "Mul": {
+              if (val === 0) {
+                op.opcode = "Const";
+                op.value = 0;
+                op.args = [];
+                op.type = "i32";
+                changed = true;
+              } else if (val === 1) {
+                replaceWithArg(func, op, op.args[0]);
+                changed = true;
+              } else {
+                const shift2 = log2IfPow2(val);
+                if (shift2 > 0) {
+                  const shiftConst = createConst(func, shift2);
+                  opById.set(shiftConst.id, shiftConst);
+                  addInsert(insertBefore, op, shiftConst);
+                  op.opcode = "ShiftLeft";
+                  op.args[1] = shiftConst.id;
+                  changed = true;
+                }
+              }
+              break;
+            }
+            case "Div": {
+              if (val === 1) {
+                replaceWithArg(func, op, op.args[0]);
+                changed = true;
+              } else {
+                const shift2 = log2IfPow2(val);
+                if (shift2 > 0 && isNonNegative(left)) {
+                  const shiftConst = createConst(func, shift2);
+                  opById.set(shiftConst.id, shiftConst);
+                  addInsert(insertBefore, op, shiftConst);
+                  op.opcode = "ShiftRight";
+                  op.args[1] = shiftConst.id;
+                  changed = true;
+                }
+              }
+              break;
+            }
+            case "Mod": {
+              const shift2 = log2IfPow2(val);
+              if (shift2 > 0 && isNonNegative(left)) {
+                const maskConst = createConst(func, val - 1);
+                opById.set(maskConst.id, maskConst);
+                addInsert(insertBefore, op, maskConst);
+                op.opcode = "BitAnd";
+                op.args[1] = maskConst.id;
+                changed = true;
+              }
+              break;
+            }
+            case "Add": {
+              if (val === 0) {
+                replaceWithArg(func, op, op.args[0]);
+                changed = true;
+              }
+              break;
+            }
+            case "Sub": {
+              if (val === 0) {
+                replaceWithArg(func, op, op.args[0]);
+                changed = true;
+              }
+              break;
+            }
+          }
+          continue;
+        }
+        if (left.opcode === "Const" && typeof left.value === "number") {
+          const val = left.value;
+          switch (op.opcode) {
+            case "Mul": {
+              if (val === 0) {
+                op.opcode = "Const";
+                op.value = 0;
+                op.args = [];
+                op.type = "i32";
+                changed = true;
+              } else if (val === 1) {
+                replaceWithArg(func, op, op.args[1]);
+                changed = true;
+              } else {
+                const shift2 = log2IfPow2(val);
+                if (shift2 > 0) {
+                  const shiftConst = createConst(func, shift2);
+                  opById.set(shiftConst.id, shiftConst);
+                  addInsert(insertBefore, op, shiftConst);
+                  op.opcode = "ShiftLeft";
+                  op.args = [op.args[1], shiftConst.id];
+                  changed = true;
+                }
+              }
+              break;
+            }
+            case "Add": {
+              if (val === 0) {
+                replaceWithArg(func, op, op.args[1]);
+                changed = true;
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+    for (const block of func.blocks) {
+      const newOps = [];
+      for (const op of block.ops) {
+        const toInsert = insertBefore.get(op);
+        if (toInsert) {
+          newOps.push(...toInsert);
+        }
+        newOps.push(op);
+      }
+      block.ops = newOps;
+    }
+    return changed;
+  }
+  function addInsert(map, before, newOp) {
+    const list = map.get(before);
+    if (list) list.push(newOp);
+    else map.set(before, [newOp]);
+  }
+  function isNonNegative(op) {
+    if (op.range && op.range.min >= 0) return true;
+    if (op.opcode === "Const" && typeof op.value === "number" && op.value >= 0) return true;
+    return false;
+  }
+  function replaceWithArg(func, op, targetId) {
+    const oldId = op.id;
+    for (const block of func.blocks) {
+      for (const phi of block.phis) {
+        for (let i = 0; i < phi.inputs.length; i++) {
+          if (phi.inputs[i][1] === oldId) {
+            phi.inputs[i][1] = targetId;
+          }
+        }
+      }
+      for (const other of block.ops) {
+        if (other === op) continue;
+        for (let i = 0; i < other.args.length; i++) {
+          if (other.args[i] === oldId) {
+            other.args[i] = targetId;
+          }
+        }
+      }
+    }
+  }
+
   // src/ir/optimize.ts
   function constantFolding(func) {
     let changed = false;
@@ -8166,7 +8663,7 @@ var jsmini = (() => {
         }
       }
     }
-    const controlOps = /* @__PURE__ */ new Set(["Return", "Branch", "Jump"]);
+    const controlOps = /* @__PURE__ */ new Set(["Return", "Branch", "Jump", "StoreGlobal", "ArraySet", "StoreUpvalue", "StoreProperty", "Call"]);
     for (const block of func.blocks) {
       const newOps = [];
       for (const op of block.ops) {
@@ -8191,83 +8688,12 @@ var jsmini = (() => {
         changed = inlinePass(func, inlineOptions) || changed;
       }
       changed = constantFolding(func) || changed;
+      changed = cse(func) || changed;
       changed = deadCodeElimination(func) || changed;
+      changed = licm(func) || changed;
+      changed = strengthReduce(func) || changed;
       if (!changed) break;
     }
-  }
-
-  // src/ir/loop-analysis.ts
-  function findBackEdges(irFunc) {
-    const backEdges = /* @__PURE__ */ new Set();
-    const visited = /* @__PURE__ */ new Set();
-    const inStack = /* @__PURE__ */ new Set();
-    const blockMap = /* @__PURE__ */ new Map();
-    for (const b of irFunc.blocks) blockMap.set(b.id, b);
-    function dfs(blockId) {
-      visited.add(blockId);
-      inStack.add(blockId);
-      const block = blockMap.get(blockId);
-      if (!block) return;
-      for (const succId of block.successors) {
-        if (inStack.has(succId)) {
-          backEdges.add(`${blockId}\u2192${succId}`);
-        } else if (!visited.has(succId)) {
-          dfs(succId);
-        }
-      }
-      inStack.delete(blockId);
-    }
-    if (irFunc.blocks.length > 0) {
-      dfs(irFunc.blocks[0].id);
-    }
-    return backEdges;
-  }
-  function topoSort(irFunc, _backEdges) {
-    return irFunc.blocks.filter((b) => b.ops.length > 0 || b.phis.length > 0).map((b) => b.id).sort((a, b) => a - b);
-  }
-  function findLoops(irFunc, backEdges) {
-    const loops = [];
-    const blockMap = /* @__PURE__ */ new Map();
-    for (const b of irFunc.blocks) blockMap.set(b.id, b);
-    for (const edge of backEdges) {
-      const [fromStr, toStr] = edge.split("\u2192");
-      const backFrom = parseInt(fromStr);
-      const header = parseInt(toStr);
-      const body = /* @__PURE__ */ new Set();
-      body.add(header);
-      body.add(backFrom);
-      const queue = [backFrom];
-      while (queue.length > 0) {
-        const bid = queue.shift();
-        const block = blockMap.get(bid);
-        if (!block) continue;
-        for (const predId of block.predecessors) {
-          if (!body.has(predId) && predId !== header) {
-            body.add(predId);
-            queue.push(predId);
-          }
-        }
-      }
-      const headerBlock = blockMap.get(header);
-      let exitBlock = -1;
-      if (headerBlock) {
-        for (const succId of headerBlock.successors) {
-          if (!body.has(succId)) {
-            exitBlock = succId;
-            break;
-          }
-        }
-      }
-      loops.push({ header, body, backEdgeFrom: backFrom, exitBlock });
-    }
-    return loops;
-  }
-  function analyzeCFG(irFunc) {
-    const backEdges = findBackEdges(irFunc);
-    const topoOrder = topoSort(irFunc, backEdges);
-    const loops = findLoops(irFunc, backEdges);
-    const loopHeaders = new Set(loops.map((l) => l.header));
-    return { loops, backEdges, topoOrder, loopHeaders };
   }
 
   // src/ir/range.ts
@@ -8465,8 +8891,30 @@ var jsmini = (() => {
       116: "i32.shl",
       117: "i32.shr_s"
     };
+    let upvalueCount = 0;
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if ((op.opcode === "LoadUpvalue" || op.opcode === "StoreUpvalue") && op.index !== void 0) {
+          upvalueCount = Math.max(upvalueCount, op.index + 1);
+        }
+      }
+    }
+    let hasThis = false;
+    const propOffsets = /* @__PURE__ */ new Map();
+    let propCounter = 0;
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "LoadThis") hasThis = true;
+        if ((op.opcode === "LoadProperty" || op.opcode === "StoreProperty") && op.globalName) {
+          if (!propOffsets.has(op.globalName)) {
+            propOffsets.set(op.globalName, propCounter++);
+          }
+        }
+      }
+    }
+    const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0);
     const opToLocal = /* @__PURE__ */ new Map();
-    let nextLocal = irFunc.paramCount;
+    let nextLocal = totalParamCount;
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if (op.opcode === "Param" && op.index !== void 0) {
@@ -8483,6 +8931,7 @@ var jsmini = (() => {
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if ((op.opcode === "LoadGlobal" || op.opcode === "StoreGlobal") && op.globalName) {
+          if (op.globalName === irFunc.name) continue;
           if (!globalToLocal.has(op.globalName)) {
             globalToLocal.set(op.globalName, nextLocal++);
           }
@@ -8547,6 +8996,15 @@ var jsmini = (() => {
     for (const blockId of cfg.topoOrder) {
       const block = blockMap.get(blockId);
       if (!block) continue;
+      if (controlStack.length > 0) {
+        const top2 = controlStack[controlStack.length - 1];
+        if (top2.kind === "block" && top2.targetBlockId === blockId && !cfg.loopHeaders.has(blockId)) {
+          watIndent--;
+          body.push(WASM_OP.end);
+          wat("end ;; block (if-else)");
+          controlStack.pop();
+        }
+      }
       const loopInfo = cfg.loops.find((l) => l.header === blockId);
       if (loopInfo) {
         wat(`;; B${blockId} (loop header)`);
@@ -8558,6 +9016,13 @@ var jsmini = (() => {
         wat("loop $loop_" + blockId);
         watIndent++;
         controlStack.push({ kind: "loop", targetBlockId: blockId });
+      } else if (block.ops.some((op) => op.opcode === "Branch") && !loopInfo) {
+        const falseTarget = block.successors[1];
+        body.push(WASM_OP.block, WASM_VOID);
+        controlStack.push({ kind: "block", targetBlockId: falseTarget });
+        wat(`;; B${blockId} (if-else)`);
+        wat(`block $else_${falseTarget}`);
+        watIndent++;
       } else if (block.ops.length > 0) {
         wat(`;; B${blockId}`);
       }
@@ -8573,8 +9038,13 @@ var jsmini = (() => {
             body.push(WASM_OP.br_if, exitDepth);
             wat(`br_if ${exitDepth} ;; \u2192 exit`);
           } else {
-            body.push(WASM_OP.br_if, 0);
-            wat("br_if 0");
+            body.push(WASM_OP.i32_eqz);
+            wat("i32.eqz");
+            const skipDepth = controlStack.length - 1 - controlStack.findLastIndex(
+              (e) => e.kind === "block"
+            );
+            body.push(WASM_OP.br_if, skipDepth);
+            wat(`br_if ${skipDepth} ;; \u2192 else (skip true branch)`);
           }
         } else if (op.opcode === "Jump") {
           const jumpTarget = block.successors[0];
@@ -8601,7 +9071,7 @@ var jsmini = (() => {
           wat("return");
         } else {
           const beforeLen = body.length;
-          emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], /* @__PURE__ */ new Set(), opById, globalToLocal, forceF64, arrayTypeIdx);
+          emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], /* @__PURE__ */ new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets);
           watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
         }
       }
@@ -8639,7 +9109,7 @@ var jsmini = (() => {
     const fullWat = [header, localDecls, ";; phi init", ...watLines, ")"].filter(Boolean).join("\n");
     return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount, wat: fullWat };
   }
-  function emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById, globalToLocal = /* @__PURE__ */ new Map(), forceF64 = false, arrayTypeIdx = -1) {
+  function emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById, globalToLocal = /* @__PURE__ */ new Map(), forceF64 = false, arrayTypeIdx = -1, upvalueCount = 0, propOffsets = /* @__PURE__ */ new Map()) {
     const effectiveType = forceF64 ? "f64" : op.type;
     switch (op.opcode) {
       case "Const": {
@@ -8664,6 +9134,7 @@ var jsmini = (() => {
         break;
       }
       case "LoadGlobal": {
+        if (op.globalName === irFunc.name) break;
         const gLocal = globalToLocal.get(op.globalName);
         if (gLocal !== void 0) {
           body.push(WASM_OP.local_get, gLocal);
@@ -8709,6 +9180,73 @@ var jsmini = (() => {
         }
         break;
       }
+      case "LoadUpvalue": {
+        const uvLocal = irFunc.paramCount + op.index;
+        body.push(WASM_OP.local_get, uvLocal);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "StoreUpvalue": {
+        const uvLocal = irFunc.paramCount + op.index;
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+        body.push(WASM_OP.local_set, uvLocal);
+        break;
+      }
+      case "LoadThis": {
+        const thisLocal = irFunc.paramCount + upvalueCount;
+        body.push(WASM_OP.local_get, thisLocal);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "LoadProperty": {
+        const offset = propOffsets.get(op.globalName);
+        if (offset !== void 0) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, false);
+          const byteOffset = offset * 4;
+          if (byteOffset > 0) {
+            body.push(WASM_OP.i32_const, ...i32ToLEB128(byteOffset));
+            body.push(WASM_OP.i32_add);
+          }
+          body.push(WASM_OP.i32_load, 2, 0);
+          if (forceF64) {
+            body.push(WASM_OP.f64_convert_i32_s);
+          }
+        }
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "StoreProperty": {
+        const offset = propOffsets.get(op.globalName);
+        if (offset !== void 0) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, false);
+          const byteOffset = offset * 4;
+          if (byteOffset > 0) {
+            body.push(WASM_OP.i32_const, ...i32ToLEB128(byteOffset));
+            body.push(WASM_OP.i32_add);
+          }
+          emitLoadValue(op.args[1], body, opToLocal, opById, false);
+          body.push(WASM_OP.i32_store, 2, 0);
+        }
+        break;
+      }
+      case "Call": {
+        for (let i = 1; i < op.args.length; i++) {
+          emitLoadValue(op.args[i], body, opToLocal, opById, forceF64);
+        }
+        body.push(WASM_OP.call, 0);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "Alloc": {
+        const objectSize = propOffsets.size * 4 || 32;
+        body.push(WASM_OP.global_get, 0);
+        body.push(WASM_OP.global_get, 0);
+        body.push(WASM_OP.i32_const, ...i32ToLEB128(objectSize));
+        body.push(WASM_OP.i32_add);
+        body.push(WASM_OP.global_set, 0);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
       case "TypeGuard": {
         emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
@@ -8725,9 +9263,25 @@ var jsmini = (() => {
       case "BitXor":
       case "ShiftLeft":
       case "ShiftRight": {
-        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
-        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
-        body.push(getWasmBinOp(op.opcode, effectiveType));
+        if (forceF64 && (op.opcode === "ShiftLeft" || op.opcode === "ShiftRight")) {
+          const shiftArg = opById?.get(op.args[1]);
+          const shiftAmount = shiftArg?.opcode === "Const" && typeof shiftArg.value === "number" ? shiftArg.value : 1;
+          const multiplier = 2 ** shiftAmount;
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          body.push(WASM_OP.f64_const, ...f64ToBytes(multiplier));
+          body.push(op.opcode === "ShiftLeft" ? WASM_OP.f64_mul : WASM_OP.f64_div);
+        } else if (forceF64 && (op.opcode === "BitAnd" || op.opcode === "BitOr" || op.opcode === "BitXor" || op.opcode === "Mod")) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          body.push(WASM_OP.i32_trunc_f64_s);
+          emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+          body.push(WASM_OP.i32_trunc_f64_s);
+          body.push(getWasmBinOp(op.opcode, "i32"));
+          body.push(WASM_OP.f64_convert_i32_s);
+        } else {
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+          body.push(getWasmBinOp(op.opcode, effectiveType));
+        }
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
@@ -8948,9 +9502,16 @@ var jsmini = (() => {
   function compileIRToWasm(irFunc) {
     try {
       let hasArrayOps = false;
+      let hasSelfRecursion = false;
       for (const block of irFunc.blocks) {
         for (const op of block.ops) {
-          if (op.opcode === "Call") return null;
+          if (op.opcode === "Call") {
+            if (op.calleeName === irFunc.name && !hasArrayOps) {
+              hasSelfRecursion = true;
+            } else {
+              return null;
+            }
+          }
           if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") {
             hasArrayOps = true;
           }
@@ -8980,6 +9541,34 @@ var jsmini = (() => {
           }
         }
       }
+      let upvalueCount = 0;
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if ((op.opcode === "LoadUpvalue" || op.opcode === "StoreUpvalue") && op.index !== void 0) {
+            upvalueCount = Math.max(upvalueCount, op.index + 1);
+          }
+        }
+      }
+      let hasThis = false;
+      let hasPropertyOps = false;
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if (op.opcode === "LoadThis") hasThis = true;
+          if (op.opcode === "LoadProperty" || op.opcode === "StoreProperty") hasPropertyOps = true;
+        }
+      }
+      let hasAlloc = false;
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if (op.opcode === "Alloc") hasAlloc = true;
+        }
+      }
+      if (hasPropertyOps || hasAlloc) {
+        builder.enableMemory(1);
+      }
+      if (hasAlloc) {
+        builder.addGlobal(WASM_TYPE.i32, true, 0);
+      }
       const params = [];
       for (let i = 0; i < irFunc.paramCount; i++) {
         if (arrayParams.has(i)) {
@@ -8988,8 +9577,15 @@ var jsmini = (() => {
           params.push(wasmType);
         }
       }
+      for (let i = 0; i < upvalueCount; i++) {
+        params.push(wasmType);
+      }
+      if (hasThis) {
+        params.push(WASM_TYPE.i32);
+      }
       const results = [wasmType];
       const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx);
+      const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0);
       const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
       const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: localType }] : void 0;
       builder.addFunction(
@@ -8998,7 +9594,7 @@ var jsmini = (() => {
         results,
         bodyCode,
         extraLocals > 0 ? extraLocals : 0,
-        irFunc.paramCount,
+        totalParamCount,
         1,
         extraLocalGroups
       );
@@ -9042,11 +9638,15 @@ var jsmini = (() => {
       const wasmBytes = builder.build();
       const module = new WebAssembly.Module(wasmBytes);
       const instance = new WebAssembly.Instance(module);
+      const memory = hasPropertyOps ? instance.exports.memory : void 0;
       return {
         instance,
         funcName: irFunc.name,
         hasArrayOps,
-        arrayParams: [...arrayParams]
+        arrayParams: [...arrayParams],
+        upvalueCount: upvalueCount > 0 ? upvalueCount : void 0,
+        hasThis: hasThis || void 0,
+        memory
       };
     } catch (e) {
       return null;
@@ -9158,7 +9758,7 @@ var jsmini = (() => {
         const createArray = result.hasArrayOps ? result.instance.exports.__create_array ?? null : null;
         const getArray = result.hasArrayOps ? result.instance.exports.__get_array ?? null : null;
         const setArray = result.hasArrayOps ? result.instance.exports.__set_array ?? null : null;
-        return { fn: wasmFn, memory: null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
+        return { fn: wasmFn, memory: result.memory ?? null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
       } catch {
         return null;
       }
@@ -9187,13 +9787,13 @@ var jsmini = (() => {
       if (!result) return null;
       const wasmFn = result.get(func.name);
       if (!wasmFn) return null;
-      const memory2 = result.__memory;
+      const memory = result.__memory;
       const createArray = result.__create_array;
       const getArray = result.__get_array;
       const setArray = result.__set_array;
       const cached = {
         fn: wasmFn,
-        memory: memory2 ?? null,
+        memory: memory ?? null,
         arrayArgIndices,
         stringArgIndices: [],
         spec,
@@ -9207,7 +9807,7 @@ var jsmini = (() => {
           if (relFn) {
             this.wasmCache.set(f, {
               fn: relFn,
-              memory: memory2 ?? null,
+              memory: memory ?? null,
               arrayArgIndices: [],
               stringArgIndices: [],
               spec,
@@ -9242,7 +9842,7 @@ var jsmini = (() => {
       return result;
     }
     executeWasm(func, cached, args, callCount, upvalueValues = [], thisObj) {
-      const { fn, arrayArgIndices } = cached;
+      const { fn, arrayArgIndices, memory } = cached;
       if (arrayArgIndices.length > 0 && cached.createArray) {
         return this.executeWithArrayArgs(func, cached, args, arrayArgIndices, callCount);
       }
@@ -9297,10 +9897,15 @@ var jsmini = (() => {
           return null;
         }
         const slots = getSlots(thisObj);
+        const hc = getHiddenClass(thisObj);
         const view = new Int32Array(memory.buffer);
         const base2 = 0;
-        for (let i = 0; i < slots.length; i++) {
-          view[i] = slots[i];
+        let dst = 0;
+        for (const [name2, slotIdx] of hc.properties) {
+          if (name2 === "__proto__") continue;
+          const v = slots[slotIdx];
+          view[dst] = typeof v === "number" ? v : 0;
+          dst++;
         }
         wasmArgs.push(base2);
       }
@@ -9892,6 +10497,18 @@ var jsmini = (() => {
         return `${indent}v${op.id}: ${typeStr} = LoadGlobal("${op.globalName}")`;
       case "StoreGlobal":
         return `${indent}StoreGlobal("${op.globalName}", v${op.args[0]})`;
+      case "LoadUpvalue":
+        return `${indent}v${op.id}: ${typeStr} = LoadUpvalue(${op.index})`;
+      case "StoreUpvalue":
+        return `${indent}StoreUpvalue(${op.index}, v${op.args[0]})`;
+      case "LoadThis":
+        return `${indent}v${op.id}: ${typeStr} = LoadThis`;
+      case "LoadProperty":
+        return `${indent}v${op.id}: ${typeStr} = LoadProperty(v${op.args[0]}, "${op.globalName}")`;
+      case "StoreProperty":
+        return `${indent}StoreProperty(v${op.args[0]}, "${op.globalName}", v${op.args[1]})`;
+      case "Alloc":
+        return `${indent}v${op.id}: ${typeStr} = Alloc`;
       case "TypeGuard":
         return `${indent}v${op.id}: ${typeStr} = TypeGuard(v${op.args[0]}, ${op.guardType})`;
       case "Branch":
@@ -10862,7 +11479,7 @@ var jsmini = (() => {
           let ins = iter.ins == -1 ? -1 : iter.off == 0 ? iter.ins : 0;
           addSection(resultSections, len, ins);
           if (ins > 0)
-            addInsert(resultInserted, resultSections, iter.text);
+            addInsert2(resultInserted, resultSections, iter.text);
           iter.forward(len);
           pos += len;
         }
@@ -10938,7 +11555,7 @@ var jsmini = (() => {
           if (from > pos)
             addSection(sections, from - pos, -1);
           addSection(sections, to - from, insLen);
-          addInsert(inserted, sections, insText);
+          addInsert2(inserted, sections, insText);
           pos = to;
         }
       }
@@ -10998,7 +11615,7 @@ var jsmini = (() => {
     } else
       sections.push(len, ins);
   }
-  function addInsert(values, sections, value) {
+  function addInsert2(values, sections, value) {
     if (value.length == 0)
       return;
     let index = sections.length - 2 >> 1;
@@ -11054,7 +11671,7 @@ var jsmini = (() => {
           if (a.ins >= 0 && inserted < a.i && a.len <= piece) {
             addSection(sections, 0, a.ins);
             if (insert2)
-              addInsert(insert2, sections, a.text);
+              addInsert2(insert2, sections, a.text);
             inserted = a.i;
           }
           a.forward(piece);
@@ -11078,7 +11695,7 @@ var jsmini = (() => {
         }
         addSection(sections, len, inserted < a.i ? a.ins : 0);
         if (insert2 && inserted < a.i)
-          addInsert(insert2, sections, a.text);
+          addInsert2(insert2, sections, a.text);
         inserted = a.i;
         a.forward(a.len - left);
       } else if (a.done && b.done) {
@@ -11101,7 +11718,7 @@ var jsmini = (() => {
       } else if (b.len == 0 && !b.done) {
         addSection(sections, 0, b.ins, open);
         if (insert2)
-          addInsert(insert2, sections, b.text);
+          addInsert2(insert2, sections, b.text);
         b.next();
       } else if (a.done || b.done) {
         throw new Error("Mismatched change set lengths");
@@ -11111,15 +11728,15 @@ var jsmini = (() => {
           let insB = b.ins == -1 ? -1 : b.off ? 0 : b.ins;
           addSection(sections, len, insB, open);
           if (insert2 && insB)
-            addInsert(insert2, sections, b.text);
+            addInsert2(insert2, sections, b.text);
         } else if (b.ins == -1) {
           addSection(sections, a.off ? 0 : a.len, len, open);
           if (insert2)
-            addInsert(insert2, sections, a.textBit(len));
+            addInsert2(insert2, sections, a.textBit(len));
         } else {
           addSection(sections, a.off ? 0 : a.len, b.off ? 0 : b.ins, open);
           if (insert2 && !b.off)
-            addInsert(insert2, sections, b.text);
+            addInsert2(insert2, sections, b.text);
         }
         open = (a.ins > len || b.ins >= 0 && b.len > len) && (open || sections.length > sectionLen);
         a.forward2(len);
