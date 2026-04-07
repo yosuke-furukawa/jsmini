@@ -4,7 +4,7 @@ import { compileToWasmSync, compileMultiSync } from "./wasm-compiler.js";
 import type { WasmNumericType } from "./feedback.js";
 import { getElementKind, isTrackedArray } from "../vm/js-array.js";
 import { isJSString, getInternId, getStringById } from "../vm/js-string.js";
-import { isJSObject, getSlots } from "../vm/js-object.js";
+import { isJSObject, getSlots, getHiddenClass } from "../vm/js-object.js";
 import { buildIR } from "../ir/builder.js";
 import { optimize, type InlineOptions } from "../ir/optimize.js";
 import { compileIRToWasm } from "../ir/codegen.js";
@@ -323,11 +323,17 @@ export class JitManager {
         return null;
       }
       const slots = getSlots(thisObj);
+      const hc = getHiddenClass(thisObj as any);
       const view = new Int32Array(memory.buffer);
-      // slots をメモリの先頭にコピー
+      // hidden class の properties から、数値プロパティだけを 0-based で詰めてコピー
+      // IR codegen の propOffsets は出現順で 0, 1, 2... と振るので同じ順序にする
       const base = 0;
-      for (let i = 0; i < slots.length; i++) {
-        view[i] = slots[i] as number;
+      let dst = 0;
+      for (const [name, slotIdx] of hc.properties) {
+        if (name === "__proto__") continue;
+        const v = slots[slotIdx];
+        view[dst] = typeof v === "number" ? v : 0;
+        dst++;
       }
       wasmArgs.push(base);
     }

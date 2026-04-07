@@ -248,7 +248,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         wat("return");
       } else {
         const beforeLen = body.length;
-        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx);
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets);
         // emitOp が出力した命令を WAT に変換
         watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
       }
@@ -313,6 +313,8 @@ function emitOp(
   globalToLocal: Map<string, number> = new Map(),
   forceF64 = false,
   arrayTypeIdx = -1,
+  upvalueCount = 0,
+  propOffsets: Map<string, number> = new Map(),
 ): void {
   // forceF64 なら全演算を f64 として扱う
   const effectiveType = forceF64 ? "f64" : op.type;
