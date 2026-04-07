@@ -8663,7 +8663,7 @@ var jsmini = (() => {
         }
       }
     }
-    const controlOps = /* @__PURE__ */ new Set(["Return", "Branch", "Jump", "StoreGlobal", "ArraySet", "StoreUpvalue", "StoreProperty"]);
+    const controlOps = /* @__PURE__ */ new Set(["Return", "Branch", "Jump", "StoreGlobal", "ArraySet", "StoreUpvalue", "StoreProperty", "Call"]);
     for (const block of func.blocks) {
       const newOps = [];
       for (const op of block.ops) {
@@ -9506,7 +9506,7 @@ var jsmini = (() => {
       for (const block of irFunc.blocks) {
         for (const op of block.ops) {
           if (op.opcode === "Call") {
-            if (op.calleeName === irFunc.name) {
+            if (op.calleeName === irFunc.name && !hasArrayOps) {
               hasSelfRecursion = true;
             } else {
               return null;
