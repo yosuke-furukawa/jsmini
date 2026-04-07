@@ -45,10 +45,21 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     0x74: "i32.shl", 0x75: "i32.shr_s",
   };
 
+  // upvalue の数を検出 (追加パラメータとして渡される)
+  let upvalueCount = 0;
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      if ((op.opcode === "LoadUpvalue" || op.opcode === "StoreUpvalue") && op.index !== undefined) {
+        upvalueCount = Math.max(upvalueCount, op.index + 1);
+      }
+    }
+  }
+  const totalParamCount = irFunc.paramCount + upvalueCount;
+
   // Op ID → Wasm local index のマッピング
-  // Wasm locals: [params..., phi locals..., temp locals...]
+  // Wasm locals: [params..., upvalue params..., phi locals..., temp locals...]
   const opToLocal = new Map<number, number>();
-  let nextLocal = irFunc.paramCount;
+  let nextLocal = totalParamCount;
 
   // パラメータ → local 0, 1, ...
   for (const block of irFunc.blocks) {
@@ -368,6 +379,20 @@ function emitOp(
       }
       break;
     }
+
+    case "LoadUpvalue": {
+      // upvalue は追加パラメータ: local index = irFunc.paramCount + upvalue index
+      const uvLocal = irFunc.paramCount + op.index!;
+      body.push(WASM_OP.local_get, uvLocal);
+      maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      break;
+    }
+    case "StoreUpvalue": {
+      const uvLocal = irFunc.paramCount + op.index!;
+      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+      body.push(WASM_OP.local_set, uvLocal);
+      break;
+    }
     case "TypeGuard": {
       // 型ガード: 現在は型が合ってる前提で passthrough
       // 将来: 型チェック → 失敗で deopt (unreachable or special return)
@@ -664,7 +689,7 @@ function getReturnType(irFunc: IRFunction): IRType {
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
-export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[] } | null {
+export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number } | null {
   try {
     // IR に Wasm 化できない Op が含まれてたらスキップ
     let hasArrayOps = false;
@@ -712,7 +737,17 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
       }
     }
 
-    // パラメータ: 配列は ref $array、他は i32/f64
+    // upvalue の数を検出
+    let upvalueCount = 0;
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if ((op.opcode === "LoadUpvalue" || op.opcode === "StoreUpvalue") && op.index !== undefined) {
+          upvalueCount = Math.max(upvalueCount, op.index + 1);
+        }
+      }
+    }
+
+    // パラメータ: 配列は ref $array、他は i32/f64、upvalue も追加
     const params: number[] = [];
     for (let i = 0; i < irFunc.paramCount; i++) {
       if (arrayParams.has(i)) {
@@ -720,6 +755,10 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
       } else {
         params.push(wasmType);
       }
+    }
+    // upvalue 追加パラメータ
+    for (let i = 0; i < upvalueCount; i++) {
+      params.push(wasmType);
     }
     const results = [wasmType];
 
@@ -729,7 +768,7 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
     const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: localType }] : undefined;
     builder.addFunction(irFunc.name, params, results, bodyCode,
       extraLocals > 0 ? extraLocals : 0,
-      irFunc.paramCount, 1, extraLocalGroups);
+      irFunc.paramCount + upvalueCount, 1, extraLocalGroups);
     // WasmGC 配列ヘルパー関数
     if (hasArrayOps && arrayTypeIdx >= 0) {
       // __create_array(len) → ref $array
@@ -773,6 +812,7 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
       funcName: irFunc.name,
       hasArrayOps,
       arrayParams: [...arrayParams],
+      upvalueCount: upvalueCount > 0 ? upvalueCount : undefined,
     };
   } catch (e: any) {
     // Wasm コンパイルエラー → null (フォールバック)

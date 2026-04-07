@@ -327,6 +327,21 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           block.ops.push(op);
           break;
         }
+        case "LdaUpvalue": {
+          const uvIndex = instr.operand!;
+          const op = registerOp(createOp(irFunc, "LoadUpvalue", [], "any"));
+          op.index = uvIndex;
+          block.ops.push(op); stack.push(op.id);
+          break;
+        }
+        case "StaUpvalue": {
+          const uvIndex = instr.operand!;
+          const val = stack[stack.length - 1]; // peek
+          const op = registerOp(createOp(irFunc, "StoreUpvalue", [val], "any"));
+          op.index = uvIndex;
+          block.ops.push(op);
+          break;
+        }
         case "Call": {
           const argc = instr.operand!;
           const calleeId = stack.pop()!;

@@ -77,11 +77,23 @@ x + 0   → x
 - [x] 21-4d: 全 658 テストパス
 - [x] 21-4e: Playground プリセット「IR Optimizations (LICM/CSE/SR)」追加
 
+### 21-5: クロージャ IR 対応
+
+Direct JIT では upvalue を追加パラメータとして Wasm 関数に渡す仕組みがあるが、
+IR パスでは `LdaUpvalue` / `StaUpvalue` を扱えず VM フォールバックしていた。
+
+- [ ] 21-5a: IR opcode `LoadUpvalue` / `StoreUpvalue` を追加
+- [ ] 21-5b: Builder: `LdaUpvalue` → `LoadUpvalue`、`StaUpvalue` → `StoreUpvalue` 変換
+- [ ] 21-5c: Codegen: upvalue を追加パラメータとして Wasm 関数に渡す (Direct JIT と同方式)
+- [ ] 21-5d: JitManager: IR パスで upvalueValues を追加引数として渡す
+- [ ] 21-5e: テスト (makeAdder, counter, captured loop var)
+
 ## 目標
 
 - ループ内の冗長な計算を除去 (LICM)
 - 重複計算を共有 (CSE)
 - 高コスト演算を低コストに置換 (Strength Reduction)
+- クロージャが IR パスで動く (upvalue 対応)
 - IR の printIR / Playground で最適化の before/after が見える
 
 ## 技術メモ

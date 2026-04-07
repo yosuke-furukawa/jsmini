@@ -56,6 +56,10 @@ export type IROpcode =
   | "LoadGlobal"      // グローバル変数の読み込み。globalName フィールドに変数名
   | "StoreGlobal"     // グローバル変数の書き込み。args[0] = 値、globalName に変数名
 
+  // Upvalue (クロージャ)
+  | "LoadUpvalue"     // upvalue の読み込み。index フィールドに upvalue 番号
+  | "StoreUpvalue"    // upvalue の書き込み。args[0] = 値、index に upvalue 番号
+
   // 関数呼び出し
   | "Call"            // args[0] = callee, args[1..] = 引数
 
