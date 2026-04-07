@@ -1641,6 +1641,105 @@ var jsmini = (() => {
     return parseProgram();
   }
 
+  // src/vm/js-string.ts
+  var CONS_MIN_LENGTH = 13;
+  var JS_STRING_BRAND = /* @__PURE__ */ Symbol("JSString");
+  function createSeqString(str) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(str);
+    const s = {
+      kind: "seq",
+      data,
+      length: data.length,
+      [JS_STRING_BRAND]: true
+    };
+    return s;
+  }
+  var EMPTY_STRING = createSeqString("");
+  function isJSString(value) {
+    return typeof value === "object" && value !== null && JS_STRING_BRAND in value;
+  }
+  function jsStringConcat(a, b) {
+    if (a.length === 0) return b;
+    if (b.length === 0) return a;
+    const totalLength = a.length + b.length;
+    if (totalLength < CONS_MIN_LENGTH) {
+      const flat = flatten(a);
+      const flatB = flatten(b);
+      const data = new Uint8Array(totalLength);
+      data.set(flat.data, 0);
+      data.set(flatB.data, flat.length);
+      const s2 = { kind: "seq", data, length: totalLength, [JS_STRING_BRAND]: true };
+      return s2;
+    }
+    const s = { kind: "cons", left: a, right: b, length: totalLength, [JS_STRING_BRAND]: true };
+    return s;
+  }
+  function flatten(str) {
+    if (str.kind === "seq") return str;
+    const buf = new Uint8Array(str.length);
+    flattenInto(str, buf, 0);
+    const flat = {
+      kind: "seq",
+      data: buf,
+      length: str.length,
+      [JS_STRING_BRAND]: true
+    };
+    str.kind = "seq";
+    str.data = buf;
+    str.left = null;
+    str.right = null;
+    str.parent = null;
+    return flat;
+  }
+  function flattenInto(str, buf, offset) {
+    switch (str.kind) {
+      case "seq":
+        buf.set(str.data, offset);
+        break;
+      case "cons":
+        flattenInto(str.left, buf, offset);
+        flattenInto(str.right, buf, offset + str.left.length);
+        break;
+      case "sliced": {
+        const flat = flatten(str.parent);
+        buf.set(flat.data.subarray(str.offset, str.offset + str.length), offset);
+        break;
+      }
+    }
+  }
+  function jsStringToString(str) {
+    const flat = flatten(str);
+    const decoder = new TextDecoder();
+    return decoder.decode(flat.data);
+  }
+  function jsStringEquals(a, b) {
+    if (a === b) return true;
+    if (a.length !== b.length) return false;
+    const flatA = flatten(a);
+    const flatB = flatten(b);
+    for (let i = 0; i < flatA.length; i++) {
+      if (flatA.data[i] !== flatB.data[i]) return false;
+    }
+    return true;
+  }
+  function getInternId(str) {
+    return internIndex.get(str) ?? -1;
+  }
+  var internTable = /* @__PURE__ */ new Map();
+  var internIndex = /* @__PURE__ */ new Map();
+  var internById = [];
+  function internString(str) {
+    const existing = internTable.get(str);
+    if (existing) return existing;
+    const jsStr = createSeqString(str);
+    internTable.set(str, jsStr);
+    const id2 = internById.length;
+    internIndex.set(jsStr, id2);
+    internById.push(jsStr);
+    return jsStr;
+  }
+
   // src/interpreter/environment.ts
   var TDZ_SENTINEL = /* @__PURE__ */ Symbol("TDZ");
   var Environment = class {
@@ -1718,6 +1817,10 @@ var jsmini = (() => {
           if (env.readOnly.has(key)) continue;
           if (typeof val === "object" && val !== null && "params" in val && "body" in val) {
             variables[key] = "[Function]";
+          } else if (isJSString(val)) {
+            variables[key] = jsStringToString(val);
+          } else if (Array.isArray(val)) {
+            variables[key] = val.map((v) => isJSString(v) ? jsStringToString(v) : v);
           } else {
             variables[key] = val;
           }
@@ -1916,105 +2019,6 @@ var jsmini = (() => {
         assignPattern(el, arr?.[i], env);
       }
     }
-  }
-
-  // src/vm/js-string.ts
-  var CONS_MIN_LENGTH = 13;
-  var JS_STRING_BRAND = /* @__PURE__ */ Symbol("JSString");
-  function createSeqString(str) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(str);
-    const s = {
-      kind: "seq",
-      data,
-      length: data.length,
-      [JS_STRING_BRAND]: true
-    };
-    return s;
-  }
-  var EMPTY_STRING = createSeqString("");
-  function isJSString(value) {
-    return typeof value === "object" && value !== null && JS_STRING_BRAND in value;
-  }
-  function jsStringConcat(a, b) {
-    if (a.length === 0) return b;
-    if (b.length === 0) return a;
-    const totalLength = a.length + b.length;
-    if (totalLength < CONS_MIN_LENGTH) {
-      const flat = flatten(a);
-      const flatB = flatten(b);
-      const data = new Uint8Array(totalLength);
-      data.set(flat.data, 0);
-      data.set(flatB.data, flat.length);
-      const s2 = { kind: "seq", data, length: totalLength, [JS_STRING_BRAND]: true };
-      return s2;
-    }
-    const s = { kind: "cons", left: a, right: b, length: totalLength, [JS_STRING_BRAND]: true };
-    return s;
-  }
-  function flatten(str) {
-    if (str.kind === "seq") return str;
-    const buf = new Uint8Array(str.length);
-    flattenInto(str, buf, 0);
-    const flat = {
-      kind: "seq",
-      data: buf,
-      length: str.length,
-      [JS_STRING_BRAND]: true
-    };
-    str.kind = "seq";
-    str.data = buf;
-    str.left = null;
-    str.right = null;
-    str.parent = null;
-    return flat;
-  }
-  function flattenInto(str, buf, offset) {
-    switch (str.kind) {
-      case "seq":
-        buf.set(str.data, offset);
-        break;
-      case "cons":
-        flattenInto(str.left, buf, offset);
-        flattenInto(str.right, buf, offset + str.left.length);
-        break;
-      case "sliced": {
-        const flat = flatten(str.parent);
-        buf.set(flat.data.subarray(str.offset, str.offset + str.length), offset);
-        break;
-      }
-    }
-  }
-  function jsStringToString(str) {
-    const flat = flatten(str);
-    const decoder = new TextDecoder();
-    return decoder.decode(flat.data);
-  }
-  function jsStringEquals(a, b) {
-    if (a === b) return true;
-    if (a.length !== b.length) return false;
-    const flatA = flatten(a);
-    const flatB = flatten(b);
-    for (let i = 0; i < flatA.length; i++) {
-      if (flatA.data[i] !== flatB.data[i]) return false;
-    }
-    return true;
-  }
-  function getInternId(str) {
-    return internIndex.get(str) ?? -1;
-  }
-  var internTable = /* @__PURE__ */ new Map();
-  var internIndex = /* @__PURE__ */ new Map();
-  var internById = [];
-  function internString(str) {
-    const existing = internTable.get(str);
-    if (existing) return existing;
-    const jsStr = createSeqString(str);
-    internTable.set(str, jsStr);
-    const id2 = internById.length;
-    internIndex.set(jsStr, id2);
-    internById.push(jsStr);
-    return jsStr;
   }
 
   // src/vm/js-symbol.ts
@@ -7863,6 +7867,22 @@ var jsmini = (() => {
             block.ops.push(op);
             break;
           }
+          case "LdaUpvalue": {
+            const uvIndex = instr.operand;
+            const op = registerOp(createOp(irFunc, "LoadUpvalue", [], "any"));
+            op.index = uvIndex;
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "StaUpvalue": {
+            const uvIndex = instr.operand;
+            const val = stack[stack.length - 1];
+            const op = registerOp(createOp(irFunc, "StoreUpvalue", [val], "any"));
+            op.index = uvIndex;
+            block.ops.push(op);
+            break;
+          }
           case "Call": {
             const argc = instr.operand;
             const calleeId = stack.pop();
@@ -7871,6 +7891,7 @@ var jsmini = (() => {
             const calleeOp = opById.get(calleeId);
             const op = registerOp(createOp(irFunc, "Call", [calleeId, ...args], "any"));
             if (calleeOp?.calleeName) op.calleeName = calleeOp.calleeName;
+            else if (calleeOp?.globalName) op.calleeName = calleeOp.globalName;
             block.ops.push(op);
             stack.push(op.id);
             break;
@@ -7892,7 +7913,7 @@ var jsmini = (() => {
             block.ops.push(op);
             break;
           }
-          // arr.length
+          // プロパティアクセス
           case "GetProperty": {
             const obj = stack.pop();
             const name2 = constants[instr.operand];
@@ -7901,11 +7922,55 @@ var jsmini = (() => {
               block.ops.push(op);
               stack.push(op.id);
             } else {
-              const op = registerOp(createOp(irFunc, "Const", [], "any"));
-              op.value = void 0;
+              const op = registerOp(createOp(irFunc, "LoadProperty", [obj], "i32"));
+              op.globalName = name2;
               block.ops.push(op);
               stack.push(op.id);
             }
+            break;
+          }
+          case "SetPropertyAssign": {
+            const obj = stack.pop();
+            const value = stack.pop();
+            const name2 = constants[instr.operand];
+            const op = registerOp(createOp(irFunc, "StoreProperty", [obj, value], "any"));
+            op.globalName = name2;
+            block.ops.push(op);
+            stack.push(value);
+            break;
+          }
+          case "CallMethod": {
+            const argc = instr.operand;
+            const methodRef = stack.pop();
+            const thisObj = stack.pop();
+            const args = [];
+            for (let j = 0; j < argc; j++) args.unshift(stack.pop());
+            const methodOp = opById.get(methodRef);
+            const methodName = methodOp?.globalName;
+            const op = registerOp(createOp(irFunc, "Call", [methodRef, ...args, thisObj], "any"));
+            if (methodName) op.calleeName = methodName;
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "Construct": {
+            const argc = instr.operand;
+            const ctorRef = stack.pop();
+            const args = [];
+            for (let j = 0; j < argc; j++) args.unshift(stack.pop());
+            const alloc = registerOp(createOp(irFunc, "Alloc", [], "i32"));
+            block.ops.push(alloc);
+            const ctorOp = opById.get(ctorRef);
+            const call = registerOp(createOp(irFunc, "Call", [ctorRef, ...args, alloc.id], "any"));
+            if (ctorOp?.calleeName) call.calleeName = ctorOp.calleeName;
+            block.ops.push(call);
+            stack.push(alloc.id);
+            break;
+          }
+          case "LoadThis": {
+            const op = registerOp(createOp(irFunc, "LoadThis", [], "i32"));
+            block.ops.push(op);
+            stack.push(op.id);
             break;
           }
           default:
@@ -8598,7 +8663,7 @@ var jsmini = (() => {
         }
       }
     }
-    const controlOps = /* @__PURE__ */ new Set(["Return", "Branch", "Jump"]);
+    const controlOps = /* @__PURE__ */ new Set(["Return", "Branch", "Jump", "StoreGlobal", "ArraySet", "StoreUpvalue", "StoreProperty"]);
     for (const block of func.blocks) {
       const newOps = [];
       for (const op of block.ops) {
@@ -8826,8 +8891,30 @@ var jsmini = (() => {
       116: "i32.shl",
       117: "i32.shr_s"
     };
+    let upvalueCount = 0;
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if ((op.opcode === "LoadUpvalue" || op.opcode === "StoreUpvalue") && op.index !== void 0) {
+          upvalueCount = Math.max(upvalueCount, op.index + 1);
+        }
+      }
+    }
+    let hasThis = false;
+    const propOffsets = /* @__PURE__ */ new Map();
+    let propCounter = 0;
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "LoadThis") hasThis = true;
+        if ((op.opcode === "LoadProperty" || op.opcode === "StoreProperty") && op.globalName) {
+          if (!propOffsets.has(op.globalName)) {
+            propOffsets.set(op.globalName, propCounter++);
+          }
+        }
+      }
+    }
+    const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0);
     const opToLocal = /* @__PURE__ */ new Map();
-    let nextLocal = irFunc.paramCount;
+    let nextLocal = totalParamCount;
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if (op.opcode === "Param" && op.index !== void 0) {
@@ -8844,6 +8931,7 @@ var jsmini = (() => {
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if ((op.opcode === "LoadGlobal" || op.opcode === "StoreGlobal") && op.globalName) {
+          if (op.globalName === irFunc.name) continue;
           if (!globalToLocal.has(op.globalName)) {
             globalToLocal.set(op.globalName, nextLocal++);
           }
@@ -8908,6 +8996,15 @@ var jsmini = (() => {
     for (const blockId of cfg.topoOrder) {
       const block = blockMap.get(blockId);
       if (!block) continue;
+      if (controlStack.length > 0) {
+        const top2 = controlStack[controlStack.length - 1];
+        if (top2.kind === "block" && top2.targetBlockId === blockId && !cfg.loopHeaders.has(blockId)) {
+          watIndent--;
+          body.push(WASM_OP.end);
+          wat("end ;; block (if-else)");
+          controlStack.pop();
+        }
+      }
       const loopInfo = cfg.loops.find((l) => l.header === blockId);
       if (loopInfo) {
         wat(`;; B${blockId} (loop header)`);
@@ -8919,6 +9016,13 @@ var jsmini = (() => {
         wat("loop $loop_" + blockId);
         watIndent++;
         controlStack.push({ kind: "loop", targetBlockId: blockId });
+      } else if (block.ops.some((op) => op.opcode === "Branch") && !loopInfo) {
+        const falseTarget = block.successors[1];
+        body.push(WASM_OP.block, WASM_VOID);
+        controlStack.push({ kind: "block", targetBlockId: falseTarget });
+        wat(`;; B${blockId} (if-else)`);
+        wat(`block $else_${falseTarget}`);
+        watIndent++;
       } else if (block.ops.length > 0) {
         wat(`;; B${blockId}`);
       }
@@ -8934,8 +9038,13 @@ var jsmini = (() => {
             body.push(WASM_OP.br_if, exitDepth);
             wat(`br_if ${exitDepth} ;; \u2192 exit`);
           } else {
-            body.push(WASM_OP.br_if, 0);
-            wat("br_if 0");
+            body.push(WASM_OP.i32_eqz);
+            wat("i32.eqz");
+            const skipDepth = controlStack.length - 1 - controlStack.findLastIndex(
+              (e) => e.kind === "block"
+            );
+            body.push(WASM_OP.br_if, skipDepth);
+            wat(`br_if ${skipDepth} ;; \u2192 else (skip true branch)`);
           }
         } else if (op.opcode === "Jump") {
           const jumpTarget = block.successors[0];
@@ -8962,7 +9071,7 @@ var jsmini = (() => {
           wat("return");
         } else {
           const beforeLen = body.length;
-          emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], /* @__PURE__ */ new Set(), opById, globalToLocal, forceF64, arrayTypeIdx);
+          emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], /* @__PURE__ */ new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets);
           watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
         }
       }
@@ -9000,7 +9109,7 @@ var jsmini = (() => {
     const fullWat = [header, localDecls, ";; phi init", ...watLines, ")"].filter(Boolean).join("\n");
     return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount, wat: fullWat };
   }
-  function emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById, globalToLocal = /* @__PURE__ */ new Map(), forceF64 = false, arrayTypeIdx = -1) {
+  function emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById, globalToLocal = /* @__PURE__ */ new Map(), forceF64 = false, arrayTypeIdx = -1, upvalueCount = 0, propOffsets = /* @__PURE__ */ new Map()) {
     const effectiveType = forceF64 ? "f64" : op.type;
     switch (op.opcode) {
       case "Const": {
@@ -9025,6 +9134,7 @@ var jsmini = (() => {
         break;
       }
       case "LoadGlobal": {
+        if (op.globalName === irFunc.name) break;
         const gLocal = globalToLocal.get(op.globalName);
         if (gLocal !== void 0) {
           body.push(WASM_OP.local_get, gLocal);
@@ -9068,6 +9178,73 @@ var jsmini = (() => {
           emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
           body.push(WASM_OP.local_set, gLocal);
         }
+        break;
+      }
+      case "LoadUpvalue": {
+        const uvLocal = irFunc.paramCount + op.index;
+        body.push(WASM_OP.local_get, uvLocal);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "StoreUpvalue": {
+        const uvLocal = irFunc.paramCount + op.index;
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+        body.push(WASM_OP.local_set, uvLocal);
+        break;
+      }
+      case "LoadThis": {
+        const thisLocal = irFunc.paramCount + upvalueCount;
+        body.push(WASM_OP.local_get, thisLocal);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "LoadProperty": {
+        const offset = propOffsets.get(op.globalName);
+        if (offset !== void 0) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, false);
+          const byteOffset = offset * 4;
+          if (byteOffset > 0) {
+            body.push(WASM_OP.i32_const, ...i32ToLEB128(byteOffset));
+            body.push(WASM_OP.i32_add);
+          }
+          body.push(WASM_OP.i32_load, 2, 0);
+          if (forceF64) {
+            body.push(WASM_OP.f64_convert_i32_s);
+          }
+        }
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "StoreProperty": {
+        const offset = propOffsets.get(op.globalName);
+        if (offset !== void 0) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, false);
+          const byteOffset = offset * 4;
+          if (byteOffset > 0) {
+            body.push(WASM_OP.i32_const, ...i32ToLEB128(byteOffset));
+            body.push(WASM_OP.i32_add);
+          }
+          emitLoadValue(op.args[1], body, opToLocal, opById, false);
+          body.push(WASM_OP.i32_store, 2, 0);
+        }
+        break;
+      }
+      case "Call": {
+        for (let i = 1; i < op.args.length; i++) {
+          emitLoadValue(op.args[i], body, opToLocal, opById, forceF64);
+        }
+        body.push(WASM_OP.call, 0);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "Alloc": {
+        const objectSize = propOffsets.size * 4 || 32;
+        body.push(WASM_OP.global_get, 0);
+        body.push(WASM_OP.global_get, 0);
+        body.push(WASM_OP.i32_const, ...i32ToLEB128(objectSize));
+        body.push(WASM_OP.i32_add);
+        body.push(WASM_OP.global_set, 0);
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
       case "TypeGuard": {
@@ -9325,9 +9502,16 @@ var jsmini = (() => {
   function compileIRToWasm(irFunc) {
     try {
       let hasArrayOps = false;
+      let hasSelfRecursion = false;
       for (const block of irFunc.blocks) {
         for (const op of block.ops) {
-          if (op.opcode === "Call") return null;
+          if (op.opcode === "Call") {
+            if (op.calleeName === irFunc.name) {
+              hasSelfRecursion = true;
+            } else {
+              return null;
+            }
+          }
           if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") {
             hasArrayOps = true;
           }
@@ -9357,6 +9541,34 @@ var jsmini = (() => {
           }
         }
       }
+      let upvalueCount = 0;
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if ((op.opcode === "LoadUpvalue" || op.opcode === "StoreUpvalue") && op.index !== void 0) {
+            upvalueCount = Math.max(upvalueCount, op.index + 1);
+          }
+        }
+      }
+      let hasThis = false;
+      let hasPropertyOps = false;
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if (op.opcode === "LoadThis") hasThis = true;
+          if (op.opcode === "LoadProperty" || op.opcode === "StoreProperty") hasPropertyOps = true;
+        }
+      }
+      let hasAlloc = false;
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if (op.opcode === "Alloc") hasAlloc = true;
+        }
+      }
+      if (hasPropertyOps || hasAlloc) {
+        builder.enableMemory(1);
+      }
+      if (hasAlloc) {
+        builder.addGlobal(WASM_TYPE.i32, true, 0);
+      }
       const params = [];
       for (let i = 0; i < irFunc.paramCount; i++) {
         if (arrayParams.has(i)) {
@@ -9365,8 +9577,15 @@ var jsmini = (() => {
           params.push(wasmType);
         }
       }
+      for (let i = 0; i < upvalueCount; i++) {
+        params.push(wasmType);
+      }
+      if (hasThis) {
+        params.push(WASM_TYPE.i32);
+      }
       const results = [wasmType];
       const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx);
+      const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0);
       const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
       const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: localType }] : void 0;
       builder.addFunction(
@@ -9375,7 +9594,7 @@ var jsmini = (() => {
         results,
         bodyCode,
         extraLocals > 0 ? extraLocals : 0,
-        irFunc.paramCount,
+        totalParamCount,
         1,
         extraLocalGroups
       );
@@ -9419,11 +9638,15 @@ var jsmini = (() => {
       const wasmBytes = builder.build();
       const module = new WebAssembly.Module(wasmBytes);
       const instance = new WebAssembly.Instance(module);
+      const memory = hasPropertyOps ? instance.exports.memory : void 0;
       return {
         instance,
         funcName: irFunc.name,
         hasArrayOps,
-        arrayParams: [...arrayParams]
+        arrayParams: [...arrayParams],
+        upvalueCount: upvalueCount > 0 ? upvalueCount : void 0,
+        hasThis: hasThis || void 0,
+        memory
       };
     } catch (e) {
       return null;
@@ -9535,7 +9758,7 @@ var jsmini = (() => {
         const createArray = result.hasArrayOps ? result.instance.exports.__create_array ?? null : null;
         const getArray = result.hasArrayOps ? result.instance.exports.__get_array ?? null : null;
         const setArray = result.hasArrayOps ? result.instance.exports.__set_array ?? null : null;
-        return { fn: wasmFn, memory: null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
+        return { fn: wasmFn, memory: result.memory ?? null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
       } catch {
         return null;
       }
@@ -9564,13 +9787,13 @@ var jsmini = (() => {
       if (!result) return null;
       const wasmFn = result.get(func.name);
       if (!wasmFn) return null;
-      const memory2 = result.__memory;
+      const memory = result.__memory;
       const createArray = result.__create_array;
       const getArray = result.__get_array;
       const setArray = result.__set_array;
       const cached = {
         fn: wasmFn,
-        memory: memory2 ?? null,
+        memory: memory ?? null,
         arrayArgIndices,
         stringArgIndices: [],
         spec,
@@ -9584,7 +9807,7 @@ var jsmini = (() => {
           if (relFn) {
             this.wasmCache.set(f, {
               fn: relFn,
-              memory: memory2 ?? null,
+              memory: memory ?? null,
               arrayArgIndices: [],
               stringArgIndices: [],
               spec,
@@ -9619,7 +9842,7 @@ var jsmini = (() => {
       return result;
     }
     executeWasm(func, cached, args, callCount, upvalueValues = [], thisObj) {
-      const { fn, arrayArgIndices } = cached;
+      const { fn, arrayArgIndices, memory } = cached;
       if (arrayArgIndices.length > 0 && cached.createArray) {
         return this.executeWithArrayArgs(func, cached, args, arrayArgIndices, callCount);
       }
@@ -9674,10 +9897,15 @@ var jsmini = (() => {
           return null;
         }
         const slots = getSlots(thisObj);
+        const hc = getHiddenClass(thisObj);
         const view = new Int32Array(memory.buffer);
         const base2 = 0;
-        for (let i = 0; i < slots.length; i++) {
-          view[i] = slots[i];
+        let dst = 0;
+        for (const [name2, slotIdx] of hc.properties) {
+          if (name2 === "__proto__") continue;
+          const v = slots[slotIdx];
+          view[dst] = typeof v === "number" ? v : 0;
+          dst++;
         }
         wasmArgs.push(base2);
       }
@@ -10269,6 +10497,18 @@ var jsmini = (() => {
         return `${indent}v${op.id}: ${typeStr} = LoadGlobal("${op.globalName}")`;
       case "StoreGlobal":
         return `${indent}StoreGlobal("${op.globalName}", v${op.args[0]})`;
+      case "LoadUpvalue":
+        return `${indent}v${op.id}: ${typeStr} = LoadUpvalue(${op.index})`;
+      case "StoreUpvalue":
+        return `${indent}StoreUpvalue(${op.index}, v${op.args[0]})`;
+      case "LoadThis":
+        return `${indent}v${op.id}: ${typeStr} = LoadThis`;
+      case "LoadProperty":
+        return `${indent}v${op.id}: ${typeStr} = LoadProperty(v${op.args[0]}, "${op.globalName}")`;
+      case "StoreProperty":
+        return `${indent}StoreProperty(v${op.args[0]}, "${op.globalName}", v${op.args[1]})`;
+      case "Alloc":
+        return `${indent}v${op.id}: ${typeStr} = Alloc`;
       case "TypeGuard":
         return `${indent}v${op.id}: ${typeStr} = TypeGuard(v${op.args[0]}, ${op.guardType})`;
       case "Branch":

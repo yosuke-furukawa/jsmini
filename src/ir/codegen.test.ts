@@ -138,6 +138,19 @@ describe("IR → Wasm codegen — loops", () => {
     assert.equal(wasmF(100), 5650); // 4950 + 700
   });
 
+  it("self-recursion: fib(n)", () => {
+    const func = getFirstFunction("function fib(n){if(n<=1){return n;}return fib(n-1)+fib(n-2);}");
+    const ir = buildIR(func);
+    optimize(ir);
+    const compiled = compileIRToWasm(ir);
+    assert.ok(compiled !== null, "should compile self-recursive fib to wasm");
+    const wasmF = (compiled!.instance.exports as any).fib;
+    assert.equal(wasmF(0), 0);
+    assert.equal(wasmF(1), 1);
+    assert.equal(wasmF(10), 55);
+    assert.equal(wasmF(25), 75025);
+  });
+
   it("nested inlining: add3(add(a,b),c) fully inlined", () => {
     const source = "function add(a,b){return a+b;} function add3(a,b,c){return add(add(a,b),c);} function f(n){var s=0;for(var i=0;i<n;i++){s=add3(s,i,1);}return s;}";
     const script = compile(source);
