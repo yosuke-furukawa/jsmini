@@ -100,6 +100,14 @@ IR パスでは `GetProperty("length")` → `ArrayLength` 以外の named proper
 - [x] 21-6e: JitManager: executeWasm が既に memory + this 対応済み → memory 渡しのみ修正
 - [x] 21-6f: Point.sum(), Point.dist() が IR パスで動作確認
 
+### 21-7: Construct + CallMethod IR 対応
+
+- [ ] 21-7a: Builder: `Construct` → IR (bump alloc + コンストラクタ Call)
+- [ ] 21-7b: Builder: `CallMethod` → Call + LoadThis 変換
+- [ ] 21-7c: Builder: `Dup`, `CreateArray` 対応
+- [ ] 21-7d: Codegen: Construct の bump allocator (global heapPtr)
+- [ ] 21-7e: テスト (new Point, p.dist(), 配列リテラル生成)
+
 ## 目標
 
 - ループ内の冗長な計算を除去 (LICM)
@@ -107,6 +115,7 @@ IR パスでは `GetProperty("length")` → `ArrayLength` 以外の named proper
 - 高コスト演算を低コストに置換 (Strength Reduction)
 - クロージャが IR パスで動く (upvalue 対応)
 - プロパティアクセスが IR パスで動く (linear memory)
+- Construct / CallMethod が IR パスで動く
 - IR の printIR / Playground で最適化の before/after が見える
 
 ## 技術メモ

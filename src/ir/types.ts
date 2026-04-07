@@ -65,6 +65,9 @@ export type IROpcode =
   | "LoadProperty"    // args[0] = obj、globalName にプロパティ名
   | "StoreProperty"   // args[0] = obj, args[1] = value、globalName にプロパティ名
 
+  // オブジェクト生成
+  | "Alloc"           // オブジェクト領域確保 (bump allocator)。value = サイズ(bytes)
+
   // 関数呼び出し
   | "Call"            // args[0] = callee, args[1..] = 引数
 

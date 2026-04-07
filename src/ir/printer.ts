@@ -57,6 +57,9 @@ function formatOp(op: Op, indent: string = "  "): string {
     case "StoreProperty":
       return `${indent}StoreProperty(v${op.args[0]}, "${op.globalName}", v${op.args[1]})`;
 
+    case "Alloc":
+      return `${indent}v${op.id}: ${typeStr} = Alloc`;
+
     case "TypeGuard":
       return `${indent}v${op.id}: ${typeStr} = TypeGuard(v${op.args[0]}, ${op.guardType})`;
 

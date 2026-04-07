@@ -450,6 +450,20 @@ function emitOp(
       break;
     }
 
+    case "Alloc": {
+      // bump allocator: base = global.get $heapPtr; global.set $heapPtr (base + size)
+      const objectSize = propOffsets.size * 4 || 32; // プロパティ数 × 4 bytes
+      body.push(WASM_OP.global_get, 0); // heapPtr global index 0
+      // heapPtr += objectSize
+      body.push(WASM_OP.global_get, 0);
+      body.push(WASM_OP.i32_const, ...i32ToLEB128(objectSize));
+      body.push(WASM_OP.i32_add);
+      body.push(WASM_OP.global_set, 0);
+      // スタックに base address が残る
+      maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      break;
+    }
+
     case "TypeGuard": {
       // 型ガード: 現在は型が合ってる前提で passthrough
       // 将来: 型チェック → 失敗で deopt (unreachable or special return)
@@ -814,9 +828,22 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
       }
     }
 
-    // プロパティアクセスがある場合は linear memory が必要
-    if (hasPropertyOps) {
+    // Alloc の検出
+    let hasAlloc = false;
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "Alloc") hasAlloc = true;
+      }
+    }
+
+    // プロパティアクセスまたは Alloc がある場合は linear memory が必要
+    if (hasPropertyOps || hasAlloc) {
       builder.enableMemory(1); // 1 page = 64KB
+    }
+
+    // Alloc がある場合は heapPtr global が必要
+    if (hasAlloc) {
+      builder.addGlobal(WASM_TYPE.i32, true, 0); // global 0 = heapPtr, mutable, init=0
     }
 
     // パラメータ: 配列は ref $array、他は i32/f64、upvalue も追加
