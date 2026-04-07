@@ -822,10 +822,10 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if (op.opcode === "Call") {
-          if (op.calleeName === irFunc.name) {
-            hasSelfRecursion = true; // 自己再帰は Wasm call で対応可能
+          if (op.calleeName === irFunc.name && !hasArrayOps) {
+            hasSelfRecursion = true; // 自己再帰は Wasm call で対応可能 (配列なし)
           } else {
-            return null; // 他の関数への未インライン化 Call
+            return null; // 他の関数 or 自己再帰+配列 → 未対応
           }
         }
         // 配列 Op を検出 (WasmGC array 構築が必要)
