@@ -350,6 +350,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           const calleeOp = opById.get(calleeId);
           const op = registerOp(createOp(irFunc, "Call", [calleeId, ...args], "any"));
           if (calleeOp?.calleeName) op.calleeName = calleeOp.calleeName;
+          else if (calleeOp?.globalName) op.calleeName = calleeOp.globalName;
           block.ops.push(op); stack.push(op.id); break;
         }
         // 配列アクセス

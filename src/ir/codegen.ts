@@ -97,6 +97,8 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   for (const block of irFunc.blocks) {
     for (const op of block.ops) {
       if ((op.opcode === "LoadGlobal" || op.opcode === "StoreGlobal") && op.globalName) {
+        // 自己再帰の callee 参照は local 不要 (call 0 で直接呼ぶ)
+        if (op.globalName === irFunc.name) continue;
         if (!globalToLocal.has(op.globalName)) {
           globalToLocal.set(op.globalName, nextLocal++);
         }
@@ -183,6 +185,17 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     const block = blockMap.get(blockId);
     if (!block) continue;
 
+    // if-else の block end: false 分岐ブロックの前に end を出す
+    if (controlStack.length > 0) {
+      const top = controlStack[controlStack.length - 1];
+      if (top.kind === "block" && top.targetBlockId === blockId && !cfg.loopHeaders.has(blockId)) {
+        watIndent--;
+        body.push(WASM_OP.end);
+        wat("end ;; block (if-else)");
+        controlStack.pop();
+      }
+    }
+
     // ループヘッダ: block $exit + loop $continue を開始
     const loopInfo = cfg.loops.find(l => l.header === blockId);
     if (loopInfo) {
@@ -195,6 +208,24 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
       wat("loop $loop_" + blockId);
       watIndent++;
       controlStack.push({ kind: "loop", targetBlockId: blockId });
+    } else if (block.ops.some(op => op.opcode === "Branch") && !loopInfo) {
+      // 非ループの Branch: topo order では true (B1) → false (B2) の順に来る
+      // block 内に B1 (true分岐) を入れ、条件を反転して false のとき B1 を実行
+      // cond false → B1 のコードを実行 → return/end → B2 に落ちる
+      // cond true → br_if で block end に飛ぶ → B2 のコードを実行
+      // ※ ただし fib では true=B1(return n), false=B2(recursive) なので:
+      //   block内=B1, 条件反転: true(n<=1)→br_if(skip B1)→B2... ダメ
+      // → block 内=B1, 条件反転なし: false→B1実行, true→skip B1→B2... 逆
+      //
+      // 正しくは: successors[1] (false=B2) のブロックを block の外に、
+      //           successors[0] (true=B1) を block の中に入れる
+      // br_if で条件 false のとき B1 を実行 → eqz + br_if で「cond=false → skip」
+      const falseTarget = block.successors[1]; // B2 (false 分岐, block の外)
+      body.push(WASM_OP.block, WASM_VOID);
+      controlStack.push({ kind: "block", targetBlockId: falseTarget });
+      wat(`;; B${blockId} (if-else)`);
+      wat(`block $else_${falseTarget}`);
+      watIndent++;
     } else if (block.ops.length > 0) {
       wat(`;; B${blockId}`);
     }
@@ -216,8 +247,14 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
           body.push(WASM_OP.br_if, exitDepth);
           wat(`br_if ${exitDepth} ;; → exit`);
         } else {
-          body.push(WASM_OP.br_if, 0);
-          wat("br_if 0");
+          // 非ループ: 条件を反転して、false のとき true 分岐 (B1) をスキップ
+          body.push(WASM_OP.i32_eqz);
+          wat("i32.eqz");
+          const skipDepth = controlStack.length - 1 - controlStack.findLastIndex(
+            e => e.kind === "block"
+          );
+          body.push(WASM_OP.br_if, skipDepth);
+          wat(`br_if ${skipDepth} ;; → else (skip true branch)`);
         }
       } else if (op.opcode === "Jump") {
         // 無条件ジャンプ
@@ -268,6 +305,8 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         controlStack.pop();
       }
     }
+
+    // (if-else の block end はブロック処理の前に移動済み)
   }
 
   body.push(WASM_OP.end); // function end
@@ -349,6 +388,8 @@ function emitOp(
     }
 
     case "LoadGlobal": {
+      // 自己再帰の callee 参照は skip (Call で直接 call 0 する)
+      if (op.globalName === irFunc.name) break;
       const gLocal = globalToLocal.get(op.globalName!);
       if (gLocal !== undefined) {
         body.push(WASM_OP.local_get, gLocal);
@@ -449,6 +490,17 @@ function emitOp(
         emitLoadValue(op.args[1], body, opToLocal, opById, false); // value as i32
         body.push(WASM_OP.i32_store, 0x02, 0x00);
       }
+      break;
+    }
+
+    case "Call": {
+      // 自己再帰: call 0 (自分自身の関数 index)
+      // args: [calleeRef, arg0, arg1, ...]
+      for (let i = 1; i < op.args.length; i++) {
+        emitLoadValue(op.args[i], body, opToLocal, opById, forceF64);
+      }
+      body.push(WASM_OP.call, 0); // function index 0 = 自分自身
+      maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
 
@@ -766,9 +818,16 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
   try {
     // IR に Wasm 化できない Op が含まれてたらスキップ
     let hasArrayOps = false;
+    let hasSelfRecursion = false;
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
-        if (op.opcode === "Call") return null; // 未インライン化の Call
+        if (op.opcode === "Call") {
+          if (op.calleeName === irFunc.name) {
+            hasSelfRecursion = true; // 自己再帰は Wasm call で対応可能
+          } else {
+            return null; // 他の関数への未インライン化 Call
+          }
+        }
         // 配列 Op を検出 (WasmGC array 構築が必要)
         if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") {
           hasArrayOps = true;
