@@ -107,6 +107,7 @@ IR パスでは `GetProperty("length")` → `ArrayLength` 以外の named proper
 - [x] 21-7c: Builder: `Dup` は既に対応済み (stack 複製)
 - [x] 21-7d: Codegen: Alloc → bump allocator (global heapPtr + objectSize)
 - [x] 21-7e: new Point(3,4) + p.dist() x100 = 2500 が IR パスで動作確認
+- [x] 21-7f: ベンチ: closure accum VM 12.73ms → IR 0.95ms (13.4x)、Point.heavy は呼び出しオーバーヘッド支配で差なし
 
 ## 目標
 
