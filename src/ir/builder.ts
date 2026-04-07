@@ -366,7 +366,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           const op = registerOp(createOp(irFunc, "ArraySet", [arr, index, value], "any"));
           block.ops.push(op); break;
         }
-        // arr.length
+        // プロパティアクセス
         case "GetProperty": {
           const obj = stack.pop()!;
           const name = constants[instr.operand!] as string;
@@ -374,11 +374,28 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
             const op = registerOp(createOp(irFunc, "ArrayLength", [obj], "i32"));
             block.ops.push(op); stack.push(op.id);
           } else {
-            // 他のプロパティは未対応 → any
-            const op = registerOp(createOp(irFunc, "Const", [], "any"));
-            op.value = undefined as any;
+            // named property: obj.name
+            const op = registerOp(createOp(irFunc, "LoadProperty", [obj], "i32"));
+            op.globalName = name;
             block.ops.push(op); stack.push(op.id);
           }
+          break;
+        }
+        case "SetPropertyAssign": {
+          // スタック: [value, obj] → obj.name = value
+          const obj = stack.pop()!;
+          const value = stack.pop()!;
+          const name = constants[instr.operand!] as string;
+          const op = registerOp(createOp(irFunc, "StoreProperty", [obj, value], "any"));
+          op.globalName = name;
+          block.ops.push(op);
+          // SetPropertyAssign は value をスタックに残す
+          stack.push(value);
+          break;
+        }
+        case "LoadThis": {
+          const op = registerOp(createOp(irFunc, "LoadThis", [], "i32"));
+          block.ops.push(op); stack.push(op.id);
           break;
         }
         default: break;

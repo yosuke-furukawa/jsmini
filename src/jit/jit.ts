@@ -159,7 +159,7 @@ export class JitManager {
       const getArray = result.hasArrayOps ? (result.instance.exports as any).__get_array as ((arr: unknown, idx: number) => number) ?? null : null;
       const setArray = result.hasArrayOps ? (result.instance.exports as any).__set_array as ((arr: unknown, idx: number, val: number) => void) ?? null : null;
 
-      return { fn: wasmFn, memory: null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
+      return { fn: wasmFn, memory: result.memory ?? null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
     } catch {
       return null;
     }
@@ -263,7 +263,7 @@ export class JitManager {
     upvalueValues: unknown[] = [],
     thisObj?: unknown,
   ): { result: unknown } | null {
-    const { fn, arrayArgIndices } = cached;
+    const { fn, arrayArgIndices, memory } = cached;
 
     if (arrayArgIndices.length > 0 && cached.createArray) {
       // 配列引数がある: WasmGC 配列で in/out コピー

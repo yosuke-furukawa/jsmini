@@ -60,6 +60,11 @@ export type IROpcode =
   | "LoadUpvalue"     // upvalue の読み込み。index フィールドに upvalue 番号
   | "StoreUpvalue"    // upvalue の書き込み。args[0] = 値、index に upvalue 番号
 
+  // オブジェクトプロパティ
+  | "LoadThis"        // this 参照。linear memory のベースアドレス
+  | "LoadProperty"    // args[0] = obj、globalName にプロパティ名
+  | "StoreProperty"   // args[0] = obj, args[1] = value、globalName にプロパティ名
+
   // 関数呼び出し
   | "Call"            // args[0] = callee, args[1..] = 引数
 

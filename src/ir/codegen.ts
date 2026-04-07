@@ -54,10 +54,25 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
       }
     }
   }
-  const totalParamCount = irFunc.paramCount + upvalueCount;
+  // this (オブジェクトプロパティアクセス) の検出
+  let hasThis = false;
+  const propOffsets = new Map<string, number>();
+  let propCounter = 0;
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      if (op.opcode === "LoadThis") hasThis = true;
+      if ((op.opcode === "LoadProperty" || op.opcode === "StoreProperty") && op.globalName) {
+        if (!propOffsets.has(op.globalName)) {
+          propOffsets.set(op.globalName, propCounter++);
+        }
+      }
+    }
+  }
+
+  const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0);
 
   // Op ID → Wasm local index のマッピング
-  // Wasm locals: [params..., upvalue params..., phi locals..., temp locals...]
+  // Wasm locals: [params..., upvalue params..., this param..., phi locals..., temp locals...]
   const opToLocal = new Map<number, number>();
   let nextLocal = totalParamCount;
 
@@ -393,6 +408,48 @@ function emitOp(
       body.push(WASM_OP.local_set, uvLocal);
       break;
     }
+
+    case "LoadThis": {
+      // this は upvalue の後の追加パラメータ
+      const thisLocal = irFunc.paramCount + upvalueCount;
+      body.push(WASM_OP.local_get, thisLocal);
+      maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      break;
+    }
+    case "LoadProperty": {
+      // obj.name → i32.load(obj + propOffset * 4)
+      const offset = propOffsets.get(op.globalName!);
+      if (offset !== undefined) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, false); // base addr is always i32
+        const byteOffset = offset * 4;
+        if (byteOffset > 0) {
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(byteOffset));
+          body.push(WASM_OP.i32_add);
+        }
+        body.push(WASM_OP.i32_load, 0x02, 0x00); // alignment=4, offset=0
+        if (forceF64) {
+          body.push(WASM_OP.f64_convert_i32_s);
+        }
+      }
+      maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      break;
+    }
+    case "StoreProperty": {
+      // obj.name = value → i32.store(obj + propOffset * 4, value)
+      const offset = propOffsets.get(op.globalName!);
+      if (offset !== undefined) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, false); // base addr
+        const byteOffset = offset * 4;
+        if (byteOffset > 0) {
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(byteOffset));
+          body.push(WASM_OP.i32_add);
+        }
+        emitLoadValue(op.args[1], body, opToLocal, opById, false); // value as i32
+        body.push(WASM_OP.i32_store, 0x02, 0x00);
+      }
+      break;
+    }
+
     case "TypeGuard": {
       // 型ガード: 現在は型が合ってる前提で passthrough
       // 将来: 型チェック → 失敗で deopt (unreachable or special return)
@@ -689,7 +746,7 @@ function getReturnType(irFunc: IRFunction): IRType {
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
-export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number } | null {
+export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; memory?: WebAssembly.Memory } | null {
   try {
     // IR に Wasm 化できない Op が含まれてたらスキップ
     let hasArrayOps = false;
@@ -747,6 +804,21 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
       }
     }
 
+    // this / property ops の検出
+    let hasThis = false;
+    let hasPropertyOps = false;
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "LoadThis") hasThis = true;
+        if (op.opcode === "LoadProperty" || op.opcode === "StoreProperty") hasPropertyOps = true;
+      }
+    }
+
+    // プロパティアクセスがある場合は linear memory が必要
+    if (hasPropertyOps) {
+      builder.enableMemory(1); // 1 page = 64KB
+    }
+
     // パラメータ: 配列は ref $array、他は i32/f64、upvalue も追加
     const params: number[] = [];
     for (let i = 0; i < irFunc.paramCount; i++) {
@@ -760,15 +832,20 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
     for (let i = 0; i < upvalueCount; i++) {
       params.push(wasmType);
     }
+    // this 追加パラメータ (i32: メモリ上のベースアドレス)
+    if (hasThis) {
+      params.push(WASM_TYPE.i32);
+    }
     const results = [wasmType];
 
     const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx);
 
+    const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0);
     const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
     const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: localType }] : undefined;
     builder.addFunction(irFunc.name, params, results, bodyCode,
       extraLocals > 0 ? extraLocals : 0,
-      irFunc.paramCount + upvalueCount, 1, extraLocalGroups);
+      totalParamCount, 1, extraLocalGroups);
     // WasmGC 配列ヘルパー関数
     if (hasArrayOps && arrayTypeIdx >= 0) {
       // __create_array(len) → ref $array
@@ -807,12 +884,15 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
 
     const module = new WebAssembly.Module(wasmBytes);
     const instance = new WebAssembly.Instance(module);
+    const memory = hasPropertyOps ? (instance.exports as any).memory as WebAssembly.Memory : undefined;
     return {
       instance,
       funcName: irFunc.name,
       hasArrayOps,
       arrayParams: [...arrayParams],
       upvalueCount: upvalueCount > 0 ? upvalueCount : undefined,
+      hasThis: hasThis || undefined,
+      memory,
     };
   } catch (e: any) {
     // Wasm コンパイルエラー → null (フォールバック)
