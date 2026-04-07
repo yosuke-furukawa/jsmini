@@ -82,11 +82,11 @@ x + 0   → x
 Direct JIT では upvalue を追加パラメータとして Wasm 関数に渡す仕組みがあるが、
 IR パスでは `LdaUpvalue` / `StaUpvalue` を扱えず VM フォールバックしていた。
 
-- [ ] 21-5a: IR opcode `LoadUpvalue` / `StoreUpvalue` を追加
-- [ ] 21-5b: Builder: `LdaUpvalue` → `LoadUpvalue`、`StaUpvalue` → `StoreUpvalue` 変換
-- [ ] 21-5c: Codegen: upvalue を追加パラメータとして Wasm 関数に渡す (Direct JIT と同方式)
-- [ ] 21-5d: JitManager: IR パスで upvalueValues を追加引数として渡す
-- [ ] 21-5e: テスト (makeAdder, counter, captured loop var)
+- [x] 21-5a: IR opcode `LoadUpvalue` / `StoreUpvalue` を追加
+- [x] 21-5b: Builder: `LdaUpvalue` → `LoadUpvalue`、`StaUpvalue` → `StoreUpvalue` 変換
+- [x] 21-5c: Codegen: upvalue を追加パラメータとして Wasm 関数に渡す (Direct JIT と同方式)
+- [x] 21-5d: JitManager の executeWasm が既に upvalue 対応済み → 変更不要
+- [x] 21-5e: makeAdder, makeMul, makeLinear が IR パスで動作確認
 
 ## 目標
 
