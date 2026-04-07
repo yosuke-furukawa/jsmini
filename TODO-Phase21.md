@@ -102,11 +102,11 @@ IR パスでは `GetProperty("length")` → `ArrayLength` 以外の named proper
 
 ### 21-7: Construct + CallMethod IR 対応
 
-- [ ] 21-7a: Builder: `Construct` → IR (bump alloc + コンストラクタ Call)
-- [ ] 21-7b: Builder: `CallMethod` → Call + LoadThis 変換
-- [ ] 21-7c: Builder: `Dup`, `CreateArray` 対応
-- [ ] 21-7d: Codegen: Construct の bump allocator (global heapPtr)
-- [ ] 21-7e: テスト (new Point, p.dist(), 配列リテラル生成)
+- [x] 21-7a: Builder: `Construct` → Alloc + Call(ctor, args, this=alloc)
+- [x] 21-7b: Builder: `CallMethod` → Call(methodRef, args, this) 変換
+- [x] 21-7c: Builder: `Dup` は既に対応済み (stack 複製)
+- [x] 21-7d: Codegen: Alloc → bump allocator (global heapPtr + objectSize)
+- [x] 21-7e: new Point(3,4) + p.dist() x100 = 2500 が IR パスで動作確認
 
 ## 目標
 
