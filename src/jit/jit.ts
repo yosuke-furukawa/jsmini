@@ -178,7 +178,8 @@ export class JitManager {
         knownFuncs: funcsMap,
         buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs },
       });
-      const result = compileIRToWasm(ir);
+      // Proper OSR: 全 locals をパラメータとして受け取る Wasm 関数を生成
+      const result = compileIRToWasm(ir, func.localCount);
       if (!result) return null;
       const wasmFn = (result.instance.exports as any)[ir.name] as (...args: number[]) => number;
       return wasmFn ?? null;

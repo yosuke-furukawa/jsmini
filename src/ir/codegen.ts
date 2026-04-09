@@ -814,7 +814,7 @@ function getReturnType(irFunc: IRFunction): IRType {
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
-export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; memory?: WebAssembly.Memory } | null {
+export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; memory?: WebAssembly.Memory } | null {
   try {
     // IR に Wasm 化できない Op が含まれてたらスキップ
     let hasArrayOps = false;
@@ -928,11 +928,21 @@ export function compileIRToWasm(irFunc: IRFunction): { instance: WebAssembly.Ins
 
     const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx);
 
-    const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0);
+    // OSR モード: extra locals もパラメータに含める (VM から全 locals を受け取る)
+    if (osrLocalCount !== undefined && osrLocalCount > irFunc.paramCount) {
+      const osrExtraParams = osrLocalCount - irFunc.paramCount;
+      for (let i = 0; i < osrExtraParams; i++) {
+        params.push(wasmType);
+      }
+    }
+
+    const totalParamCount = params.length;
     const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
-    const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: localType }] : undefined;
+    // OSR: extra locals をパラメータで渡すので Wasm locals を減らす
+    const wasmExtraLocals = (osrLocalCount !== undefined) ? Math.max(0, extraLocals - (osrLocalCount - irFunc.paramCount)) : extraLocals;
+    const extraLocalGroups = wasmExtraLocals > 0 ? [{ count: wasmExtraLocals, type: localType }] : undefined;
     builder.addFunction(irFunc.name, params, results, bodyCode,
-      extraLocals > 0 ? extraLocals : 0,
+      wasmExtraLocals > 0 ? wasmExtraLocals : 0,
       totalParamCount, 1, extraLocalGroups);
     // WasmGC 配列ヘルパー関数
     if (hasArrayOps && arrayTypeIdx >= 0) {
