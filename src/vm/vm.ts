@@ -187,19 +187,15 @@ export class VM {
       if (!wasmFn) return null;
     }
 
-    // 今の locals を Wasm のパラメータとして渡す
-    // func.paramCount 個が通常パラメータ、残りは extra locals
-    // Wasm 関数は全 locals をパラメータとして受け取る設計にはなっていない
-    // → 通常パラメータだけ渡して、ループの初期状態から再実行する
-    // ただしそれだと二重実行になる
-
-    // シンプルな OSR: 関数のパラメータだけ渡して最初から再実行
-    // sum, i は 0 からやり直し (= 正確な OSR ではないが、結果は正しい)
+    // Proper OSR: 全 locals を Wasm パラメータとして渡す
+    // VM の locals (params + ローカル変数) をそのまま引き継ぎ、
+    // Wasm はループ先頭から実行するが、sum/i 等が途中の値なので
+    // 実質的にループの途中から再開するのと同じ結果になる
     const args: number[] = [];
-    for (let i = 0; i < func.paramCount; i++) {
+    for (let i = 0; i < func.localCount; i++) {
       const val = frame.locals[i];
       if (typeof val === "number") args.push(val);
-      else return null; // 非数値パラメータ → OSR 不可
+      else args.push(0); // 非数値 (undefined, 関数参照等) は 0 に
     }
 
     // upvalue があれば追加
@@ -780,6 +776,9 @@ export class VM {
             if ((frame as any).__loopCount > 100 && !(frame as any).__osrDone && this.jit) {
               // ホットループ検出 → OSR: 関数全体を Wasm にコンパイルして残りのループを実行
               const osrResult = this.attemptOSR(frame);
+              if (this.jit?.traceTier) {
+                this.jit.tierLog.push(`[OSR] ${frame.func.name}: attempt at loop #${(frame as any).__loopCount}, locals=[${frame.locals.map(v => typeof v === 'number' ? v : typeof v).join(',')}], result=${osrResult !== null ? 'success' : 'fail'}`);
+              }
               if (osrResult !== null) {
                 // OSR 成功: Wasm の結果を push して関数を Return 相当で抜ける
                 this.frames.pop();
