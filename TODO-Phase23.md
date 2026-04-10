@@ -37,13 +37,13 @@ new Promise((resolve) => {
 - [ ] 23-2d: then チェーン: then のコールバックの戻り値で次の Promise を resolve
 - [ ] 23-2e: テスト (実行順序: sync → microtask, then チェーン順序)
 
-### 23-3: Promise 静的メソッド
+### 23-3: Promise.resolve / Promise.reject
 
 - [ ] 23-3a: `Promise.resolve(value)` — fulfilled な Promise を返す
 - [ ] 23-3b: `Promise.reject(reason)` — rejected な Promise を返す
-- [ ] 23-3c: `Promise.all(iterable)` — 全 fulfilled で resolve, 1 つでも reject で reject
-- [ ] 23-3d: `Promise.race(iterable)` — 最初に settle した値で resolve/reject
-- [ ] 23-3e: テスト (Promise.resolve, Promise.all, Promise.race)
+- [ ] 23-3c: テスト (Promise.resolve, Promise.reject)
+
+※ `Promise.all` / `Promise.race` はエンジン内部の対応不要 (JS で実装可能)。必要なら後から追加。
 
 ### 23-4: async/await 構文
 
