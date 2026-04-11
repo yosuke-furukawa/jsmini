@@ -217,10 +217,16 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   const PromiseConstructor: any = function PromiseCtor(executor: unknown) {
     if (typeof executor !== "function" && !isJSFunction(executor)) throw new TypeError("Promise resolver is not a function");
     return new JSPromise((resolve, reject) => {
-      if (isJSFunction(executor)) {
-        callJSFunctionSync(executor, undefined, [resolve, reject]);
-      } else {
-        (executor as Function)(resolve, reject);
+      try {
+        if (isJSFunction(executor)) {
+          callJSFunctionSync(executor, undefined, [resolve, reject]);
+        } else {
+          (executor as Function)(resolve, reject);
+        }
+      } catch (e) {
+        // ThrowSignal を unwrap して reject
+        const unwrapped = e instanceof ThrowSignal ? e.value : e;
+        reject(isJSString(unwrapped) ? jsStringToString(unwrapped) : unwrapped);
       }
     });
   };
