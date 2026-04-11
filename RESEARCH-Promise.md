@@ -202,9 +202,86 @@ jsmini は既に Generator (function*) を VM で実装している。async/awai
 
 V8 / JSC / SpiderMonkey 全てが bytecode 状態マシン方式を採用しているので、この方針は正しい。
 
+---
+
+## JSPI (JavaScript Promise Integration) — Wasm Stack Switching
+
+### 概要
+
+JSPI は Wasm の実行スタックごと中断/再開できる仕組み。
+Wasm 内で async 操作を呼ぶと **Wasm スタックを丸ごと suspend** し、
+Promise が resolve したら **スタックを丸ごと resume** する。
+
+- **Phase 4** (W3C 標準化済み)
+- **Chrome 137** / **Firefox 139** でフラグなし ship
+- **Node.js**: `--experimental-wasm-jspi` フラグで利用可能 (v24 で確認済み)
+
+### API
+
+```js
+// 1. JS の async 関数を「Wasm から呼ぶと suspend する」とマーク
+const suspendingRead = new WebAssembly.Suspending(async () => {
+  return await reader.read();
+});
+
+// 2. Wasm モジュールに import として渡す
+const instance = new WebAssembly.Instance(module, {
+  env: { read: suspendingRead }
+});
+
+// 3. Wasm の export を「Promise を返す」にラップ
+const process = WebAssembly.promising(instance.exports.process);
+
+// 4. 呼ぶと Promise が返る。Wasm 内で read() を呼ぶと自動で suspend/resume
+const result = await process();
+```
+
+### なぜ重要か: await × JIT の境界問題
+
+従来の問題:
+```
+async function processStream(reader) {
+  while (true) {
+    const { done, value } = await reader.read();  // ← ここで JIT が分断
+    if (done) break;
+    transform(value);
+  }
+}
+// ループ全体を JIT できない。毎チャンク Wasm ↔ VM の境界越え
+```
+
+JSPI があると:
+```
+// ループ全体を Wasm で実行。await 地点で Wasm スタックごと suspend
+// resolve したら Wasm のスタックを丸ごと resume
+// → Wasm ↔ VM の境界越えが不要
+```
+
+### jsmini での活用可能性 (Phase 24 候補)
+
+```
+現状 (Phase 23):
+  async/await → VM で実行 (YieldSignal throw で suspend)
+  Wasm JIT は async 関数に使えない
+
+JSPI 対応 (Phase 24):
+  async function の Wasm JIT コンパイル
+  await → WebAssembly.Suspending でラップした関数を import
+  Wasm 関数を WebAssembly.promising でラップして export
+  → async ループ全体が Wasm で実行可能に
+```
+
+必要な変更:
+- codegen: await 対象の関数を Wasm import (Suspending) として生成
+- compileIRToWasm: Wasm export を promising でラップ
+- IR: Await opcode → Suspending import の call として emit
+- Node.js: `--experimental-wasm-jspi` フラグが必要 (Chrome 137+ ではフラグ不要)
+
 ### 参考記事
 
 - V8 Blog: "Faster async functions and promises" (2018, Maya Lekova & Benedikt Meurer)
   - await 最適化の詳細、microtask tick 数の削減
+- V8 Blog: "JSPI" (2025)
+  - JSPI の概要、Phase 4 到達
 - ECMA-262: 27.2 Promise Objects
   - Promise の仕様定義
