@@ -23,25 +23,25 @@ new Promise((resolve) => {
 
 ### 23-1: Promise オブジェクト
 
-- [ ] 23-1a: Promise 内部状態: `{ state: "pending"|"fulfilled"|"rejected", value, handlers[] }`
-- [ ] 23-1b: `new Promise(executor)` — executor に resolve/reject を渡して即実行
-- [ ] 23-1c: `promise.then(onFulfilled, onRejected)` — ハンドラ登録、新 Promise を返す
-- [ ] 23-1d: `promise.catch(onRejected)` — `.then(undefined, onRejected)` のエイリアス
-- [ ] 23-1e: テスト (同期 resolve, then チェーン, catch)
+- [x] 23-1a: `src/runtime/promise.ts` — JSPromise クラス (state/result/reactions)
+- [x] 23-1b: `new Promise(executor)` — executor に resolve/reject を渡して即実行
+- [x] 23-1c: `promise.then(onFulfilled, onRejected)` — ハンドラ登録、新 Promise を返す
+- [x] 23-1d: `promise.catch(onRejected)` — `.then(undefined, onRejected)` のエイリアス
+- [x] 23-1e: テスト 10 件パス (then, chain, catch, resolve, reject, execution order, throw→catch, adopt)
 
 ### 23-2: Microtask キュー
 
-- [ ] 23-2a: microtask キュー実装 (FIFO)
-- [ ] 23-2b: resolve/reject 時にハンドラを microtask キューに enqueue
-- [ ] 23-2c: イベントループ: スクリプト実行完了後に microtask を drain
-- [ ] 23-2d: then チェーン: then のコールバックの戻り値で次の Promise を resolve
-- [ ] 23-2e: テスト (実行順序: sync → microtask, then チェーン順序)
+- [x] 23-2a: microtask キュー実装 (FIFO) — enqueueMicrotask / drainMicrotasks
+- [x] 23-2b: resolve/reject 時にハンドラを microtask キューに enqueue
+- [x] 23-2c: evaluate() 終了後に microtask を drain
+- [x] 23-2d: then チェーン: コールバックの戻り値で次の Promise を resolve
+- [x] 23-2e: テスト済み (実行順序 "a,c,b" = sync → microtask)
 
 ### 23-3: Promise.resolve / Promise.reject
 
-- [ ] 23-3a: `Promise.resolve(value)` — fulfilled な Promise を返す
-- [ ] 23-3b: `Promise.reject(reason)` — rejected な Promise を返す
-- [ ] 23-3c: テスト (Promise.resolve, Promise.reject)
+- [x] 23-3a: `Promise.resolve(value)` — fulfilled な Promise を返す
+- [x] 23-3b: `Promise.reject(reason)` — rejected な Promise を返す
+- [x] 23-3c: テスト済み (Promise.resolve, Promise.reject)
 
 ※ `Promise.all` / `Promise.race` はエンジン内部の対応不要 (JS で実装可能)。必要なら後から追加。
 

@@ -925,7 +925,7 @@ export function parse(source: string): Program {
     return parseCallExpression();
   }
 
-  // NewExpression = 'new' Primary Arguments?
+  // NewExpression = 'new' Primary Arguments? ('.' Identifier | '(' args ')' | '[' expr ']')*
   function parseNewExpression(): Expression {
     eat("New");
     // callee は Primary のみ（MemberExpression チェーンはしない）
@@ -936,7 +936,29 @@ export function parse(source: string): Program {
       args = parseArguments();
       eat("RightParen");
     }
-    return { type: "NewExpression", callee, arguments: args };
+    let expr: Expression = { type: "NewExpression", callee, arguments: args };
+    // new Foo().bar().baz() のチェーンを処理
+    while (true) {
+      if (current().type === "LeftParen") {
+        eat("LeftParen");
+        const callArgs = parseArguments();
+        eat("RightParen");
+        expr = { type: "CallExpression", callee: expr, arguments: callArgs };
+      } else if (current().type === "Dot" || current().type === "QuestionDot") {
+        const optional = current().type === "QuestionDot";
+        eat(current().type);
+        const property = parsePropertyKey();
+        expr = { type: "MemberExpression", object: expr, property, computed: false, optional } as any;
+      } else if (current().type === "LeftBracket") {
+        eat("LeftBracket");
+        const prop = parseExpression();
+        eat("RightBracket");
+        expr = { type: "MemberExpression", object: expr, property: prop, computed: true } as any;
+      } else {
+        break;
+      }
+    }
+    return expr;
   }
 
   // 引数リストのパース（SpreadElement 対応）

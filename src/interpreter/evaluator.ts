@@ -10,6 +10,22 @@ import {
 } from "./values.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
+import { JSPromise, drainMicrotasks, isJSPromise } from "../runtime/promise.js";
+
+// JSFunction を同期的に呼び出すヘルパー (Promise executor / then callback 用)
+function callJSFunctionSync(fn: JSFunction, thisValue: unknown, args: unknown[]): unknown {
+  const callEnv = new Environment(fn.closure, true);
+  const params: any[] = fn.params;
+  for (let i = 0; i < params.length; i++) {
+    if (params[i].type === "Identifier") {
+      callEnv.define(params[i].name, args[i]);
+    } else {
+      bindPattern(params[i], args[i], callEnv);
+    }
+  }
+  if (fn.name) callEnv.define(fn.name, fn);
+  return evalBlockSync(fn.body.body, callEnv);
+}
 
 // JSString 対応の truthiness 判定 (空文字列は falsy)
 function isTruthy(value: unknown): boolean {
@@ -197,6 +213,22 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
   env.defineReadOnly("Symbol", SymbolFn);
 
+  // Promise 組み込み
+  const PromiseConstructor: any = function PromiseCtor(executor: unknown) {
+    if (typeof executor !== "function" && !isJSFunction(executor)) throw new TypeError("Promise resolver is not a function");
+    return new JSPromise((resolve, reject) => {
+      if (isJSFunction(executor)) {
+        callJSFunctionSync(executor, undefined, [resolve, reject]);
+      } else {
+        (executor as Function)(resolve, reject);
+      }
+    });
+  };
+  PromiseConstructor.__nativeConstructor = true;
+  PromiseConstructor.resolve = (value: unknown) => JSPromise.resolve(value);
+  PromiseConstructor.reject = (reason: unknown) => JSPromise.reject(reason);
+  env.defineReadOnly("Promise", PromiseConstructor);
+
   // 外部から渡されたグローバル変数を注入 (VM eval フォールバック用)
   if (options.globals) {
     for (const [k, v] of Object.entries(options.globals)) {
@@ -218,6 +250,8 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
       const r = gen.next();
       if (r.done) { result = r.value; break; }
     }
+    // スクリプト実行完了後に microtask を drain
+    drainMicrotasks();
     return isJSString(result) ? jsStringToString(result) : result;
   } finally {
     _currentOnStep = null;
@@ -1178,6 +1212,28 @@ function* evalCallExpression(
     thisValue = yield* evalExpression(expr.callee.object, env);
     const key = yield* resolveMemberKey(expr.callee, env);
     fn = getProperty(thisValue as JSObject, key);
+    // JSPromise: getProperty が native then/catch を返すので、JSFunction handler をラップ
+    if (isJSPromise(thisValue) && (key === "then" || key === "catch") && typeof fn === "function") {
+      // JSPromise.then/catch with JSFunction handler wrapping
+      const nativeFn = fn as Function;
+      const callArgs = yield* evalArguments(expr.arguments, env);
+      const wrapHandler = (h: unknown) => {
+        if (isJSFunction(h)) return (v: unknown) => {
+          try { return callJSFunctionSync(h, undefined, [v]); }
+          catch (e) {
+            const unwrapped = e instanceof ThrowSignal ? e.value : e;
+            throw isJSString(unwrapped) ? jsStringToString(unwrapped) : unwrapped;
+          }
+        };
+        if (typeof h === "function") return h as (v: unknown) => unknown;
+        return undefined;
+      };
+      if (key === "then") {
+        return (thisValue as JSPromise).then(wrapHandler(callArgs[0]), wrapHandler(callArgs[1]));
+      } else {
+        return (thisValue as JSPromise).catch(wrapHandler(callArgs[0]));
+      }
+    }
     // JSFunction の .call / .apply / .bind
     if (fn === undefined && isJSFunction(thisValue)) {
       const jsFnObj = thisValue;
@@ -1207,6 +1263,7 @@ function* evalCallExpression(
         return bound;
       }
     }
+    // (JSPromise の then/catch は getProperty の前で処理済み)
     // JSString のメソッド: ネイティブ文字列メソッドに委譲
     if (fn === undefined && isJSString(thisValue)) {
       const str = jsStringToString(thisValue);
