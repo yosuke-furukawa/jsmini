@@ -73,10 +73,8 @@ new Promise((resolve) => {
 | ベンチ | TW | VM | VM/TW |
 |---|---|---|---|
 | Promise chain (1000 thens) | 5.21ms | 0.97ms | **5.4x** |
-| async/await (100 awaits) | 0.29ms | 0.21ms | **1.4x** |
+| async/await (100 awaits in loop) | 0.29ms | 0.21ms | **1.4x** |
 | Promise.all (100 promises) | 0.44ms | 0.26ms | **1.7x** |
-| Sync sum (10K) | 9.40ms | 2.26ms | 4.2x |
-| fib(25) | 470ms | 96ms / **0.44ms (JIT)** | **1068x** |
 
 ## 目標
 
