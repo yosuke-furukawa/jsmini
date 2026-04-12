@@ -46,10 +46,34 @@ JSPI 対応:
 
 ### 24-3: ベンチマーク
 
-- [ ] 24-3a: async loop (100 awaits): VM vs JSPI Wasm の比較
-- [ ] 24-3b: sync loop inside async function: JSPI で JIT の恩恵を受けるか
-- [ ] 24-3c: await のオーバーヘッド: JSPI vs VM YieldSignal
-- [ ] 24-3d: 既存ベンチとの比較 (全体の回帰なし確認)
+- [x] 24-3a: async loop scaling: N=100→5000 で JSPI vs VM
+- [x] 24-3b: heavy computation between awaits (50 chunks x 1000 iter)
+- [x] 24-3c: 既存 753 テスト回帰なし
+- [x] 24-3d: tier log 確認: call #3 → Wasm (JSPI) に tier-up
+
+### ベンチマーク結果
+
+**JSPI suspend/resume overhead (検証, Phase 24-1)**
+
+| 方式 | 1000 suspend/resume | vs JSPI |
+|---|---|---|
+| JSPI (Wasm native) | 0.49ms | baseline |
+| TW (generator yield) | 6.41ms | 13.2x 遅い |
+| VM (YieldSignal throw) | 7.66ms | 15.7x 遅い |
+
+**async loop scaling (Phase 24-3)**
+
+| N | VM async | JSPI JIT | JSPI/VM |
+|---|---|---|---|
+| 100 | 0.28ms | 0.92ms | 0.30x (compile overhead) |
+| 500 | 0.51ms | 0.47ms | 1.08x |
+| 1000 | 0.74ms | 0.74ms | 1.0x |
+| 5000 | 3.60ms | 3.64ms | 1.0x |
+
+**考察**: JSPI の suspend/resume 自体は 15.7x 速いが、jsmini の async ループでは
+await のたびに microtask を経由するため、VM と同等の速度に落ち着く。
+JSPI が本当に効くのは V8 の TurboFan が Wasm 内の同期部分を最適化できるケース。
+jsmini では async 関数全体が 1 つの Wasm 関数になるため、内部ループの最適化は限定的。
 
 ## 技術メモ
 
