@@ -414,7 +414,7 @@ export class VM {
     throw new TypeError("Not a function");
   }
 
-  // BytecodeFunction を直接呼び出す (ToPrimitive 等の内部用)
+  // BytecodeFunction を直接呼び出す (ToPrimitive, Promise handler 等の内部用)
   private callInternal(func: BytecodeFunction, thisValue: unknown, args: unknown[]): unknown {
     const locals = new Array(func.localCount).fill(undefined);
     for (let i = 0; i < args.length && i < func.paramCount; i++) {
@@ -428,17 +428,22 @@ export class VM {
       upvalueBoxes: [],
     });
     try {
-      this.run(baseFrameCount);
+      const runResult = this.run(baseFrameCount);
+      // run() が Return opcode で値を返すケース (frames が空になった場合)
+      if (runResult !== undefined) {
+        this.sp = savedSp;
+        return runResult;
+      }
+      const hasResult = this.sp > savedSp;
+      const result = hasResult ? this.stack[this.sp] : undefined;
+      this.sp = savedSp;
+      return result;
     } catch (e: any) {
       this.sp = savedSp;
       const throwValue = e?.__thrown ? e.value : e;
       if (this.unwindToHandler(throwValue)) return THROWN_SENTINEL;
       throw e;
     }
-    const hasResult = this.sp > savedSp;
-    const result = hasResult ? this.stack[this.sp] : undefined;
-    this.sp = savedSp;
-    return result;
   }
 
   // ToPrimitive: オブジェクトの valueOf/toString を呼んでプリミティブに変換

@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { evaluate } from "../interpreter/evaluator.js";
+import { vmEvaluate } from "../vm/index.js";
 
 function run(source: string): unknown[] {
   const logs: unknown[][] = [];
@@ -165,12 +166,55 @@ describe("Promise (TW)", () => {
   });
 
   it("resolve with another Promise (adopt)", () => {
-    // executor 内から外側の変数にアクセスする代わりに、直接 Promise チェーンで adopt
     const r = run(`
       Promise.resolve(77)
         .then(function(v) { return Promise.resolve(v); })
         .then(function(v) { console.log(v); });
     `);
     assert.deepEqual(r, [77]);
+  });
+});
+
+// ========== VM Promise tests ==========
+
+function runVM(source: string): unknown[] {
+  const logs: unknown[][] = [];
+  vmEvaluate(source, { console: { log: (...args: unknown[]) => logs.push(args) } });
+  return logs.map(l => l[0]);
+}
+
+describe("Promise (VM)", () => {
+  it("new Promise + then", () => {
+    assert.deepEqual(runVM(`new Promise(function(resolve) { resolve(42); }).then(function(v) { console.log(v); });`), [42]);
+  });
+
+  it("then chain", () => {
+    assert.deepEqual(runVM(`Promise.resolve(1).then(function(v) { return v + 10; }).then(function(v) { console.log(v); });`), [11]);
+  });
+
+  it("catch rejected", () => {
+    assert.deepEqual(runVM(`Promise.reject("err").catch(function(e) { console.log(e); });`), ["err"]);
+  });
+
+  it("execution order: sync before microtask", () => {
+    assert.deepEqual(runVM(`console.log("a"); Promise.resolve().then(function() { console.log("b"); }); console.log("c");`), ["a", "c", "b"]);
+  });
+
+  it("long chain", () => {
+    assert.deepEqual(runVM(`
+      Promise.resolve(0)
+        .then(function(v) { return v + 1; })
+        .then(function(v) { return v + 1; })
+        .then(function(v) { return v + 1; })
+        .then(function(v) { console.log(v); });
+    `), [3]);
+  });
+
+  it("reject → catch → then (recovery)", () => {
+    assert.deepEqual(runVM(`Promise.reject("bad").catch(function() { return "ok"; }).then(function(v) { console.log(v); });`), ["ok"]);
+  });
+
+  it("multiple then on same promise", () => {
+    assert.deepEqual(runVM(`var p = Promise.resolve(1); p.then(function() { console.log("a"); }); p.then(function() { console.log("b"); });`), ["a", "b"]);
   });
 });

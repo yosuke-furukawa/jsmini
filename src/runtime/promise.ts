@@ -11,6 +11,18 @@ export type PromiseReaction = {
   childPromise: JSPromise;
 };
 
+// ハンドラが呼び出し可能か (native function or BytecodeFunction/クロージャ)
+function isCallable(v: unknown): boolean {
+  if (typeof v === "function") return true;
+  if (typeof v === "object" && v !== null) {
+    // BytecodeFunction: "bytecode" プロパティを持つ
+    if ("bytecode" in v) return true;
+    // クロージャ: "__closure" プロパティを持つ
+    if ("__closure" in v) return true;
+  }
+  return false;
+}
+
 export class JSPromise {
   __promise__: true = true;
   state: PromiseState = "pending";
@@ -82,8 +94,8 @@ export class JSPromise {
   ): JSPromise {
     const child = new JSPromise();
     const reaction: PromiseReaction = {
-      onFulfilled: typeof onFulfilled === "function" ? onFulfilled : undefined,
-      onRejected: typeof onRejected === "function" ? onRejected : undefined,
+      onFulfilled: isCallable(onFulfilled) ? onFulfilled as any : undefined,
+      onRejected: isCallable(onRejected) ? onRejected as any : undefined,
       childPromise: child,
     };
 
@@ -119,6 +131,15 @@ export class JSPromise {
   }
 }
 
+// ========== Handler Wrapper Hook ==========
+// VM/TW がハンドラ呼び出し方式をカスタマイズするためのフック
+// デフォルトは直接呼び出し。VM は vm.callFunction でラップする
+let _handlerCaller: ((handler: (v: unknown) => unknown, value: unknown) => unknown) | null = null;
+
+export function setHandlerCaller(caller: ((handler: (v: unknown) => unknown, value: unknown) => unknown) | null): void {
+  _handlerCaller = caller;
+}
+
 // ========== PromiseReactionJob ==========
 
 function runReaction(reaction: PromiseReaction, type: "fulfilled" | "rejected", value: unknown): void {
@@ -127,8 +148,7 @@ function runReaction(reaction: PromiseReaction, type: "fulfilled" | "rejected", 
 
   if (handler) {
     try {
-      const result = handler(value);
-      // handler の戻り値で子 Promise を resolve
+      const result = _handlerCaller ? _handlerCaller(handler, value) : handler(value);
       child._resolve(result);
     } catch (e) {
       child._reject(e);
