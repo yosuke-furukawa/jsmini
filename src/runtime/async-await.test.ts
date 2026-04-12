@@ -417,6 +417,12 @@ describe("test262-inspired async/await edge cases", () => {
   });
 
   // async function as callback
-  it.todo("async function passed as then callback");
-  // TODO: async JSFunction as .then handler needs wrapping in microtask runner
+  it("async function passed as then callback", () => {
+    const r = run(`
+      Promise.resolve(5)
+        .then(async function(v) { return (await v) + 1; })
+        .then(function(v) { console.log(v); });
+    `);
+    assert.deepEqual(r, [6]);
+  });
 });

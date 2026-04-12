@@ -24,6 +24,36 @@ function callJSFunctionSync(fn: JSFunction, thisValue: unknown, args: unknown[])
     }
   }
   if (fn.name) callEnv.define(fn.name, fn);
+
+  // async 関数: Promise を返して generator + microtask で駆動
+  if ((fn as any).isAsync) {
+    hoistVarDeclarations(fn.body.body, callEnv);
+    hoistFunctionDeclarations(fn.body.body, callEnv);
+    const bodyGen = evalBlock(fn.body.body, callEnv);
+    return new JSPromise((resolve, reject) => {
+      function step(inputValue?: unknown): void {
+        try {
+          const r = bodyGen.next(inputValue);
+          if (r.done) { resolve!(r.value); return; }
+          const yielded = r.value;
+          if (yielded && typeof yielded === "object" && (yielded as any).__await__) {
+            JSPromise.resolve((yielded as any).value).then(
+              (v: unknown) => step(v),
+              (e: unknown) => {
+                try { const rr = bodyGen.throw(new ThrowSignal(e)); if (rr.done) resolve!(rr.value); else step(undefined); }
+                catch (err) { if (err instanceof ReturnSignal) { resolve!(err.value); } else { reject!(err instanceof ThrowSignal ? err.value : err); } }
+              },
+            );
+          } else { step(yielded); }
+        } catch (e) {
+          if (e instanceof ReturnSignal) { resolve!(e.value); return; }
+          reject!(e instanceof ThrowSignal ? (isJSString(e.value) ? jsStringToString(e.value) : e.value) : e);
+        }
+      }
+      step();
+    });
+  }
+
   return evalBlockSync(fn.body.body, callEnv);
 }
 
