@@ -31,10 +31,10 @@ JSPI 対応:
 
 ### 24-1: JSPI 基本検証
 
-- [ ] 24-1a: Node.js で WebAssembly.Suspending / WebAssembly.promising の動作確認
-- [ ] 24-1b: 手書き Wasm + JSPI で suspend/resume のミニマルサンプル
-- [ ] 24-1c: Wasm 内から JS の async 関数を呼んで結果を受け取るサンプル
-- [ ] 24-1d: suspend/resume のオーバーヘッド計測 (1000 回 suspend の所要時間)
+- [x] 24-1a: Node.js v24 + --experimental-wasm-jspi で Suspending / promising 確認
+- [x] 24-1b: 手書き Wasm: f(x) = awaitVal(x) + 1 で suspend/resume 動作確認
+- [x] 24-1c: awaitVal(10) → 20 → +1 = 21 が Promise 経由で返る
+- [x] 24-1d: ベンチ: JSPI 0.49ms vs VM 7.66ms (15.7x) vs TW 6.41ms (13.2x) @1000回
 
 ### 24-2: jsmini 統合
 
