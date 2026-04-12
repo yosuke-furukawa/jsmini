@@ -928,6 +928,11 @@ export function parse(source: string): Program {
 
   // Unary / Update
   function parseUnary(): Expression {
+    if (current().type === "Await") {
+      eat("Await");
+      const argument = parseUnary();
+      return { type: "AwaitExpression", argument } as any;
+    }
     if (current().type === "Bang" || current().type === "Tilde") {
       const operator = eat(current().type).value;
       const argument = parseUnary();

@@ -339,12 +339,34 @@ describe("test262-inspired Promise edge cases", () => {
 
 describe("test262-inspired async/await edge cases", () => {
   // return await vs return (different try/catch behavior)
-  it.todo("return await in try/catch catches rejection");
-  // TODO: try/catch + await rejection in TW needs generator.throw integration
+  it("return await in try/catch catches rejection", () => {
+    const r = run(`
+      async function f() {
+        try {
+          return await Promise.reject("err");
+        } catch(e) {
+          return "caught:" + e;
+        }
+      }
+      f().then(function(v) { console.log(v); });
+    `);
+    assert.deepEqual(r, ["caught:err"]);
+  });
 
   // await in loop
-  it.todo("await in for loop");
-  // TODO: for loop + await needs loop body to yield multiple times
+  it("await in for loop", () => {
+    const r = run(`
+      async function f() {
+        var sum = 0;
+        for (var i = 0; i < 5; i = i + 1) {
+          sum = sum + await Promise.resolve(i);
+        }
+        console.log(sum);
+      }
+      f();
+    `);
+    assert.deepEqual(r, [10]);
+  });
 
   // async function that never awaits
   it("async function with no await still returns Promise", () => {

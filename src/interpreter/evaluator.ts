@@ -1231,7 +1231,7 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment,
               (v: unknown) => step(v),
               (e: unknown) => {
                 try { const r = bodyGen.throw(new ThrowSignal(e)); if (r.done) resolve!(r.value instanceof ReturnSignal ? r.value.value : r.value); else step(undefined); }
-                catch (err) { reject!(err instanceof ThrowSignal ? err.value : err); }
+                catch (err) { if (err instanceof ReturnSignal) { resolve!(err.value); } else { reject!(err instanceof ThrowSignal ? err.value : err); } }
               },
             );
           } else {
@@ -1457,7 +1457,7 @@ function* evalCallExpression(
               (v: unknown) => step(v),
               (e: unknown) => {
                 try { const rr = bodyGen.throw(new ThrowSignal(e)); if (rr.done) resolve!(rr.value); else step(undefined); }
-                catch (err) { reject!(err instanceof ThrowSignal ? (isJSString(err.value) ? jsStringToString(err.value) : err.value) : err); }
+                catch (err) { if (err instanceof ReturnSignal) { resolve!(err.value); } else { reject!(err instanceof ThrowSignal ? (isJSString(err.value) ? jsStringToString(err.value) : err.value) : err); } }
               },
             );
           } else { step(yielded); }
