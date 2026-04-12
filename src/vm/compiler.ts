@@ -25,6 +25,7 @@ class BytecodeCompiler {
   private icSlotCount = 0;
   private hasRestParam = false;
   private isGenerator = false;
+  private isAsync = false;
   private upvalues: { name: string; parentSlot: number }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
@@ -164,6 +165,7 @@ class BytecodeCompiler {
       localCount: this.localCount,
       hasRestParam: this.hasRestParam,
       isGenerator: this.isGenerator,
+      isAsync: this.isAsync,
       bytecode: this.bytecode,
       constants: this.constants,
       handlers: this.handlers,
@@ -395,6 +397,7 @@ class BytecodeCompiler {
       case "FunctionDeclaration": {
         const fnCompiler = new BytecodeCompiler(this);
         if ((stmt as any).generator) fnCompiler.isGenerator = true;
+        if ((stmt as any).async) fnCompiler.isAsync = true;
         fnCompiler.compileFunctionBody(stmt.params, stmt.body.body);
         const fnBytecode = fnCompiler.finish(stmt.id.name);
         const fnIndex = this.addConstant(fnBytecode);
@@ -935,6 +938,7 @@ class BytecodeCompiler {
       case "FunctionExpression": {
         const fnCompiler = new BytecodeCompiler(this);
         if ((expr as any).generator) fnCompiler.isGenerator = true;
+        if ((expr as any).async) fnCompiler.isAsync = true;
         fnCompiler.compileFunctionBody(expr.params, expr.body.body);
         const fnBytecode = fnCompiler.finish(expr.id?.name ?? inferredName ?? "");
         const fnIndex = this.addConstant(fnBytecode);
@@ -1206,6 +1210,7 @@ class BytecodeCompiler {
 
       case "ArrowFunctionExpression": {
         const fnCompiler = new BytecodeCompiler(this);
+        if ((expr as any).async) fnCompiler.isAsync = true;
         if (expr.expression) {
           // 式本体: 暗黙の return
           fnCompiler.compileFunctionBody(expr.params, [
@@ -1217,6 +1222,12 @@ class BytecodeCompiler {
         const fnBytecode = fnCompiler.finish(inferredName ?? "");
         const fnIndex = this.addConstant(fnBytecode);
         this.emit("LdaConst", fnIndex);
+        break;
+      }
+
+      case "AwaitExpression": {
+        this.compileExpression((expr as any).argument);
+        this.emit("Await");
         break;
       }
 

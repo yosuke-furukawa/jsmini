@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { evaluate } from "../interpreter/evaluator.js";
+import { vmEvaluate } from "../vm/index.js";
 
 function run(source: string): unknown[] {
   const logs: unknown[][] = [];
@@ -164,5 +165,62 @@ describe("async/await (TW)", () => {
       f();
     `);
     assert.deepEqual(r, [6]);
+  });
+});
+
+// ========== VM async/await tests ==========
+
+function runVM(source: string): unknown[] {
+  const logs: unknown[][] = [];
+  vmEvaluate(source, { console: { log: (...args: unknown[]) => logs.push(args) } });
+  return logs.map(l => l[0]);
+}
+
+describe("async/await (VM)", () => {
+  it("async function returns Promise", () => {
+    assert.deepEqual(runVM(`async function f() { return 42; } f().then(function(v) { console.log(v); });`), [42]);
+  });
+
+  it("await Promise.resolve", () => {
+    assert.deepEqual(runVM(`async function f() { var x = await Promise.resolve(10); console.log(x); } f();`), [10]);
+  });
+
+  it("await non-Promise value", () => {
+    assert.deepEqual(runVM(`async function f() { var x = await 42; console.log(x); } f();`), [42]);
+  });
+
+  it("multiple awaits", () => {
+    assert.deepEqual(runVM(`async function f() { var a = await 1; var b = await 2; console.log(a + b); } f();`), [3]);
+  });
+
+  it("execution order: sync, async body, then after await", () => {
+    assert.deepEqual(runVM(`
+      console.log("a");
+      async function f() { console.log("b"); await 0; console.log("d"); }
+      f();
+      console.log("c");
+    `), ["a", "b", "c", "d"]);
+  });
+
+  it("async throw → catch", () => {
+    assert.deepEqual(runVM(`async function f() { throw "oops"; } f().catch(function(e) { console.log(e); });`), ["oops"]);
+  });
+
+  it("nested async", () => {
+    assert.deepEqual(runVM(`
+      async function inner() { return await 5; }
+      async function outer() { var x = await inner(); console.log(x); }
+      outer();
+    `), [5]);
+  });
+
+  it("async with Promise.all", () => {
+    assert.deepEqual(runVM(`
+      async function f() {
+        var r = await Promise.all([Promise.resolve(1), Promise.resolve(2)]);
+        console.log(r[0] + r[1]);
+      }
+      f();
+    `), [3]);
   });
 });
