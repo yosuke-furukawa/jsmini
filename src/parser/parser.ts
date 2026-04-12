@@ -10,6 +10,10 @@ export function parse(source: string): Program {
     return tokens[pos];
   }
 
+  function peek(): Token {
+    return tokens[pos + 1] ?? tokens[tokens.length - 1]; // EOF fallback
+  }
+
   function eat(type: TokenType): Token {
     const token = current();
     if (token.type !== type) {
@@ -54,6 +58,7 @@ export function parse(source: string): Program {
       return parseVariableDeclaration();
     }
     if (current().type === "Function") return parseFunctionDeclaration();
+    if (current().type === "Async" && peek().type === "Function") return parseAsyncFunctionDeclaration();
     if (current().type === "Class") return parseClassDeclaration();
     throw new SyntaxError(
       `Unexpected token ${current().type} at line ${current().line}, column ${current().column}`
@@ -69,6 +74,7 @@ export function parse(source: string): Program {
     }
     if (current().type === "Var") return parseVariableDeclaration();
     if (current().type === "Function") return parseFunctionDeclaration();
+    if (current().type === "Async" && peek().type === "Function") return parseAsyncFunctionDeclaration();
     if (current().type === "Return") return parseReturnStatement();
     if (current().type === "Throw") return parseThrowStatement();
     if (current().type === "Try") return parseTryStatement();
@@ -144,6 +150,23 @@ export function parse(source: string): Program {
       declarations,
       kind,
     };
+  }
+
+  // AsyncFunctionDeclaration = 'async' 'function' Identifier '(' params ')' BlockStatement
+  function parseAsyncFunctionDeclaration(): Statement {
+    eat("Async");
+    eat("Function");
+    const id = parseIdentifier();
+    eat("LeftParen");
+    resetParamState();
+    const params: any[] = [];
+    if (current().type !== "RightParen") {
+      params.push(parseParam());
+      while (current().type === "Comma") { eat("Comma"); params.push(parseParam()); }
+    }
+    eat("RightParen");
+    const body = parseBlockStatement() as any;
+    return { type: "FunctionDeclaration", id, params, body, async: true } as any;
   }
 
   // FunctionDeclaration = 'function' Identifier '(' params ')' BlockStatement
@@ -628,6 +651,12 @@ export function parse(source: string): Program {
 
   // Assignment = YieldExpression | ArrowFunction | LogicalOr ('=' Assignment)?
   function parseAssignment(): Expression {
+    // await expression
+    if (current().type === "Await") {
+      eat("Await");
+      const argument = parseAssignment();
+      return { type: "AwaitExpression", argument } as any;
+    }
     // yield expression
     if (current().type === "Yield") {
       eat("Yield");
@@ -899,6 +928,11 @@ export function parse(source: string): Program {
 
   // Unary / Update
   function parseUnary(): Expression {
+    if (current().type === "Await") {
+      eat("Await");
+      const argument = parseUnary();
+      return { type: "AwaitExpression", argument } as any;
+    }
     if (current().type === "Bang" || current().type === "Tilde") {
       const operator = eat(current().type).value;
       const argument = parseUnary();
@@ -925,7 +959,7 @@ export function parse(source: string): Program {
     return parseCallExpression();
   }
 
-  // NewExpression = 'new' Primary Arguments?
+  // NewExpression = 'new' Primary Arguments? ('.' Identifier | '(' args ')' | '[' expr ']')*
   function parseNewExpression(): Expression {
     eat("New");
     // callee は Primary のみ（MemberExpression チェーンはしない）
@@ -936,7 +970,29 @@ export function parse(source: string): Program {
       args = parseArguments();
       eat("RightParen");
     }
-    return { type: "NewExpression", callee, arguments: args };
+    let expr: Expression = { type: "NewExpression", callee, arguments: args };
+    // new Foo().bar().baz() のチェーンを処理
+    while (true) {
+      if (current().type === "LeftParen") {
+        eat("LeftParen");
+        const callArgs = parseArguments();
+        eat("RightParen");
+        expr = { type: "CallExpression", callee: expr, arguments: callArgs };
+      } else if (current().type === "Dot" || current().type === "QuestionDot") {
+        const optional = current().type === "QuestionDot";
+        eat(current().type);
+        const property = parsePropertyKey();
+        expr = { type: "MemberExpression", object: expr, property, computed: false, optional } as any;
+      } else if (current().type === "LeftBracket") {
+        eat("LeftBracket");
+        const prop = parseExpression();
+        eat("RightBracket");
+        expr = { type: "MemberExpression", object: expr, property: prop, computed: true } as any;
+      } else {
+        break;
+      }
+    }
+    return expr;
   }
 
   // 引数リストのパース（SpreadElement 対応）
@@ -1035,6 +1091,53 @@ export function parse(source: string): Program {
       case "Super":
         eat("Super");
         return { type: "Identifier", name: "__super__" };
+      case "Async":
+        if (peek().type === "Function") {
+          // async function expression
+          eat("Async");
+          eat("Function");
+          let id: any = null;
+          if (current().type === "Identifier") id = parseIdentifier();
+          eat("LeftParen");
+          resetParamState();
+          const params: any[] = [];
+          if (current().type !== "RightParen") {
+            params.push(parseParam());
+            while (current().type === "Comma") { eat("Comma"); params.push(parseParam()); }
+          }
+          eat("RightParen");
+          const body = parseBlockStatement() as any;
+          return { type: "FunctionExpression", id, params, body, async: true } as any;
+        }
+        // async arrow: async (params) => body or async ident => body
+        if (peek().type === "Identifier" && tokens[pos + 2]?.type === "Arrow") {
+          eat("Async");
+          const param = parseIdentifier();
+          eat("Arrow");
+          const arrowBody = current().type === "LeftBrace" ? parseBlockStatement() : parseAssignment();
+          return { type: "ArrowFunctionExpression", params: [param], body: arrowBody, async: true } as any;
+        }
+        if (peek().type === "LeftParen") {
+          // async (...) => body — try as async arrow
+          eat("Async");
+          eat("LeftParen");
+          resetParamState();
+          const arrowParams: any[] = [];
+          if (current().type !== "RightParen") {
+            arrowParams.push(parseParam());
+            while (current().type === "Comma") { eat("Comma"); arrowParams.push(parseParam()); }
+          }
+          eat("RightParen");
+          if (current().type === "Arrow") {
+            eat("Arrow");
+            const arrowBody = current().type === "LeftBrace" ? parseBlockStatement() : parseAssignment();
+            return { type: "ArrowFunctionExpression", params: arrowParams, body: arrowBody, async: true } as any;
+          }
+          // not an async arrow — fall through (unlikely)
+        }
+        // fallthrough: treat "async" as identifier
+        eat("Async");
+        return { type: "Identifier", name: "async" };
       case "Function":
         return parseFunctionExpression();
       case "NoSubstitutionTemplate":

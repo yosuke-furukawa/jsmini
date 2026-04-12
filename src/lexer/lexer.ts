@@ -36,6 +36,8 @@ Object.assign(KEYWORDS, {
   delete: "Delete",
   void: "Void",
   yield: "Yield",
+  async: "Async",
+  await: "Await",
   // undefined は予約語ではないのでキーワードに含めない
 });
 

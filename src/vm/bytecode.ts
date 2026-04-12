@@ -106,7 +106,8 @@ export type Opcode =
   | "Return"          // 関数から戻る (スタックトップが戻り値)
 
   // Generator
-  | "Yield";          // pop value, suspend generator, push received value on resume
+  | "Yield"           // pop value, suspend generator, push received value on resume
+  | "Await";          // pop value, suspend async function, resume when promise settles
 
 // 1つの命令
 export type Instruction = {
@@ -136,6 +137,7 @@ export type BytecodeFunction = {
   localCount: number;
   hasRestParam?: boolean;  // 最後のパラメータが ...rest
   isGenerator?: boolean;   // function* で定義されたか
+  isAsync?: boolean;       // async function で定義されたか
   bytecode: Instruction[];
   constants: unknown[];
   handlers: ExceptionHandler[];

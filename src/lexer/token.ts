@@ -94,6 +94,8 @@ export type TokenType =
   | "Comma"            // ,
   | "Semicolon"        // ;
   | "Yield"             // yield
+  | "Async"             // async
+  | "Await"             // await
   // Private identifier
   | "PrivateIdentifier"  // #name
   // Special

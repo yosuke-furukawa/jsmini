@@ -250,7 +250,7 @@ npm start -- --trace-tier 'function add(a,b){return a+b;} for(var i=0;i<110;i=i+
 ### テストを実行
 
 ```bash
-# ユニットテスト (584 tests)
+# ユニットテスト (685 tests)
 npm test
 
 # ベンチマーク
@@ -307,9 +307,15 @@ src/
   ir/
     types.ts            # SSA IR データ構造 (Block, Op, PhiOp)
     builder.ts          # Bytecode → SSA IR 変換
-    optimize.ts         # Constant Folding + DCE
-    codegen.ts          # IR → Wasm コード生成
+    optimize.ts         # Constant Folding + DCE + Inlining
+    licm.ts             # Loop-Invariant Code Motion
+    cse.ts              # Common Subexpression Elimination
+    strength-reduce.ts  # Strength Reduction (x*2→x<<1)
+    range.ts            # Range Analysis (i32/f64 判定)
+    codegen.ts          # IR → Wasm コード生成 + Stackifier
     printer.ts          # IR テキストダンプ
+  runtime/
+    promise.ts          # Promise + microtask キュー
   test262/
     runner.ts           # Test262 テストランナー (--vm 対応)
   bench.ts              # ベンチマーク
@@ -335,6 +341,10 @@ src/
 - [x] **Phase 17** — Type Specialization in IR (f64 + deopt)
 - [x] **Phase 18** — Inlining in IR (cube(square(x)) 1.47x faster)
 - [x] **Phase 19** — Stackifier + ループ Wasm 化 (for loop 79x, nested 80x)
+- [x] **Phase 20** — Range Analysis + i32 overflow → f64 昇格 + 配列 IR 対応
+- [x] **Phase 21** — LICM + CSE + Strength Reduction + クロージャ/プロパティ/Construct IR 対応
+- [x] **Phase 22** — Proper OSR (全 locals を Wasm に渡して途中から再開, 185x)
+- [ ] **Phase 23** — Promise + microtask キュー + async/await (進行中)
 
 詳細は [PLAN.md](./PLAN.md) を参照。
 
@@ -347,7 +357,11 @@ src/
 - [LEARN-Phase15.md](./LEARN-Phase15.md) — 構文対応拡大 + test262 ハーネス正直化 + V8 の歴史
 - [LEARN-Phase16.md](./LEARN-Phase16.md) — SSA IR + Constant Folding + CFG/SSA/Phi の解説
 - [LEARN-Phase17-19.md](./LEARN-Phase17-19.md) — Type Specialization + Inlining + Stackifier
+- [LEARN-Phase20.md](./LEARN-Phase20.md) — Range Analysis + overflow 安全性 + 配列 IR
+- [LEARN-Phase21.md](./LEARN-Phase21.md) — LICM + CSE + Strength Reduction + LICM×LoadProperty 79x
 - [RESEARCH-IR.md](./RESEARCH-IR.md) — V8, JSC, SpiderMonkey の IR 設計調査
+- [RESEARCH-Promise.md](./RESEARCH-Promise.md) — Promise/async-await + JSPI (Wasm Stack Switching)
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — jsmini 全パイプライン解説 (Lexer→Parser→VM→JIT→IR→Wasm)
 - [BENCHMARK.md](./BENCHMARK.md) — 全ベンチマーク結果
 - [RESEARCH-WHY-BYTECODE-IS-SLOW.md](./RESEARCH-WHY-BYTECODE-IS-SLOW.md) — なぜ Object VM は TW より遅いのか
 

@@ -7,6 +7,7 @@ import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsO
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
 import { Heap } from "./heap.js";
 import { evaluate } from "../interpreter/evaluator.js";
+import { JSPromise, drainMicrotasks, isJSPromise, setHandlerCaller } from "../runtime/promise.js";
 export { disassemble } from "./bytecode.js";
 
 type ConsoleOptions = {
@@ -408,6 +409,44 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
   vm.setGlobal("Symbol", SymbolFn);
 
+  // Promise 組み込み
+  // handler を vm.callFunction でラップ: BytecodeFunction/クロージャを VM で実行
+  const wrapVMHandler = (h: unknown) => {
+    if (h === undefined || h === null) return undefined;
+    if (typeof h === "function") return h as (v: unknown) => unknown;
+    // BytecodeFunction or クロージャ → vm.callFunction でラップ
+    return (v: unknown) => vm.callFunction(h, undefined, [v]);
+  };
+  const PromiseConstructor: any = function PromiseCtor(executor: unknown) {
+    return new JSPromise((resolve, reject) => {
+      try {
+        if (typeof executor === "function") {
+          executor(resolve, reject);
+        } else {
+          // BytecodeFunction / クロージャ
+          vm.callFunction(executor, undefined, [resolve, reject]);
+        }
+      } catch (e: any) {
+        const reason = e?.__thrown ? e.value : e;
+        reject(reason);
+      }
+    });
+  };
+  PromiseConstructor.resolve = (value: unknown) => JSPromise.resolve(value);
+  PromiseConstructor.reject = (reason: unknown) => JSPromise.reject(reason);
+  PromiseConstructor.all = (promises: unknown[]) => JSPromise.all(promises);
+  PromiseConstructor.race = (promises: unknown[]) => JSPromise.race(promises);
+  PromiseConstructor.allSettled = (promises: unknown[]) => JSPromise.allSettled(promises);
+  PromiseConstructor.any = (promises: unknown[]) => JSPromise.any(promises);
+  vm.setGlobal("Promise", PromiseConstructor);
+
+  // Promise handler を VM の callFunction で実行するフック
+  setHandlerCaller((handler, value) => {
+    if (typeof handler === "function") return handler(value);
+    // BytecodeFunction / クロージャ → vm.callFunction
+    return vm.callFunction(handler as any, undefined, [value]);
+  });
+
   // eval: TW にフォールバック (VM のグローバル変数を TW env に注入)
   vm.setGlobal("eval", (code: unknown) => {
     if (typeof code !== "string" && !isJSString(code)) return code;
@@ -441,6 +480,10 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   if (options.maxSteps) vm.maxSteps = options.maxSteps;
 
   const rawValue = vm.execute(func);
+  // スクリプト実行完了後に microtask を drain
+  drainMicrotasks();
+  // handler caller をリセット (次の vmEvaluate 呼び出しで再設定される)
+  setHandlerCaller(null);
   // JSString → JS string に変換して返す
   const value = isJSString(rawValue) ? jsStringToString(rawValue) : rawValue;
 

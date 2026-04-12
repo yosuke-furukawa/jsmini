@@ -10,6 +10,52 @@ import {
 } from "./values.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
+import { JSPromise, drainMicrotasks, isJSPromise } from "../runtime/promise.js";
+
+// JSFunction を同期的に呼び出すヘルパー (Promise executor / then callback 用)
+function callJSFunctionSync(fn: JSFunction, thisValue: unknown, args: unknown[]): unknown {
+  const callEnv = new Environment(fn.closure, true);
+  const params: any[] = fn.params;
+  for (let i = 0; i < params.length; i++) {
+    if (params[i].type === "Identifier") {
+      callEnv.define(params[i].name, args[i]);
+    } else {
+      bindPattern(params[i], args[i], callEnv);
+    }
+  }
+  if (fn.name) callEnv.define(fn.name, fn);
+
+  // async 関数: Promise を返して generator + microtask で駆動
+  if ((fn as any).isAsync) {
+    hoistVarDeclarations(fn.body.body, callEnv);
+    hoistFunctionDeclarations(fn.body.body, callEnv);
+    const bodyGen = evalBlock(fn.body.body, callEnv);
+    return new JSPromise((resolve, reject) => {
+      function step(inputValue?: unknown): void {
+        try {
+          const r = bodyGen.next(inputValue);
+          if (r.done) { resolve!(r.value); return; }
+          const yielded = r.value;
+          if (yielded && typeof yielded === "object" && (yielded as any).__await__) {
+            JSPromise.resolve((yielded as any).value).then(
+              (v: unknown) => step(v),
+              (e: unknown) => {
+                try { const rr = bodyGen.throw(new ThrowSignal(e)); if (rr.done) resolve!(rr.value); else step(undefined); }
+                catch (err) { if (err instanceof ReturnSignal) { resolve!(err.value); } else { reject!(err instanceof ThrowSignal ? err.value : err); } }
+              },
+            );
+          } else { step(yielded); }
+        } catch (e) {
+          if (e instanceof ReturnSignal) { resolve!(e.value); return; }
+          reject!(e instanceof ThrowSignal ? (isJSString(e.value) ? jsStringToString(e.value) : e.value) : e);
+        }
+      }
+      step();
+    });
+  }
+
+  return evalBlockSync(fn.body.body, callEnv);
+}
 
 // JSString 対応の truthiness 判定 (空文字列は falsy)
 function isTruthy(value: unknown): boolean {
@@ -197,6 +243,32 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
   env.defineReadOnly("Symbol", SymbolFn);
 
+  // Promise 組み込み
+  const PromiseConstructor: any = function PromiseCtor(executor: unknown) {
+    if (typeof executor !== "function" && !isJSFunction(executor)) throw new TypeError("Promise resolver is not a function");
+    return new JSPromise((resolve, reject) => {
+      try {
+        if (isJSFunction(executor)) {
+          callJSFunctionSync(executor, undefined, [resolve, reject]);
+        } else {
+          (executor as Function)(resolve, reject);
+        }
+      } catch (e) {
+        // ThrowSignal を unwrap して reject
+        const unwrapped = e instanceof ThrowSignal ? e.value : e;
+        reject(isJSString(unwrapped) ? jsStringToString(unwrapped) : unwrapped);
+      }
+    });
+  };
+  PromiseConstructor.__nativeConstructor = true;
+  PromiseConstructor.resolve = (value: unknown) => JSPromise.resolve(value);
+  PromiseConstructor.reject = (reason: unknown) => JSPromise.reject(reason);
+  PromiseConstructor.all = (promises: unknown[]) => JSPromise.all(promises);
+  PromiseConstructor.race = (promises: unknown[]) => JSPromise.race(promises);
+  PromiseConstructor.allSettled = (promises: unknown[]) => JSPromise.allSettled(promises);
+  PromiseConstructor.any = (promises: unknown[]) => JSPromise.any(promises);
+  env.defineReadOnly("Promise", PromiseConstructor);
+
   // 外部から渡されたグローバル変数を注入 (VM eval フォールバック用)
   if (options.globals) {
     for (const [k, v] of Object.entries(options.globals)) {
@@ -218,6 +290,8 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
       const r = gen.next();
       if (r.done) { result = r.value; break; }
     }
+    // スクリプト実行完了後に microtask を drain
+    drainMicrotasks();
     return isJSString(result) ? jsStringToString(result) : result;
   } finally {
     _currentOnStep = null;
@@ -296,6 +370,7 @@ function hoistFunctionDeclarations(stmts: Statement[], env: Environment): void {
         prototype: {},
       };
       if ((stmt as any).generator) (fn as any).isGenerator = true;
+      if ((stmt as any).async) (fn as any).isAsync = true;
       env.define(stmt.id.name, fn);
     }
   }
@@ -777,6 +852,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         prototype: {},
       };
       if ((expr as any).generator) (fn as any).isGenerator = true;
+      if ((expr as any).async) (fn as any).isAsync = true;
       // 名前付き関数式の場合、自身のスコープで自分を参照可能にする
       if (expr.id) {
         const fnEnv = new Environment(env);
@@ -805,6 +881,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         isArrow: true,
         prototype: undefined as any, // アロー関数は prototype を持たない
       };
+      if ((expr as any).async) (fn as any).isAsync = true;
       return fn;
     }
     case "TemplateLiteral": {
@@ -1012,6 +1089,12 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       const value = expr.argument ? yield* evalExpression(expr.argument, env) : undefined;
       return yield value; // host yield — suspends generator
     }
+    case "AwaitExpression": {
+      const value = expr.argument ? yield* evalExpression(expr.argument, env) : undefined;
+      // await は yield と同じ: host generator を suspend して、
+      // async 関数の runner が Promise.resolve(value).then(resume) で再開する
+      return yield { __await__: true, value };
+    }
   }
 }
 
@@ -1139,6 +1222,61 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment,
     return genObj;
   }
 
+  // Async function: return Promise, drive body via generator + microtask
+  if ((jsFn as any).isAsync) {
+    const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
+    if (overrideThis !== undefined) fnEnv.setThis(overrideThis);
+    if (!jsFn.isArrow) {
+      const argsObj = Object.create(null);
+      for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+      argsObj.length = args.length;
+      fnEnv.define("arguments", argsObj);
+    }
+    for (let i = 0; i < jsFn.params.length; i++) {
+      const param = jsFn.params[i];
+      if (param.type === "RestElement") {
+        fnEnv.define(param.argument.name, args.slice(i));
+      } else {
+        yield* bindParam(param, i < args.length ? args[i] : undefined, fnEnv, fnEnv);
+      }
+    }
+    hoistVarDeclarations(jsFn.body.body, fnEnv);
+    hoistFunctionDeclarations(jsFn.body.body, fnEnv);
+
+    const bodyGen = evalBlock(jsFn.body.body, fnEnv);
+
+    return new JSPromise((resolve, reject) => {
+      function step(inputValue?: unknown): void {
+        try {
+          const { done, value } = bodyGen.next(inputValue);
+          if (done) {
+            // return or function end
+            resolve!(value instanceof ReturnSignal ? value.value : value);
+            return;
+          }
+          // value is { __await__: true, value: awaitedExpr }
+          if (value && typeof value === "object" && (value as any).__await__) {
+            const awaited = (value as any).value;
+            JSPromise.resolve(awaited).then(
+              (v: unknown) => step(v),
+              (e: unknown) => {
+                try { const r = bodyGen.throw(new ThrowSignal(e)); if (r.done) resolve!(r.value instanceof ReturnSignal ? r.value.value : r.value); else step(undefined); }
+                catch (err) { if (err instanceof ReturnSignal) { resolve!(err.value); } else { reject!(err instanceof ThrowSignal ? err.value : err); } }
+              },
+            );
+          } else {
+            // non-await yield (shouldn't happen in async)
+            step(value);
+          }
+        } catch (e) {
+          if (e instanceof ReturnSignal) { resolve!(e.value); return; }
+          reject!(e instanceof ThrowSignal ? (isJSString(e.value) ? jsStringToString(e.value) : e.value) : e);
+        }
+      }
+      step();
+    });
+  }
+
   const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
   if (overrideThis !== undefined) fnEnv.setThis(overrideThis);
   // arguments オブジェクト (アロー関数以外)
@@ -1178,6 +1316,28 @@ function* evalCallExpression(
     thisValue = yield* evalExpression(expr.callee.object, env);
     const key = yield* resolveMemberKey(expr.callee, env);
     fn = getProperty(thisValue as JSObject, key);
+    // JSPromise: getProperty が native then/catch を返すので、JSFunction handler をラップ
+    if (isJSPromise(thisValue) && (key === "then" || key === "catch") && typeof fn === "function") {
+      // JSPromise.then/catch with JSFunction handler wrapping
+      const nativeFn = fn as Function;
+      const callArgs = yield* evalArguments(expr.arguments, env);
+      const wrapHandler = (h: unknown) => {
+        if (isJSFunction(h)) return (v: unknown) => {
+          try { return callJSFunctionSync(h, undefined, [v]); }
+          catch (e) {
+            const unwrapped = e instanceof ThrowSignal ? e.value : e;
+            throw isJSString(unwrapped) ? jsStringToString(unwrapped) : unwrapped;
+          }
+        };
+        if (typeof h === "function") return h as (v: unknown) => unknown;
+        return undefined;
+      };
+      if (key === "then") {
+        return (thisValue as JSPromise).then(wrapHandler(callArgs[0]), wrapHandler(callArgs[1]));
+      } else {
+        return (thisValue as JSPromise).catch(wrapHandler(callArgs[0]));
+      }
+    }
     // JSFunction の .call / .apply / .bind
     if (fn === undefined && isJSFunction(thisValue)) {
       const jsFnObj = thisValue;
@@ -1207,6 +1367,7 @@ function* evalCallExpression(
         return bound;
       }
     }
+    // (JSPromise の then/catch は getProperty の前で処理済み)
     // JSString のメソッド: ネイティブ文字列メソッドに委譲
     if (fn === undefined && isJSString(thisValue)) {
       const str = jsStringToString(thisValue);
@@ -1293,6 +1454,51 @@ function* evalCallExpression(
   }
 
   const jsFn = fn;
+
+  // Async function: return Promise, drive body with generator + microtask
+  if ((jsFn as any).isAsync) {
+    const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
+    if (!jsFn.isArrow) {
+      fnEnv.setThis(thisValue);
+      const argsObj = Object.create(null);
+      for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+      argsObj.length = args.length;
+      fnEnv.define("arguments", argsObj);
+    }
+    for (let i = 0; i < jsFn.params.length; i++) {
+      const param = jsFn.params[i];
+      if (param.type === "RestElement") {
+        fnEnv.define(param.argument.name, args.slice(i));
+      } else {
+        yield* bindParam(param, i < args.length ? args[i] : undefined, fnEnv, fnEnv);
+      }
+    }
+    hoistVarDeclarations(jsFn.body.body, fnEnv);
+    hoistFunctionDeclarations(jsFn.body.body, fnEnv);
+    const bodyGen = evalBlock(jsFn.body.body, fnEnv);
+    return new JSPromise((resolve, reject) => {
+      function step(inputValue?: unknown): void {
+        try {
+          const r = bodyGen.next(inputValue);
+          if (r.done) { resolve!(r.value); return; }
+          const yielded = r.value;
+          if (yielded && typeof yielded === "object" && (yielded as any).__await__) {
+            JSPromise.resolve((yielded as any).value).then(
+              (v: unknown) => step(v),
+              (e: unknown) => {
+                try { const rr = bodyGen.throw(new ThrowSignal(e)); if (rr.done) resolve!(rr.value); else step(undefined); }
+                catch (err) { if (err instanceof ReturnSignal) { resolve!(err.value); } else { reject!(err instanceof ThrowSignal ? (isJSString(err.value) ? jsStringToString(err.value) : err.value) : err); } }
+              },
+            );
+          } else { step(yielded); }
+        } catch (e) {
+          if (e instanceof ReturnSignal) { resolve!(e.value); return; }
+          reject!(e instanceof ThrowSignal ? (isJSString(e.value) ? jsStringToString(e.value) : e.value) : e);
+        }
+      }
+      step();
+    });
+  }
 
   // Generator function: return generator object instead of executing to completion
   if ((jsFn as any).isGenerator) {

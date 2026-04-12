@@ -8,6 +8,7 @@ import { isJSSymbol } from "./js-symbol.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 import { Heap } from "./heap.js";
 import { compileMultiSync } from "../jit/wasm-compiler.js";
+import { JSPromise, enqueueMicrotask } from "../runtime/promise.js";
 
 // JSString 対応の truthiness 判定 (空文字列は falsy)
 function isTruthy(value: unknown): boolean {
@@ -222,6 +223,65 @@ export class VM {
     return Array.from({ length: func.icSlotCount || 0 }, createICSlot);
   }
 
+  // Async function → JSPromise を返し、内部 VM で body を駆動
+  private runAsyncFunction(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[]): JSPromise {
+    const vm = new VM();
+    vm.globals = this.globals;
+    vm.heap = this.heap;
+    vm.objectPrototype = this.objectPrototype;
+    vm.arrayPrototype = this.arrayPrototype;
+    vm.stringPrototype = this.stringPrototype;
+
+    // Generator と同じ状態管理
+    let pc = 0;
+    let savedLocals = locals.slice();
+    let savedStack: unknown[] = [];
+
+    return new JSPromise((resolve, reject) => {
+      function step(inputValue?: unknown): void {
+        vm.sp = -1;
+        for (const v of savedStack) vm.push(v);
+        if (pc > 0) vm.push(inputValue); // await の結果
+
+        vm.frames.push({
+          func, pc, locals: savedLocals,
+          thisValue: undefined,
+          icSlots: vm.createICSlots(func),
+          upvalueBoxes,
+        });
+
+        try {
+          vm._runBaseFrameCount = vm.frames.length - 1;
+          const result = vm.run(vm.frames.length - 1);
+          // 正常終了 (return or 関数末尾)
+          resolve!(result);
+        } catch (e) {
+          if (e instanceof YieldSignal) {
+            // await で中断: 状態を保存 (スタック上の値も保存)
+            const currentFrame = vm.frames[vm.frames.length - 1];
+            pc = currentFrame.pc;
+            savedLocals = currentFrame.locals;
+            // スタックを保存 (sum + await i の sum 等がスタックに残る)
+            savedStack = [];
+            for (let si = 0; si <= vm.sp; si++) savedStack.push(vm.stack[si]);
+            vm.frames.pop();
+            // await した値を Promise.resolve して resume
+            const awaitedValue = e.value;
+            JSPromise.resolve(awaitedValue).then(
+              (v: unknown) => step(v),
+              (err: unknown) => reject!(err),
+            );
+          } else {
+            // throw → reject
+            const thrown = (e as any)?.__thrown ? (e as any).value : e;
+            reject!(thrown);
+          }
+        }
+      }
+      step();
+    });
+  }
+
   // GeneratorObject を作成
   private createGeneratorObject(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[]): GeneratorObject {
     const vm = new VM();
@@ -414,7 +474,7 @@ export class VM {
     throw new TypeError("Not a function");
   }
 
-  // BytecodeFunction を直接呼び出す (ToPrimitive 等の内部用)
+  // BytecodeFunction を直接呼び出す (ToPrimitive, Promise handler 等の内部用)
   private callInternal(func: BytecodeFunction, thisValue: unknown, args: unknown[]): unknown {
     const locals = new Array(func.localCount).fill(undefined);
     for (let i = 0; i < args.length && i < func.paramCount; i++) {
@@ -428,17 +488,22 @@ export class VM {
       upvalueBoxes: [],
     });
     try {
-      this.run(baseFrameCount);
+      const runResult = this.run(baseFrameCount);
+      // run() が Return opcode で値を返すケース (frames が空になった場合)
+      if (runResult !== undefined) {
+        this.sp = savedSp;
+        return runResult;
+      }
+      const hasResult = this.sp > savedSp;
+      const result = hasResult ? this.stack[this.sp] : undefined;
+      this.sp = savedSp;
+      return result;
     } catch (e: any) {
       this.sp = savedSp;
       const throwValue = e?.__thrown ? e.value : e;
       if (this.unwindToHandler(throwValue)) return THROWN_SENTINEL;
       throw e;
     }
-    const hasResult = this.sp > savedSp;
-    const result = hasResult ? this.stack[this.sp] : undefined;
-    this.sp = savedSp;
-    return result;
   }
 
   // ToPrimitive: オブジェクトの valueOf/toString を呼んでプリミティブに変換
@@ -1206,7 +1271,11 @@ export class VM {
             }
             // arguments オブジェクト: パラメータの直後のスロット
             this.setArguments(fn, locals, args);
-            if (fn.isGenerator) {
+            if (fn.isAsync) {
+              // Async: JSPromise を返し、body を generator 的に microtask で駆動
+              const asyncPromise = this.runAsyncFunction(fn, locals, closureBoxes);
+              this.push(asyncPromise);
+            } else if (fn.isGenerator) {
               // Generator: フレームを push せず、GeneratorObject を返す
               const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
               this.push(genObj);
@@ -1248,7 +1317,10 @@ export class VM {
               locals[i] = i < args.length ? args[i] : undefined;
             }
             this.setArguments(fn, locals, args);
-            if (fn.isGenerator) {
+            if (fn.isAsync) {
+              const asyncPromise = this.runAsyncFunction(fn, locals, closure.capturedBoxes);
+              this.push(asyncPromise);
+            } else if (fn.isGenerator) {
               const genObj = this.createGeneratorObject(fn, locals, closure.capturedBoxes);
               this.push(genObj);
             } else {
@@ -1266,7 +1338,10 @@ export class VM {
               locals[i] = i < args.length ? args[i] : undefined;
             }
             this.setArguments(fn, locals, args);
-            if (fn.isGenerator) {
+            if (fn.isAsync) {
+              const asyncPromise = this.runAsyncFunction(fn, locals, []);
+              this.push(asyncPromise);
+            } else if (fn.isGenerator) {
               const genObj = this.createGeneratorObject(fn, locals, []);
               this.push(genObj);
             } else {
@@ -1389,6 +1464,12 @@ export class VM {
             return returnValue;
           }
           break;
+        }
+
+        // Await: same mechanism as Yield (suspend via signal)
+        case "Await": {
+          const value = this.pop();
+          throw new YieldSignal(value); // reuse YieldSignal for suspend
         }
 
         // Generator yield
