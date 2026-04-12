@@ -1272,11 +1272,16 @@ export class VM {
             // arguments オブジェクト: パラメータの直後のスロット
             this.setArguments(fn, locals, args);
             if (fn.isAsync) {
-              // Async: JSPromise を返し、body を generator 的に microtask で駆動
+              // Async: JIT (JSPI) を試みる
+              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.jit) {
+                const jitResult = this.jit.tryCall(fn, args, closureBoxes.map(b => b.value));
+                if (jitResult !== null) { this.push(jitResult.result); break; }
+              }
+              // JIT 不可 → VM で実行
               const asyncPromise = this.runAsyncFunction(fn, locals, closureBoxes);
               this.push(asyncPromise);
             } else if (fn.isGenerator) {
-              // Generator: フレームを push せず、GeneratorObject を返す
               const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
               this.push(genObj);
             } else {
@@ -1318,6 +1323,11 @@ export class VM {
             }
             this.setArguments(fn, locals, args);
             if (fn.isAsync) {
+              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.jit) {
+                const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
+                if (jitResult !== null) { this.push(jitResult.result); break; }
+              }
               const asyncPromise = this.runAsyncFunction(fn, locals, closure.capturedBoxes);
               this.push(asyncPromise);
             } else if (fn.isGenerator) {
@@ -1339,6 +1349,11 @@ export class VM {
             }
             this.setArguments(fn, locals, args);
             if (fn.isAsync) {
+              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.jit) {
+                const jitResult = this.jit.tryCall(fn, args, [], thisObj);
+                if (jitResult !== null) { this.push(jitResult.result); break; }
+              }
               const asyncPromise = this.runAsyncFunction(fn, locals, []);
               this.push(asyncPromise);
             } else if (fn.isGenerator) {

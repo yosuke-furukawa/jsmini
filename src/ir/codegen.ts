@@ -494,12 +494,25 @@ function emitOp(
     }
 
     case "Call": {
-      // 自己再帰: call 0 (自分自身の関数 index)
-      // args: [calleeRef, arg0, arg1, ...]
-      for (let i = 1; i < op.args.length; i++) {
-        emitLoadValue(op.args[i], body, opToLocal, opById, forceF64);
+      if (op.calleeName === "__await") {
+        // JSPI: call import $__await(value) → suspend/resume
+        // args: [value] (calleeRef なし、Await は単一引数)
+        for (const argId of op.args) {
+          emitLoadValue(argId, body, opToLocal, opById, forceF64);
+        }
+        body.push(WASM_OP.call, 0); // import index 0 = __await
+      } else {
+        // 自己再帰: call (import count + 0)
+        // args: [calleeRef, arg0, arg1, ...]
+        for (let i = 1; i < op.args.length; i++) {
+          emitLoadValue(op.args[i], body, opToLocal, opById, forceF64);
+        }
+        // func index = imports + 0 (自分自身)
+        // import count は compileIRToWasm で builder.importCount として設定
+        // ここでは hasAwait flag で判定: __await import があれば +1
+        const hasAwaitImport = irFunc.blocks.some(b => b.ops.some(o => o.opcode === "Call" && o.calleeName === "__await"));
+        body.push(WASM_OP.call, hasAwaitImport ? 1 : 0);
       }
-      body.push(WASM_OP.call, 0); // function index 0 = 自分自身
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
@@ -814,16 +827,19 @@ function getReturnType(irFunc: IRFunction): IRType {
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
-export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; memory?: WebAssembly.Memory } | null {
+export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; memory?: WebAssembly.Memory; hasAwait?: boolean; jspiWrapped?: (...args: number[]) => Promise<number> } | null {
   try {
     // IR に Wasm 化できない Op が含まれてたらスキップ
     let hasArrayOps = false;
     let hasSelfRecursion = false;
+    let hasAwait = false;
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if (op.opcode === "Call") {
-          if (op.calleeName === irFunc.name && !hasArrayOps) {
-            hasSelfRecursion = true; // 自己再帰は Wasm call で対応可能 (配列なし)
+          if (op.calleeName === "__await") {
+            hasAwait = true; // JSPI await → import call
+          } else if (op.calleeName === irFunc.name && !hasArrayOps) {
+            hasSelfRecursion = true;
           } else {
             return null; // 他の関数 or 自己再帰+配列 → 未対応
           }
@@ -839,6 +855,13 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     }
 
     const builder = new WasmBuilder();
+
+    // JSPI: __await import を追加 (型は wasmType に合わせる)
+    if (hasAwait) {
+      // Range Analysis の結果に合わせて f64 or i32
+      const awaitType = functionNeedsF64(irFunc) ? WASM_TYPE.f64 : WASM_TYPE.i32;
+      builder.addImport("env", "__await", [awaitType], [awaitType]);
+    }
 
     // Range Analysis: i32 で overflow するなら全体を f64 に昇格
     const useF64 = functionNeedsF64(irFunc);
@@ -981,8 +1004,28 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     const wasmBytes = builder.build();
 
     const module = new WebAssembly.Module(wasmBytes);
-    const instance = new WebAssembly.Instance(module);
+
+    // JSPI: __await import を Suspending でラップ
+    const importObject: Record<string, Record<string, unknown>> = {};
+    if (hasAwait && typeof (WebAssembly as any).Suspending === "function") {
+      importObject.env = {
+        __await: new (WebAssembly as any).Suspending(async (v: unknown) => {
+          // Promise.resolve で await した値を返す
+          const resolved = await Promise.resolve(v);
+          return resolved;
+        }),
+      };
+    }
+
+    const instance = new WebAssembly.Instance(module, hasAwait ? importObject : undefined);
     const memory = hasPropertyOps ? (instance.exports as any).memory as WebAssembly.Memory : undefined;
+
+    // JSPI: export を promising でラップ
+    let jspiWrapped: ((...args: number[]) => Promise<number>) | undefined;
+    if (hasAwait && typeof (WebAssembly as any).promising === "function") {
+      jspiWrapped = (WebAssembly as any).promising(instance.exports[irFunc.name]) as any;
+    }
+
     return {
       instance,
       funcName: irFunc.name,
@@ -991,10 +1034,12 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
       upvalueCount: upvalueCount > 0 ? upvalueCount : undefined,
       hasThis: hasThis || undefined,
       memory,
+      hasAwait: hasAwait || undefined,
+      jspiWrapped,
     };
   } catch (e: any) {
     // Wasm コンパイルエラー → null (フォールバック)
-    // Wasm コンパイルエラー → フォールバック
+    if (typeof process !== "undefined" && process.env?.DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e);
     return null;
   }
 }
