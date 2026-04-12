@@ -21,27 +21,31 @@ new Promise((resolve) => {
 
 ## ステップ
 
-### 23-1: Promise オブジェクト
+### 23-1: Promise オブジェクト (TW)
 
 - [x] 23-1a: `src/runtime/promise.ts` — JSPromise クラス (state/result/reactions)
 - [x] 23-1b: `new Promise(executor)` — executor に resolve/reject を渡して即実行
 - [x] 23-1c: `promise.then(onFulfilled, onRejected)` — ハンドラ登録、新 Promise を返す
 - [x] 23-1d: `promise.catch(onRejected)` — `.then(undefined, onRejected)` のエイリアス
-- [x] 23-1e: テスト 10 件パス (then, chain, catch, resolve, reject, execution order, throw→catch, adopt)
+- [x] 23-1e: テスト 19 件パス (then, chain, catch, resolve, reject, execution order, throw→catch, nested, long chain, multi-then, recovery, executor throw, interleaved, adopt 等)
 
 ### 23-2: Microtask キュー
 
-- [x] 23-2a: microtask キュー実装 (FIFO) — enqueueMicrotask / drainMicrotasks
+- [x] 23-2a: microtask キュー実装 (FIFO 配列) — enqueueMicrotask / drainMicrotasks
 - [x] 23-2b: resolve/reject 時にハンドラを microtask キューに enqueue
-- [x] 23-2c: evaluate() 終了後に microtask を drain
-- [x] 23-2d: then チェーン: コールバックの戻り値で次の Promise を resolve
+- [x] 23-2c: evaluate() / vmEvaluate() 終了後に microtask を drain
+- [x] 23-2d: drain 中に追加された microtask も処理 (then チェーン伝播)
 - [x] 23-2e: テスト済み (実行順序 "a,c,b" = sync → microtask)
 
-### 23-3: Promise.resolve / Promise.reject
+### 23-3: Promise.resolve / Promise.reject + VM 対応
 
-- [x] 23-3a: `Promise.resolve(value)` — fulfilled な Promise を返す
-- [x] 23-3b: `Promise.reject(reason)` — rejected な Promise を返す
-- [x] 23-3c: テスト済み (Promise.resolve, Promise.reject)
+- [x] 23-3a: `Promise.resolve(value)` / `Promise.reject(reason)` 静的メソッド
+- [x] 23-3b: VM 対応: setHandlerCaller フックで BytecodeFunction を vm.callFunction で実行
+- [x] 23-3c: VM 対応: isCallable で BytecodeFunction/クロージャを Promise handler として受け入れ
+- [x] 23-3d: VM 対応: callInternal の run() 戻り値を正しく返す修正
+- [x] 23-3e: VM テスト 7 件パス (then, chain, catch, order, long chain, recovery, multi-then)
+- [x] 23-3f: Parser: `new Foo().method()` チェーン対応
+- [x] 23-3g: ベンチ: Promise chain 1000 thens — VM 0.89ms (TW 5.0ms の 5.6x)
 
 ※ `Promise.all` / `Promise.race` はエンジン内部の対応不要 (JS で実装可能)。必要なら後から追加。
 
@@ -64,7 +68,7 @@ new Promise((resolve) => {
 
 - `new Promise` + `.then()` + `.catch()` が動く
 - microtask キューで正しい実行順序 (sync → microtask)
-- `Promise.resolve` / `Promise.all` / `Promise.race`
+- `Promise.resolve` / `Promise.reject`
 - `async function` + `await` が動く
 - Playground で非同期コードの実行順序を可視化
 
