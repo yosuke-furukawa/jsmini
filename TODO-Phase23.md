@@ -51,18 +51,32 @@ new Promise((resolve) => {
 
 ### 23-4: async/await 構文
 
-- [ ] 23-4a: Lexer: `async`, `await` キーワード追加
-- [ ] 23-4b: Parser: `async function` 宣言/式、`await` 式
-- [ ] 23-4c: TW (tree-walking): async 関数 → Promise を返す、await → Promise の値を取り出す
-- [ ] 23-4d: Compiler + VM: async/await の bytecode 対応 (generator ベースの状態マシン)
-- [ ] 23-4e: テスト (async function, await, async arrow, try/catch + await)
+- [x] 23-4a: Lexer: `async`, `await` キーワード追加
+- [x] 23-4b: Parser: `async function` 宣言/式、`await` 式 (unary 対応)、async arrow、peek()
+- [x] 23-4c: TW: async 関数 → JSPromise、body を generator + microtask で駆動
+- [x] 23-4d: Compiler: isAsync フラグ、Await opcode。VM: runAsyncFunction (YieldSignal で suspend)
+- [x] 23-4e: TW 14 + VM 8 + test262-inspired 7 = 29 async/await テスト
+- [x] 23-4f: fix: return await in try/catch (ReturnSignal → resolve)
+- [x] 23-4g: fix: await in for loop (await を unary 式として parse)
+- [x] 23-4h: fix: async function as .then callback (callJSFunctionSync で async runner)
+- [x] 23-4i: Promise.all/race/allSettled/any 追加
 
 ### 23-5: 統合テスト + Playground
 
-- [ ] 23-5a: Promise + async/await の複合テスト
-- [ ] 23-5b: エラーハンドリング: unhandled rejection, async throw
-- [ ] 23-5c: Playground プリセット追加 (Promise / async-await)
-- [ ] 23-5d: 全テストパス
+- [x] 23-5a: Playground プリセット「Promise」「async/await」追加
+- [x] 23-5b: Playground bundle 再ビルド
+- [x] 23-5c: VM async stack save 修正 (sum + await i のスタック保存)
+- [x] 23-5d: 全 753 テストパス、0 fail、0 todo
+
+### ベンチマーク結果
+
+| ベンチ | TW | VM | VM/TW |
+|---|---|---|---|
+| Promise chain (1000 thens) | 5.21ms | 0.97ms | **5.4x** |
+| async/await (100 awaits) | 0.29ms | 0.21ms | **1.4x** |
+| Promise.all (100 promises) | 0.44ms | 0.26ms | **1.7x** |
+| Sync sum (10K) | 9.40ms | 2.26ms | 4.2x |
+| fib(25) | 470ms | 96ms / **0.44ms (JIT)** | **1068x** |
 
 ## 目標
 

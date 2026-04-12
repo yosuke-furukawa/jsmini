@@ -257,11 +257,13 @@ export class VM {
           resolve!(result);
         } catch (e) {
           if (e instanceof YieldSignal) {
-            // await で中断: 状態を保存
+            // await で中断: 状態を保存 (スタック上の値も保存)
             const currentFrame = vm.frames[vm.frames.length - 1];
             pc = currentFrame.pc;
             savedLocals = currentFrame.locals;
+            // スタックを保存 (sum + await i の sum 等がスタックに残る)
             savedStack = [];
+            for (let si = 0; si <= vm.sp; si++) savedStack.push(vm.stack[si]);
             vm.frames.pop();
             // await した値を Promise.resolve して resume
             const awaitedValue = e.value;

@@ -275,6 +275,8 @@ main {
     <option value="ir-vs-direct">IR vs Direct JIT</option>
     <option value="array-jit">Array JIT</option>
     <option value="ir-optimizations">IR Optimizations (LICM/CSE/SR)</option>
+    <option value="promise">Promise</option>
+    <option value="async-await">async/await</option>
   </select>
   <select id="mode-select" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #3c3c3c;border-radius:3px;font-size:12px;">
     <option value="tree-walking">Tree-Walking</option>
@@ -1125,6 +1127,119 @@ function benchCombined(n, x) {
   return sum;
 }
 console.log("combined:", benchCombined(1000, 5));`,
+
+  "promise": `// Promise — microtask queue demo
+// Run with Tree-Walking or Bytecode VM mode
+
+// 1. Basic resolve + then
+new Promise(function(resolve) {
+  console.log("executor runs sync");
+  resolve(42);
+}).then(function(v) {
+  console.log("then:", v);
+});
+console.log("after new Promise");
+// Output order: executor → after → then (microtask is async!)
+
+// 2. Chain
+Promise.resolve(1)
+  .then(function(v) { return v + 10; })
+  .then(function(v) { return v * 2; })
+  .then(function(v) { console.log("chain:", v); });
+
+// 3. Error handling
+Promise.reject("oops")
+  .then(function() { console.log("skipped"); })
+  .catch(function(e) { console.log("caught:", e); })
+  .then(function() { console.log("recovered"); });
+
+// 4. Promise.all
+Promise.all([
+  Promise.resolve("a"),
+  Promise.resolve("b"),
+  Promise.resolve("c")
+]).then(function(arr) {
+  console.log("all:", arr[0] + arr[1] + arr[2]);
+});
+
+// 5. Promise.race
+Promise.race([
+  Promise.reject("fast"),
+  Promise.resolve("slow")
+]).catch(function(e) {
+  console.log("race winner:", e);
+});`,
+
+  "async-await": `// async/await — syntactic sugar for Promises
+// Run with Tree-Walking or Bytecode VM mode
+
+// 1. Basic async function
+async function greet(name) {
+  var msg = await Promise.resolve("Hello, " + name + "!");
+  return msg;
+}
+greet("jsmini").then(function(v) { console.log(v); });
+
+// 2. Multiple awaits
+async function sum() {
+  var a = await Promise.resolve(1);
+  var b = await Promise.resolve(2);
+  var c = await Promise.resolve(3);
+  console.log("sum:", a + b + c);
+}
+sum();
+
+// 3. Execution order (sync vs async)
+async function demo() {
+  console.log("B");
+  await Promise.resolve();
+  console.log("D");
+}
+console.log("A");
+demo();
+console.log("C");
+// Output: A, B, C, D
+
+// 4. Error handling with try/catch
+async function safe() {
+  try {
+    var x = await Promise.reject("error!");
+    console.log("unreachable");
+  } catch(e) {
+    console.log("caught:", e);
+  }
+}
+safe();
+
+// 5. Await in loop
+async function countdown(n) {
+  var result = "";
+  for (var i = n; i > 0; i = i - 1) {
+    result = result + await Promise.resolve(i) + " ";
+  }
+  console.log("countdown:", result);
+}
+countdown(5);
+
+// 6. Nested async
+async function inner(x) { return await (x * 2); }
+async function outer() {
+  var a = await inner(5);
+  var b = await inner(10);
+  console.log("nested:", a + b);
+}
+outer();
+
+// 7. async + Promise.all
+async function parallel() {
+  var results = await Promise.all([
+    Promise.resolve(10),
+    Promise.resolve(20),
+    Promise.resolve(30)
+  ]);
+  console.log("parallel:", results[0] + results[1] + results[2]);
+}
+parallel();`,
 };
 
 // ========== CodeMirror setup ==========

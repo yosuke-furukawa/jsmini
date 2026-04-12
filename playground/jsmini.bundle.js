@@ -82,7 +82,9 @@ var jsmini = (() => {
     default: "Default",
     delete: "Delete",
     void: "Void",
-    yield: "Yield"
+    yield: "Yield",
+    async: "Async",
+    await: "Await"
     // undefined は予約語ではないのでキーワードに含めない
   });
   function tokenize(source) {
@@ -538,6 +540,9 @@ var jsmini = (() => {
     function current() {
       return tokens[pos];
     }
+    function peek() {
+      return tokens[pos + 1] ?? tokens[tokens.length - 1];
+    }
     function eat(type) {
       const token = current();
       if (token.type !== type) {
@@ -573,6 +578,7 @@ var jsmini = (() => {
         return parseVariableDeclaration();
       }
       if (current().type === "Function") return parseFunctionDeclaration();
+      if (current().type === "Async" && peek().type === "Function") return parseAsyncFunctionDeclaration();
       if (current().type === "Class") return parseClassDeclaration();
       throw new SyntaxError(
         `Unexpected token ${current().type} at line ${current().line}, column ${current().column}`
@@ -586,6 +592,7 @@ var jsmini = (() => {
       }
       if (current().type === "Var") return parseVariableDeclaration();
       if (current().type === "Function") return parseFunctionDeclaration();
+      if (current().type === "Async" && peek().type === "Function") return parseAsyncFunctionDeclaration();
       if (current().type === "Return") return parseReturnStatement();
       if (current().type === "Throw") return parseThrowStatement();
       if (current().type === "Try") return parseTryStatement();
@@ -650,6 +657,24 @@ var jsmini = (() => {
         declarations,
         kind
       };
+    }
+    function parseAsyncFunctionDeclaration() {
+      eat("Async");
+      eat("Function");
+      const id2 = parseIdentifier();
+      eat("LeftParen");
+      resetParamState();
+      const params = [];
+      if (current().type !== "RightParen") {
+        params.push(parseParam());
+        while (current().type === "Comma") {
+          eat("Comma");
+          params.push(parseParam());
+        }
+      }
+      eat("RightParen");
+      const body = parseBlockStatement();
+      return { type: "FunctionDeclaration", id: id2, params, body, async: true };
     }
     function parseFunctionDeclaration() {
       eat("Function");
@@ -1101,6 +1126,11 @@ var jsmini = (() => {
       return expr;
     }
     function parseAssignment() {
+      if (current().type === "Await") {
+        eat("Await");
+        const argument = parseAssignment();
+        return { type: "AwaitExpression", argument };
+      }
       if (current().type === "Yield") {
         eat("Yield");
         const delegate = current().type === "Star";
@@ -1314,6 +1344,11 @@ var jsmini = (() => {
       return left;
     }
     function parseUnary() {
+      if (current().type === "Await") {
+        eat("Await");
+        const argument = parseUnary();
+        return { type: "AwaitExpression", argument };
+      }
       if (current().type === "Bang" || current().type === "Tilde") {
         const operator2 = eat(current().type).value;
         const argument = parseUnary();
@@ -1348,7 +1383,28 @@ var jsmini = (() => {
         args = parseArguments();
         eat("RightParen");
       }
-      return { type: "NewExpression", callee, arguments: args };
+      let expr = { type: "NewExpression", callee, arguments: args };
+      while (true) {
+        if (current().type === "LeftParen") {
+          eat("LeftParen");
+          const callArgs = parseArguments();
+          eat("RightParen");
+          expr = { type: "CallExpression", callee: expr, arguments: callArgs };
+        } else if (current().type === "Dot" || current().type === "QuestionDot") {
+          const optional = current().type === "QuestionDot";
+          eat(current().type);
+          const property = parsePropertyKey();
+          expr = { type: "MemberExpression", object: expr, property, computed: false, optional };
+        } else if (current().type === "LeftBracket") {
+          eat("LeftBracket");
+          const prop = parseExpression();
+          eat("RightBracket");
+          expr = { type: "MemberExpression", object: expr, property: prop, computed: true };
+        } else {
+          break;
+        }
+      }
+      return expr;
     }
     function parseArguments() {
       const args = [];
@@ -1438,6 +1494,54 @@ var jsmini = (() => {
         case "Super":
           eat("Super");
           return { type: "Identifier", name: "__super__" };
+        case "Async":
+          if (peek().type === "Function") {
+            eat("Async");
+            eat("Function");
+            let id2 = null;
+            if (current().type === "Identifier") id2 = parseIdentifier();
+            eat("LeftParen");
+            resetParamState();
+            const params = [];
+            if (current().type !== "RightParen") {
+              params.push(parseParam());
+              while (current().type === "Comma") {
+                eat("Comma");
+                params.push(parseParam());
+              }
+            }
+            eat("RightParen");
+            const body = parseBlockStatement();
+            return { type: "FunctionExpression", id: id2, params, body, async: true };
+          }
+          if (peek().type === "Identifier" && tokens[pos + 2]?.type === "Arrow") {
+            eat("Async");
+            const param = parseIdentifier();
+            eat("Arrow");
+            const arrowBody = current().type === "LeftBrace" ? parseBlockStatement() : parseAssignment();
+            return { type: "ArrowFunctionExpression", params: [param], body: arrowBody, async: true };
+          }
+          if (peek().type === "LeftParen") {
+            eat("Async");
+            eat("LeftParen");
+            resetParamState();
+            const arrowParams = [];
+            if (current().type !== "RightParen") {
+              arrowParams.push(parseParam());
+              while (current().type === "Comma") {
+                eat("Comma");
+                arrowParams.push(parseParam());
+              }
+            }
+            eat("RightParen");
+            if (current().type === "Arrow") {
+              eat("Arrow");
+              const arrowBody = current().type === "LeftBrace" ? parseBlockStatement() : parseAssignment();
+              return { type: "ArrowFunctionExpression", params: arrowParams, body: arrowBody, async: true };
+            }
+          }
+          eat("Async");
+          return { type: "Identifier", name: "async" };
         case "Function":
           return parseFunctionExpression();
         case "NoSubstitutionTemplate":
@@ -2035,7 +2139,271 @@ var jsmini = (() => {
   var SYMBOL_HAS_INSTANCE = { __symbol__: true, id: -3, description: "Symbol.hasInstance", key: "@@hasInstance" };
   var SYMBOL_TO_STRING_TAG = { __symbol__: true, id: -4, description: "Symbol.toStringTag", key: "@@toStringTag" };
 
+  // src/runtime/promise.ts
+  function isCallable(v) {
+    if (typeof v === "function") return true;
+    if (typeof v === "object" && v !== null) {
+      if ("bytecode" in v) return true;
+      if ("__closure" in v) return true;
+    }
+    return false;
+  }
+  var JSPromise = class _JSPromise {
+    constructor(executor) {
+      __publicField(this, "__promise__", true);
+      __publicField(this, "state", "pending");
+      __publicField(this, "result");
+      __publicField(this, "fulfillReactions", []);
+      __publicField(this, "rejectReactions", []);
+      if (executor) {
+        const resolve = (value) => this._resolve(value);
+        const reject = (reason) => this._reject(reason);
+        try {
+          executor(resolve, reject);
+        } catch (e) {
+          reject(e);
+        }
+      }
+    }
+    _resolve(value) {
+      if (this.state !== "pending") return;
+      if (value instanceof _JSPromise) {
+        if (value.state === "fulfilled") {
+          this._fulfill(value.result);
+        } else if (value.state === "rejected") {
+          this._reject(value.result);
+        } else {
+          value.then(
+            (v) => this._resolve(v),
+            (r) => this._reject(r)
+          );
+        }
+        return;
+      }
+      this._fulfill(value);
+    }
+    _fulfill(value) {
+      if (this.state !== "pending") return;
+      this.state = "fulfilled";
+      this.result = value;
+      for (const reaction of this.fulfillReactions) {
+        enqueueMicrotask(() => runReaction(reaction, "fulfilled", value));
+      }
+      this.fulfillReactions = [];
+      this.rejectReactions = [];
+    }
+    _reject(reason) {
+      if (this.state !== "pending") return;
+      this.state = "rejected";
+      this.result = reason;
+      for (const reaction of this.rejectReactions) {
+        enqueueMicrotask(() => runReaction(reaction, "rejected", reason));
+      }
+      this.fulfillReactions = [];
+      this.rejectReactions = [];
+    }
+    then(onFulfilled, onRejected) {
+      const child = new _JSPromise();
+      const reaction = {
+        onFulfilled: isCallable(onFulfilled) ? onFulfilled : void 0,
+        onRejected: isCallable(onRejected) ? onRejected : void 0,
+        childPromise: child
+      };
+      if (this.state === "pending") {
+        this.fulfillReactions.push(reaction);
+        this.rejectReactions.push(reaction);
+      } else if (this.state === "fulfilled") {
+        enqueueMicrotask(() => runReaction(reaction, "fulfilled", this.result));
+      } else {
+        enqueueMicrotask(() => runReaction(reaction, "rejected", this.result));
+      }
+      return child;
+    }
+    catch(onRejected) {
+      return this.then(void 0, onRejected);
+    }
+    // Promise.resolve
+    static resolve(value) {
+      if (value instanceof _JSPromise) return value;
+      const p = new _JSPromise();
+      p._fulfill(value);
+      return p;
+    }
+    // Promise.reject
+    static reject(reason) {
+      const p = new _JSPromise();
+      p._reject(reason);
+      return p;
+    }
+    // Promise.all
+    static all(promises) {
+      return new _JSPromise((resolve, reject) => {
+        const results = new Array(promises.length);
+        let remaining = promises.length;
+        if (remaining === 0) {
+          resolve(results);
+          return;
+        }
+        for (let i = 0; i < promises.length; i++) {
+          const idx = i;
+          _JSPromise.resolve(promises[i]).then(
+            (value) => {
+              results[idx] = value;
+              if (--remaining === 0) resolve(results);
+            },
+            (reason) => reject(reason)
+          );
+        }
+      });
+    }
+    // Promise.race
+    static race(promises) {
+      return new _JSPromise((resolve, reject) => {
+        for (let i = 0; i < promises.length; i++) {
+          _JSPromise.resolve(promises[i]).then(resolve, reject);
+        }
+      });
+    }
+    // Promise.allSettled
+    static allSettled(promises) {
+      return new _JSPromise((resolve) => {
+        const results = new Array(promises.length);
+        let remaining = promises.length;
+        if (remaining === 0) {
+          resolve(results);
+          return;
+        }
+        for (let i = 0; i < promises.length; i++) {
+          const idx = i;
+          _JSPromise.resolve(promises[i]).then(
+            (value) => {
+              results[idx] = { status: "fulfilled", value };
+              if (--remaining === 0) resolve(results);
+            },
+            (reason) => {
+              results[idx] = { status: "rejected", reason };
+              if (--remaining === 0) resolve(results);
+            }
+          );
+        }
+      });
+    }
+    // Promise.any
+    static any(promises) {
+      return new _JSPromise((resolve, reject) => {
+        const errors = new Array(promises.length);
+        let remaining = promises.length;
+        if (remaining === 0) {
+          reject(new AggregateError(errors, "All promises were rejected"));
+          return;
+        }
+        for (let i = 0; i < promises.length; i++) {
+          const idx = i;
+          _JSPromise.resolve(promises[i]).then(
+            (value) => resolve(value),
+            (reason) => {
+              errors[idx] = reason;
+              if (--remaining === 0) reject(new AggregateError(errors, "All promises were rejected"));
+            }
+          );
+        }
+      });
+    }
+  };
+  var _handlerCaller = null;
+  function setHandlerCaller(caller) {
+    _handlerCaller = caller;
+  }
+  function runReaction(reaction, type, value) {
+    const handler = type === "fulfilled" ? reaction.onFulfilled : reaction.onRejected;
+    const child = reaction.childPromise;
+    if (handler) {
+      try {
+        const result = _handlerCaller ? _handlerCaller(handler, value) : handler(value);
+        child._resolve(result);
+      } catch (e) {
+        child._reject(e);
+      }
+    } else {
+      if (type === "fulfilled") {
+        child._fulfill(value);
+      } else {
+        child._reject(value);
+      }
+    }
+  }
+  var microtaskQueue = [];
+  function enqueueMicrotask(task) {
+    microtaskQueue.push(task);
+  }
+  function drainMicrotasks() {
+    while (microtaskQueue.length > 0) {
+      const task = microtaskQueue.shift();
+      task();
+    }
+  }
+  function isJSPromise(value) {
+    return value instanceof JSPromise;
+  }
+
   // src/interpreter/evaluator.ts
+  function callJSFunctionSync(fn, thisValue, args) {
+    const callEnv = new Environment(fn.closure, true);
+    const params = fn.params;
+    for (let i = 0; i < params.length; i++) {
+      if (params[i].type === "Identifier") {
+        callEnv.define(params[i].name, args[i]);
+      } else {
+        bindPattern(params[i], args[i], callEnv);
+      }
+    }
+    if (fn.name) callEnv.define(fn.name, fn);
+    if (fn.isAsync) {
+      hoistVarDeclarations(fn.body.body, callEnv);
+      hoistFunctionDeclarations(fn.body.body, callEnv);
+      const bodyGen = evalBlock(fn.body.body, callEnv);
+      return new JSPromise((resolve, reject) => {
+        function step(inputValue) {
+          try {
+            const r = bodyGen.next(inputValue);
+            if (r.done) {
+              resolve(r.value);
+              return;
+            }
+            const yielded = r.value;
+            if (yielded && typeof yielded === "object" && yielded.__await__) {
+              JSPromise.resolve(yielded.value).then(
+                (v) => step(v),
+                (e) => {
+                  try {
+                    const rr = bodyGen.throw(new ThrowSignal(e));
+                    if (rr.done) resolve(rr.value);
+                    else step(void 0);
+                  } catch (err) {
+                    if (err instanceof ReturnSignal) {
+                      resolve(err.value);
+                    } else {
+                      reject(err instanceof ThrowSignal ? err.value : err);
+                    }
+                  }
+                }
+              );
+            } else {
+              step(yielded);
+            }
+          } catch (e) {
+            if (e instanceof ReturnSignal) {
+              resolve(e.value);
+              return;
+            }
+            reject(e instanceof ThrowSignal ? isJSString(e.value) ? jsStringToString(e.value) : e.value : e);
+          }
+        }
+        step();
+      });
+    }
+    return evalBlockSync(fn.body.body, callEnv);
+  }
   function isTruthy(value) {
     if (isJSString(value)) return value.length > 0;
     return !!value;
@@ -2190,6 +2558,29 @@ var jsmini = (() => {
     SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
     SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
     env.defineReadOnly("Symbol", SymbolFn);
+    const PromiseConstructor = function PromiseCtor(executor) {
+      if (typeof executor !== "function" && !isJSFunction(executor)) throw new TypeError("Promise resolver is not a function");
+      return new JSPromise((resolve, reject) => {
+        try {
+          if (isJSFunction(executor)) {
+            callJSFunctionSync(executor, void 0, [resolve, reject]);
+          } else {
+            executor(resolve, reject);
+          }
+        } catch (e) {
+          const unwrapped = e instanceof ThrowSignal ? e.value : e;
+          reject(isJSString(unwrapped) ? jsStringToString(unwrapped) : unwrapped);
+        }
+      });
+    };
+    PromiseConstructor.__nativeConstructor = true;
+    PromiseConstructor.resolve = (value) => JSPromise.resolve(value);
+    PromiseConstructor.reject = (reason) => JSPromise.reject(reason);
+    PromiseConstructor.all = (promises) => JSPromise.all(promises);
+    PromiseConstructor.race = (promises) => JSPromise.race(promises);
+    PromiseConstructor.allSettled = (promises) => JSPromise.allSettled(promises);
+    PromiseConstructor.any = (promises) => JSPromise.any(promises);
+    env.defineReadOnly("Promise", PromiseConstructor);
     if (options.globals) {
       for (const [k, v] of Object.entries(options.globals)) {
         if (!env.hasOwn(k)) env.define(k, v);
@@ -2210,6 +2601,7 @@ var jsmini = (() => {
           break;
         }
       }
+      drainMicrotasks();
       return isJSString(result) ? jsStringToString(result) : result;
     } finally {
       _currentOnStep = null;
@@ -2283,6 +2675,7 @@ var jsmini = (() => {
           prototype: {}
         };
         if (stmt.generator) fn.isGenerator = true;
+        if (stmt.async) fn.isAsync = true;
         env.define(stmt.id.name, fn);
       }
     }
@@ -2713,6 +3106,7 @@ var jsmini = (() => {
           prototype: {}
         };
         if (expr.generator) fn.isGenerator = true;
+        if (expr.async) fn.isAsync = true;
         if (expr.id) {
           const fnEnv = new Environment(env);
           fnEnv.define(expr.id.name, fn);
@@ -2737,6 +3131,7 @@ var jsmini = (() => {
           prototype: void 0
           // アロー関数は prototype を持たない
         };
+        if (expr.async) fn.isAsync = true;
         return fn;
       }
       case "TemplateLiteral": {
@@ -2941,6 +3336,10 @@ var jsmini = (() => {
         const value = expr.argument ? yield* evalExpression(expr.argument, env) : void 0;
         return yield value;
       }
+      case "AwaitExpression": {
+        const value = expr.argument ? yield* evalExpression(expr.argument, env) : void 0;
+        return yield { __await__: true, value };
+      }
     }
   }
   function* evalNewExpression(expr, env) {
@@ -3045,6 +3444,66 @@ var jsmini = (() => {
       };
       return genObj;
     }
+    if (jsFn.isAsync) {
+      const fnEnv2 = new Environment(jsFn.closure, !jsFn.isArrow);
+      if (overrideThis !== void 0) fnEnv2.setThis(overrideThis);
+      if (!jsFn.isArrow) {
+        const argsObj = /* @__PURE__ */ Object.create(null);
+        for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+        argsObj.length = args.length;
+        fnEnv2.define("arguments", argsObj);
+      }
+      for (let i = 0; i < jsFn.params.length; i++) {
+        const param = jsFn.params[i];
+        if (param.type === "RestElement") {
+          fnEnv2.define(param.argument.name, args.slice(i));
+        } else {
+          yield* bindParam(param, i < args.length ? args[i] : void 0, fnEnv2, fnEnv2);
+        }
+      }
+      hoistVarDeclarations(jsFn.body.body, fnEnv2);
+      hoistFunctionDeclarations(jsFn.body.body, fnEnv2);
+      const bodyGen = evalBlock(jsFn.body.body, fnEnv2);
+      return new JSPromise((resolve, reject) => {
+        function step(inputValue) {
+          try {
+            const { done, value } = bodyGen.next(inputValue);
+            if (done) {
+              resolve(value instanceof ReturnSignal ? value.value : value);
+              return;
+            }
+            if (value && typeof value === "object" && value.__await__) {
+              const awaited = value.value;
+              JSPromise.resolve(awaited).then(
+                (v) => step(v),
+                (e) => {
+                  try {
+                    const r = bodyGen.throw(new ThrowSignal(e));
+                    if (r.done) resolve(r.value instanceof ReturnSignal ? r.value.value : r.value);
+                    else step(void 0);
+                  } catch (err) {
+                    if (err instanceof ReturnSignal) {
+                      resolve(err.value);
+                    } else {
+                      reject(err instanceof ThrowSignal ? err.value : err);
+                    }
+                  }
+                }
+              );
+            } else {
+              step(value);
+            }
+          } catch (e) {
+            if (e instanceof ReturnSignal) {
+              resolve(e.value);
+              return;
+            }
+            reject(e instanceof ThrowSignal ? isJSString(e.value) ? jsStringToString(e.value) : e.value : e);
+          }
+        }
+        step();
+      });
+    }
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
     if (overrideThis !== void 0) fnEnv.setThis(overrideThis);
     if (!jsFn.isArrow) {
@@ -3078,6 +3537,27 @@ var jsmini = (() => {
       thisValue = yield* evalExpression(expr.callee.object, env);
       const key = yield* resolveMemberKey(expr.callee, env);
       fn = getProperty(thisValue, key);
+      if (isJSPromise(thisValue) && (key === "then" || key === "catch") && typeof fn === "function") {
+        const nativeFn = fn;
+        const callArgs = yield* evalArguments(expr.arguments, env);
+        const wrapHandler = (h) => {
+          if (isJSFunction(h)) return (v) => {
+            try {
+              return callJSFunctionSync(h, void 0, [v]);
+            } catch (e) {
+              const unwrapped = e instanceof ThrowSignal ? e.value : e;
+              throw isJSString(unwrapped) ? jsStringToString(unwrapped) : unwrapped;
+            }
+          };
+          if (typeof h === "function") return h;
+          return void 0;
+        };
+        if (key === "then") {
+          return thisValue.then(wrapHandler(callArgs[0]), wrapHandler(callArgs[1]));
+        } else {
+          return thisValue.catch(wrapHandler(callArgs[0]));
+        }
+      }
       if (fn === void 0 && isJSFunction(thisValue)) {
         const jsFnObj = thisValue;
         if (key === "call") {
@@ -3180,6 +3660,66 @@ var jsmini = (() => {
       throw new TypeError("Class constructor cannot be invoked without 'new'");
     }
     const jsFn = fn;
+    if (jsFn.isAsync) {
+      const fnEnv2 = new Environment(jsFn.closure, !jsFn.isArrow);
+      if (!jsFn.isArrow) {
+        fnEnv2.setThis(thisValue);
+        const argsObj = /* @__PURE__ */ Object.create(null);
+        for (let i = 0; i < args.length; i++) argsObj[i] = args[i];
+        argsObj.length = args.length;
+        fnEnv2.define("arguments", argsObj);
+      }
+      for (let i = 0; i < jsFn.params.length; i++) {
+        const param = jsFn.params[i];
+        if (param.type === "RestElement") {
+          fnEnv2.define(param.argument.name, args.slice(i));
+        } else {
+          yield* bindParam(param, i < args.length ? args[i] : void 0, fnEnv2, fnEnv2);
+        }
+      }
+      hoistVarDeclarations(jsFn.body.body, fnEnv2);
+      hoistFunctionDeclarations(jsFn.body.body, fnEnv2);
+      const bodyGen = evalBlock(jsFn.body.body, fnEnv2);
+      return new JSPromise((resolve, reject) => {
+        function step(inputValue) {
+          try {
+            const r = bodyGen.next(inputValue);
+            if (r.done) {
+              resolve(r.value);
+              return;
+            }
+            const yielded = r.value;
+            if (yielded && typeof yielded === "object" && yielded.__await__) {
+              JSPromise.resolve(yielded.value).then(
+                (v) => step(v),
+                (e) => {
+                  try {
+                    const rr = bodyGen.throw(new ThrowSignal(e));
+                    if (rr.done) resolve(rr.value);
+                    else step(void 0);
+                  } catch (err) {
+                    if (err instanceof ReturnSignal) {
+                      resolve(err.value);
+                    } else {
+                      reject(err instanceof ThrowSignal ? isJSString(err.value) ? jsStringToString(err.value) : err.value : err);
+                    }
+                  }
+                }
+              );
+            } else {
+              step(yielded);
+            }
+          } catch (e) {
+            if (e instanceof ReturnSignal) {
+              resolve(e.value);
+              return;
+            }
+            reject(e instanceof ThrowSignal ? isJSString(e.value) ? jsStringToString(e.value) : e.value : e);
+          }
+        }
+        step();
+      });
+    }
     if (jsFn.isGenerator) {
       const fnEnv2 = new Environment(jsFn.closure, !jsFn.isArrow);
       if (!jsFn.isArrow) {
@@ -3413,6 +3953,7 @@ var jsmini = (() => {
       __publicField(this, "icSlotCount", 0);
       __publicField(this, "hasRestParam", false);
       __publicField(this, "isGenerator", false);
+      __publicField(this, "isAsync", false);
       __publicField(this, "upvalues", []);
       this.parent = parent;
       this.isFunction = parent !== null;
@@ -3532,6 +4073,7 @@ var jsmini = (() => {
         localCount: this.localCount,
         hasRestParam: this.hasRestParam,
         isGenerator: this.isGenerator,
+        isAsync: this.isAsync,
         bytecode: this.bytecode,
         constants: this.constants,
         handlers: this.handlers,
@@ -3731,6 +4273,7 @@ var jsmini = (() => {
         case "FunctionDeclaration": {
           const fnCompiler = new _BytecodeCompiler(this);
           if (stmt.generator) fnCompiler.isGenerator = true;
+          if (stmt.async) fnCompiler.isAsync = true;
           fnCompiler.compileFunctionBody(stmt.params, stmt.body.body);
           const fnBytecode = fnCompiler.finish(stmt.id.name);
           const fnIndex = this.addConstant(fnBytecode);
@@ -4166,6 +4709,7 @@ var jsmini = (() => {
         case "FunctionExpression": {
           const fnCompiler = new _BytecodeCompiler(this);
           if (expr.generator) fnCompiler.isGenerator = true;
+          if (expr.async) fnCompiler.isAsync = true;
           fnCompiler.compileFunctionBody(expr.params, expr.body.body);
           const fnBytecode = fnCompiler.finish(expr.id?.name ?? inferredName ?? "");
           const fnIndex = this.addConstant(fnBytecode);
@@ -4422,6 +4966,7 @@ var jsmini = (() => {
         }
         case "ArrowFunctionExpression": {
           const fnCompiler = new _BytecodeCompiler(this);
+          if (expr.async) fnCompiler.isAsync = true;
           if (expr.expression) {
             fnCompiler.compileFunctionBody(expr.params, [
               { type: "ReturnStatement", argument: expr.body }
@@ -4432,6 +4977,11 @@ var jsmini = (() => {
           const fnBytecode = fnCompiler.finish(inferredName ?? "");
           const fnIndex = this.addConstant(fnBytecode);
           this.emit("LdaConst", fnIndex);
+          break;
+        }
+        case "AwaitExpression": {
+          this.compileExpression(expr.argument);
+          this.emit("Await");
           break;
         }
         case "YieldExpression": {
@@ -6180,10 +6730,10 @@ var jsmini = (() => {
         if (!wasmFn) return null;
       }
       const args = [];
-      for (let i = 0; i < func.paramCount; i++) {
+      for (let i = 0; i < func.localCount; i++) {
         const val = frame.locals[i];
         if (typeof val === "number") args.push(val);
-        else return null;
+        else args.push(0);
       }
       for (const box of frame.upvalueBoxes) {
         if (typeof box.value === "number") args.push(box.value);
@@ -6201,6 +6751,55 @@ var jsmini = (() => {
     }
     createICSlots(func) {
       return Array.from({ length: func.icSlotCount || 0 }, createICSlot);
+    }
+    // Async function → JSPromise を返し、内部 VM で body を駆動
+    runAsyncFunction(func, locals, upvalueBoxes) {
+      const vm = new _VM();
+      vm.globals = this.globals;
+      vm.heap = this.heap;
+      vm.objectPrototype = this.objectPrototype;
+      vm.arrayPrototype = this.arrayPrototype;
+      vm.stringPrototype = this.stringPrototype;
+      let pc = 0;
+      let savedLocals = locals.slice();
+      let savedStack = [];
+      return new JSPromise((resolve, reject) => {
+        function step(inputValue) {
+          vm.sp = -1;
+          for (const v of savedStack) vm.push(v);
+          if (pc > 0) vm.push(inputValue);
+          vm.frames.push({
+            func,
+            pc,
+            locals: savedLocals,
+            thisValue: void 0,
+            icSlots: vm.createICSlots(func),
+            upvalueBoxes
+          });
+          try {
+            vm._runBaseFrameCount = vm.frames.length - 1;
+            const result = vm.run(vm.frames.length - 1);
+            resolve(result);
+          } catch (e) {
+            if (e instanceof YieldSignal) {
+              const currentFrame = vm.frames[vm.frames.length - 1];
+              pc = currentFrame.pc;
+              savedLocals = currentFrame.locals;
+              savedStack = [];
+              vm.frames.pop();
+              const awaitedValue = e.value;
+              JSPromise.resolve(awaitedValue).then(
+                (v) => step(v),
+                (err) => reject(err)
+              );
+            } else {
+              const thrown = e?.__thrown ? e.value : e;
+              reject(thrown);
+            }
+          }
+        }
+        step();
+      });
     }
     // GeneratorObject を作成
     createGeneratorObject(func, locals, upvalueBoxes) {
@@ -6383,7 +6982,7 @@ var jsmini = (() => {
       }
       throw new TypeError("Not a function");
     }
-    // BytecodeFunction を直接呼び出す (ToPrimitive 等の内部用)
+    // BytecodeFunction を直接呼び出す (ToPrimitive, Promise handler 等の内部用)
     callInternal(func, thisValue, args) {
       const locals = new Array(func.localCount).fill(void 0);
       for (let i = 0; i < args.length && i < func.paramCount; i++) {
@@ -6400,17 +6999,21 @@ var jsmini = (() => {
         upvalueBoxes: []
       });
       try {
-        this.run(baseFrameCount);
+        const runResult = this.run(baseFrameCount);
+        if (runResult !== void 0) {
+          this.sp = savedSp;
+          return runResult;
+        }
+        const hasResult = this.sp > savedSp;
+        const result = hasResult ? this.stack[this.sp] : void 0;
+        this.sp = savedSp;
+        return result;
       } catch (e) {
         this.sp = savedSp;
         const throwValue = e?.__thrown ? e.value : e;
         if (this.unwindToHandler(throwValue)) return THROWN_SENTINEL;
         throw e;
       }
-      const hasResult = this.sp > savedSp;
-      const result = hasResult ? this.stack[this.sp] : void 0;
-      this.sp = savedSp;
-      return result;
     }
     // ToPrimitive: オブジェクトの valueOf/toString を呼んでプリミティブに変換
     toPrimitive(value) {
@@ -6781,6 +7384,9 @@ var jsmini = (() => {
               frame.__loopCount = (frame.__loopCount ?? 0) + 1;
               if (frame.__loopCount > 100 && !frame.__osrDone && this.jit) {
                 const osrResult = this.attemptOSR(frame);
+                if (this.jit?.traceTier) {
+                  this.jit.tierLog.push(`[OSR] ${frame.func.name}: attempt at loop #${frame.__loopCount}, locals=[${frame.locals.map((v) => typeof v === "number" ? v : typeof v).join(",")}], result=${osrResult !== null ? "success" : "fail"}`);
+                }
                 if (osrResult !== null) {
                   this.frames.pop();
                   if (this.frames.length > 0) {
@@ -7179,7 +7785,10 @@ var jsmini = (() => {
                 for (let i = 0; i < fn.paramCount; i++) locals[i] = i < args.length ? args[i] : void 0;
               }
               this.setArguments(fn, locals, args);
-              if (fn.isGenerator) {
+              if (fn.isAsync) {
+                const asyncPromise = this.runAsyncFunction(fn, locals, closureBoxes);
+                this.push(asyncPromise);
+              } else if (fn.isGenerator) {
                 const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
                 this.push(genObj);
               } else {
@@ -7219,7 +7828,10 @@ var jsmini = (() => {
                 locals[i] = i < args.length ? args[i] : void 0;
               }
               this.setArguments(fn, locals, args);
-              if (fn.isGenerator) {
+              if (fn.isAsync) {
+                const asyncPromise = this.runAsyncFunction(fn, locals, closure.capturedBoxes);
+                this.push(asyncPromise);
+              } else if (fn.isGenerator) {
                 const genObj = this.createGeneratorObject(fn, locals, closure.capturedBoxes);
                 this.push(genObj);
               } else {
@@ -7240,7 +7852,10 @@ var jsmini = (() => {
                 locals[i] = i < args.length ? args[i] : void 0;
               }
               this.setArguments(fn, locals, args);
-              if (fn.isGenerator) {
+              if (fn.isAsync) {
+                const asyncPromise = this.runAsyncFunction(fn, locals, []);
+                this.push(asyncPromise);
+              } else if (fn.isGenerator) {
                 const genObj = this.createGeneratorObject(fn, locals, []);
                 this.push(genObj);
               } else {
@@ -7352,6 +7967,11 @@ var jsmini = (() => {
               return returnValue;
             }
             break;
+          }
+          // Await: same mechanism as Yield (suspend via signal)
+          case "Await": {
+            const value = this.pop();
+            throw new YieldSignal(value);
           }
           // Generator yield
           case "Yield": {
@@ -9499,7 +10119,7 @@ var jsmini = (() => {
         return WASM_OP.i32_lt_s;
     }
   }
-  function compileIRToWasm(irFunc) {
+  function compileIRToWasm(irFunc, osrLocalCount) {
     try {
       let hasArrayOps = false;
       let hasSelfRecursion = false;
@@ -9585,15 +10205,22 @@ var jsmini = (() => {
       }
       const results = [wasmType];
       const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx);
-      const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0);
+      if (osrLocalCount !== void 0 && osrLocalCount > irFunc.paramCount) {
+        const osrExtraParams = osrLocalCount - irFunc.paramCount;
+        for (let i = 0; i < osrExtraParams; i++) {
+          params.push(wasmType);
+        }
+      }
+      const totalParamCount = params.length;
       const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
-      const extraLocalGroups = extraLocals > 0 ? [{ count: extraLocals, type: localType }] : void 0;
+      const wasmExtraLocals = osrLocalCount !== void 0 ? Math.max(0, extraLocals - (osrLocalCount - irFunc.paramCount)) : extraLocals;
+      const extraLocalGroups = wasmExtraLocals > 0 ? [{ count: wasmExtraLocals, type: localType }] : void 0;
       builder.addFunction(
         irFunc.name,
         params,
         results,
         bodyCode,
-        extraLocals > 0 ? extraLocals : 0,
+        wasmExtraLocals > 0 ? wasmExtraLocals : 0,
         totalParamCount,
         1,
         extraLocalGroups
@@ -9773,7 +10400,7 @@ var jsmini = (() => {
           knownFuncs: funcsMap,
           buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs }
         });
-        const result = compileIRToWasm(ir);
+        const result = compileIRToWasm(ir, func.localCount);
         if (!result) return null;
         const wasmFn = result.instance.exports[ir.name];
         return wasmFn ?? null;
@@ -10432,6 +11059,36 @@ var jsmini = (() => {
     SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
     SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
     vm.setGlobal("Symbol", SymbolFn);
+    const wrapVMHandler = (h) => {
+      if (h === void 0 || h === null) return void 0;
+      if (typeof h === "function") return h;
+      return (v) => vm.callFunction(h, void 0, [v]);
+    };
+    const PromiseConstructor = function PromiseCtor(executor) {
+      return new JSPromise((resolve, reject) => {
+        try {
+          if (typeof executor === "function") {
+            executor(resolve, reject);
+          } else {
+            vm.callFunction(executor, void 0, [resolve, reject]);
+          }
+        } catch (e) {
+          const reason = e?.__thrown ? e.value : e;
+          reject(reason);
+        }
+      });
+    };
+    PromiseConstructor.resolve = (value2) => JSPromise.resolve(value2);
+    PromiseConstructor.reject = (reason) => JSPromise.reject(reason);
+    PromiseConstructor.all = (promises) => JSPromise.all(promises);
+    PromiseConstructor.race = (promises) => JSPromise.race(promises);
+    PromiseConstructor.allSettled = (promises) => JSPromise.allSettled(promises);
+    PromiseConstructor.any = (promises) => JSPromise.any(promises);
+    vm.setGlobal("Promise", PromiseConstructor);
+    setHandlerCaller((handler, value2) => {
+      if (typeof handler === "function") return handler(value2);
+      return vm.callFunction(handler, void 0, [value2]);
+    });
     vm.setGlobal("eval", (code) => {
       if (typeof code !== "string" && !isJSString(code)) return code;
       const s = isJSString(code) ? jsStringToString(code) : code;
@@ -10454,6 +11111,8 @@ var jsmini = (() => {
     if (options.traceGC) vm.heap.traceGC = true;
     if (options.maxSteps) vm.maxSteps = options.maxSteps;
     const rawValue = vm.execute(func);
+    drainMicrotasks();
+    setHandlerCaller(null);
     const value = isJSString(rawValue) ? jsStringToString(rawValue) : rawValue;
     if (options.collectFeedback || options.collectDeopt || options.traceTier || options.traceGC) {
       const result = { value };
