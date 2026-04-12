@@ -233,6 +233,10 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   PromiseConstructor.__nativeConstructor = true;
   PromiseConstructor.resolve = (value: unknown) => JSPromise.resolve(value);
   PromiseConstructor.reject = (reason: unknown) => JSPromise.reject(reason);
+  PromiseConstructor.all = (promises: unknown[]) => JSPromise.all(promises);
+  PromiseConstructor.race = (promises: unknown[]) => JSPromise.race(promises);
+  PromiseConstructor.allSettled = (promises: unknown[]) => JSPromise.allSettled(promises);
+  PromiseConstructor.any = (promises: unknown[]) => JSPromise.any(promises);
   env.defineReadOnly("Promise", PromiseConstructor);
 
   // 外部から渡されたグローバル変数を注入 (VM eval フォールバック用)

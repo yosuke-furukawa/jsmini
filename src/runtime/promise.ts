@@ -129,6 +129,63 @@ export class JSPromise {
     p._reject(reason);
     return p;
   }
+
+  // Promise.all
+  static all(promises: unknown[]): JSPromise {
+    return new JSPromise((resolve, reject) => {
+      const results: unknown[] = new Array(promises.length);
+      let remaining = promises.length;
+      if (remaining === 0) { resolve!(results); return; }
+      for (let i = 0; i < promises.length; i++) {
+        const idx = i;
+        JSPromise.resolve(promises[i]).then(
+          (value: unknown) => { results[idx] = value; if (--remaining === 0) resolve!(results); },
+          (reason: unknown) => reject!(reason),
+        );
+      }
+    });
+  }
+
+  // Promise.race
+  static race(promises: unknown[]): JSPromise {
+    return new JSPromise((resolve, reject) => {
+      for (let i = 0; i < promises.length; i++) {
+        JSPromise.resolve(promises[i]).then(resolve, reject);
+      }
+    });
+  }
+
+  // Promise.allSettled
+  static allSettled(promises: unknown[]): JSPromise {
+    return new JSPromise((resolve) => {
+      const results: unknown[] = new Array(promises.length);
+      let remaining = promises.length;
+      if (remaining === 0) { resolve!(results); return; }
+      for (let i = 0; i < promises.length; i++) {
+        const idx = i;
+        JSPromise.resolve(promises[i]).then(
+          (value: unknown) => { results[idx] = { status: "fulfilled", value }; if (--remaining === 0) resolve!(results); },
+          (reason: unknown) => { results[idx] = { status: "rejected", reason }; if (--remaining === 0) resolve!(results); },
+        );
+      }
+    });
+  }
+
+  // Promise.any
+  static any(promises: unknown[]): JSPromise {
+    return new JSPromise((resolve, reject) => {
+      const errors: unknown[] = new Array(promises.length);
+      let remaining = promises.length;
+      if (remaining === 0) { reject!(new AggregateError(errors, "All promises were rejected")); return; }
+      for (let i = 0; i < promises.length; i++) {
+        const idx = i;
+        JSPromise.resolve(promises[i]).then(
+          (value: unknown) => resolve!(value),
+          (reason: unknown) => { errors[idx] = reason; if (--remaining === 0) reject!(new AggregateError(errors, "All promises were rejected")); },
+        );
+      }
+    });
+  }
 }
 
 // ========== Handler Wrapper Hook ==========

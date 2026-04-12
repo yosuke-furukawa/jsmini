@@ -434,6 +434,10 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   };
   PromiseConstructor.resolve = (value: unknown) => JSPromise.resolve(value);
   PromiseConstructor.reject = (reason: unknown) => JSPromise.reject(reason);
+  PromiseConstructor.all = (promises: unknown[]) => JSPromise.all(promises);
+  PromiseConstructor.race = (promises: unknown[]) => JSPromise.race(promises);
+  PromiseConstructor.allSettled = (promises: unknown[]) => JSPromise.allSettled(promises);
+  PromiseConstructor.any = (promises: unknown[]) => JSPromise.any(promises);
   vm.setGlobal("Promise", PromiseConstructor);
 
   // Promise handler を VM の callFunction で実行するフック
