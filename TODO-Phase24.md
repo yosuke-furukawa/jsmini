@@ -38,11 +38,13 @@ JSPI 対応:
 
 ### 24-2: jsmini 統合
 
-- [ ] 24-2a: IR に Await opcode 対応 (IR builder で AwaitExpression → Await op)
-- [ ] 24-2b: codegen: Await → Wasm import call (Suspending でラップした関数)
-- [ ] 24-2c: compileIRToWasm: Wasm export を promising でラップ
-- [ ] 24-2d: JitManager: async 関数の IR JIT パス (JSPI 有効時)
-- [ ] 24-2e: テスト: async function が Wasm JIT で動作確認
+- [x] 24-2a: IR builder: Await bytecode → Call(__await, value) として IR に表現
+- [x] 24-2b: codegen: Call(__await) → call import 0 (Suspending 関数)、f64 型対応
+- [x] 24-2c: compileIRToWasm: addImport(__await, Suspending)、promising で export ラップ
+- [x] 24-2d: JitManager: CachedWasm.jspiWrapped、executeWasm で Promise 返却
+- [x] 24-2e: VM: async 関数の 3 つの Call パスで JIT を試行 (feedback + tryCall)
+- [x] 24-2f: WasmBuilder: addImport 機能追加 (Import section + type/func index offset)
+- [x] 24-2g: tier log 確認: call #3 → "Wasm compiled" → "Wasm (JSPI)"
 
 ### 24-3: ベンチマーク
 
