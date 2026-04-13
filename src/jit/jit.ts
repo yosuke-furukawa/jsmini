@@ -24,6 +24,7 @@ type CachedWasm = {
   createArray: ((len: number) => unknown) | null;
   getArray: ((arr: unknown, idx: number) => number) | null;
   setArray: ((arr: unknown, idx: number, val: number) => void) | null;
+  jspiWrapped?: (...args: number[]) => Promise<number>;  // JSPI promising 済み
 };
 
 export class JitManager {
@@ -159,7 +160,9 @@ export class JitManager {
       const getArray = result.hasArrayOps ? (result.instance.exports as any).__get_array as ((arr: unknown, idx: number) => number) ?? null : null;
       const setArray = result.hasArrayOps ? (result.instance.exports as any).__set_array as ((arr: unknown, idx: number, val: number) => void) ?? null : null;
 
-      return { fn: wasmFn, memory: result.memory ?? null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
+      const cached: CachedWasm = { fn: wasmFn, memory: result.memory ?? null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
+      if (result.jspiWrapped) cached.jspiWrapped = result.jspiWrapped;
+      return cached;
     } catch {
       return null;
     }
@@ -337,6 +340,12 @@ export class JitManager {
         dst++;
       }
       wasmArgs.push(base);
+    }
+
+    // JSPI: async 関数は promising ラップ済み関数を呼ぶ → Promise を返す
+    if (cached.jspiWrapped) {
+      this.logTier(func, "Wasm (JSPI)", callCount);
+      return { result: cached.jspiWrapped(...wasmArgs) };
     }
 
     this.logTier(func, "Wasm", callCount);

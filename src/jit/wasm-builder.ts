@@ -3,6 +3,7 @@
 
 // Wasm セクション ID
 const SECTION_TYPE = 1;
+const SECTION_IMPORT = 2;
 const SECTION_FUNCTION = 3;
 const SECTION_MEMORY = 5;
 const SECTION_GLOBAL = 6;
@@ -127,10 +128,18 @@ type FuncDef = {
   extraLocalGroups?: LocalGroup[];  // 複数型の extra locals (指定時は extraLocals を無視)
 };
 
+type ImportDef = {
+  module: string;
+  name: string;
+  params: number[];
+  results: number[];
+};
+
 export class WasmBuilder {
   private functions: FuncDef[] = [];
   private structs: StructDef[] = [];
   private arrays: ArrayDef[] = [];
+  private imports: ImportDef[] = [];
   private memoryPages = 0;
   private globals: { type: number; mutable: boolean; initValue: number }[] = [];
 
@@ -161,6 +170,16 @@ export class WasmBuilder {
     });
   }
 
+  // import 追加 (func import)。返り値は import index (= func index)
+  addImport(module: string, name: string, params: number[], results: number[]): number {
+    const idx = this.imports.length;
+    this.imports.push({ module, name, params, results });
+    return idx;
+  }
+
+  // import 数を返す (func index のオフセット計算用)
+  get importCount(): number { return this.imports.length; }
+
   enableMemory(pages = 1): void {
     this.memoryPages = pages;
   }
@@ -179,9 +198,15 @@ export class WasmBuilder {
     buf.push(0x00, 0x61, 0x73, 0x6d); // \0asm
     buf.push(0x01, 0x00, 0x00, 0x00); // version 1
 
-    // Type section
+    // Type section (imports の型も含む)
     const typeSection = this.buildTypeSection();
     this.writeSection(buf, SECTION_TYPE, typeSection);
+
+    // Import section
+    if (this.imports.length > 0) {
+      const importSection = this.buildImportSection();
+      this.writeSection(buf, SECTION_IMPORT, importSection);
+    }
 
     // Function section
     const funcSection = this.buildFunctionSection();
@@ -240,13 +265,33 @@ export class WasmBuilder {
   // composite type のオフセット (struct → array → func の順)
   get structCount(): number { return this.structs.length; }
   get arrayCount(): number { return this.arrays.length; }
-  // func の type index は structs + arrays の後
-  get funcTypeOffset(): number { return this.structs.length + this.arrays.length; }
+  // local func の type index は structs + arrays + imports の後
+  get funcTypeOffset(): number { return this.structs.length + this.arrays.length + this.imports.length; }
+
+  private buildImportSection(): number[] {
+    const buf: number[] = [];
+    writeLEB128(buf, this.imports.length);
+    for (let i = 0; i < this.imports.length; i++) {
+      const imp = this.imports[i];
+      const enc = new TextEncoder();
+      const modBytes = enc.encode(imp.module);
+      writeLEB128(buf, modBytes.length);
+      buf.push(...modBytes);
+      const nameBytes = enc.encode(imp.name);
+      writeLEB128(buf, nameBytes.length);
+      buf.push(...nameBytes);
+      buf.push(0x00); // import kind = func
+      // type index: imports の型は type section の先頭に追加
+      // import i → type index = structs + arrays + i
+      writeLEB128(buf, this.structs.length + this.arrays.length + i);
+    }
+    return buf;
+  }
 
   private buildTypeSection(): number[] {
     const buf: number[] = [];
-    // struct + array + func の合計
-    writeLEB128(buf, this.structs.length + this.arrays.length + this.functions.length);
+    // struct + array + import func types + local func types
+    writeLEB128(buf, this.structs.length + this.arrays.length + this.imports.length + this.functions.length);
     // struct 型 (type index 0, 1, ...)
     for (const s of this.structs) {
       buf.push(WASM_TYPE.struct);
@@ -262,7 +307,15 @@ export class WasmBuilder {
       buf.push(a.elementType);
       buf.push(a.mutable ? 0x01 : 0x00);
     }
-    // func 型 (type index structs.length + arrays.length, ...)
+    // import func 型 (type index structs.length + arrays.length, ...)
+    for (const imp of this.imports) {
+      buf.push(WASM_TYPE.func);
+      writeLEB128(buf, imp.params.length);
+      buf.push(...imp.params);
+      writeLEB128(buf, imp.results.length);
+      buf.push(...imp.results);
+    }
+    // local func 型 (type index structs.length + arrays.length + imports.length, ...)
     for (const fn of this.functions) {
       buf.push(WASM_TYPE.func);
       writeLEB128(buf, fn.paramCount);
@@ -292,7 +345,7 @@ export class WasmBuilder {
       writeLEB128(buf, nameBytes.length);
       buf.push(...nameBytes);
       buf.push(0x00); // export kind = func
-      writeLEB128(buf, i); // func index
+      writeLEB128(buf, this.imports.length + i); // func index (imports first)
     }
     // Memory export
     if (this.memoryPages > 0) {

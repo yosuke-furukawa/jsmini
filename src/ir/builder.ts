@@ -431,6 +431,15 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           block.ops.push(op); stack.push(op.id);
           break;
         }
+        case "Await": {
+          const value = stack.pop()!;
+          // Await は JSPI の import call として表現
+          // call $__await(value) → suspend → resume → 結果値
+          const op = registerOp(createOp(irFunc, "Call", [value], "i32"));
+          op.calleeName = "__await";
+          block.ops.push(op); stack.push(op.id);
+          break;
+        }
         default: break;
       }
     }

@@ -277,6 +277,59 @@ JSPI 対応 (Phase 24):
 - IR: Await opcode → Suspending import の call として emit
 - Node.js: `--experimental-wasm-jspi` フラグが必要 (Chrome 137+ ではフラグ不要)
 
+---
+
+## Phase 24 検証結果: JSPI は実際に動く
+
+### 環境
+
+- Node.js v24.11.1 + `--experimental-wasm-jspi`
+- V8 13.6.233.10
+
+### 動作確認
+
+```wat
+;; WAT は普通の call — async の痕跡なし
+(module
+  (import "env" "awaitVal" (func $awaitVal (param i32) (result i32)))
+  (func $f (export "f") (param $x i32) (result i32)
+    local.get $x
+    call $awaitVal    ;; ← Wasm スタックごと suspend (JSPI が裏でやる)
+    i32.const 1
+    i32.add
+  )
+)
+```
+
+```js
+// JS 側のラップだけで async 化
+const awaitVal = new WebAssembly.Suspending(async (x) => x * 2);
+const instance = new WebAssembly.Instance(module, { env: { awaitVal } });
+const f = WebAssembly.promising(instance.exports.f);  // Promise を返す
+await f(10);  // → 21 (10*2 + 1)
+```
+
+**Wasm バイナリ自体には async の痕跡がない**。普通の `call` 命令。
+非同期制御は JS 側の `Suspending` / `promising` ラッパーが担当。
+
+### ベンチマーク: 1000 回 suspend/resume
+
+| 方式 | 時間 | vs JSPI |
+|---|---|---|
+| **JSPI (Wasm suspend/resume)** | **0.49ms** | baseline |
+| TW (JS generator yield) | 6.41ms | 13.2x 遅い |
+| VM (YieldSignal throw) | 7.66ms | 15.7x 遅い |
+| Sync Wasm (suspend なし) | 0.0025ms | 196x 速い |
+
+- JSPI は VM の **15.7 倍高速**
+- ただし sync Wasm (await なし) と比べると suspend のオーバーヘッドは存在 (約 200x)
+- 1 回の suspend/resume ≈ 0.49μs (JSPI) vs 7.66μs (VM YieldSignal)
+
+### なぜ JSPI が速いか
+
+- VM: `throw YieldSignal` → JS の例外機構で catch → フレーム保存 → microtask enqueue → drain → フレーム復元 → `vm.run()` 再開
+- JSPI: Wasm ランタイムがスタックを直接 swap。JS の例外機構を経由しない
+
 ### 参考記事
 
 - V8 Blog: "Faster async functions and promises" (2018, Maya Lekova & Benedikt Meurer)
