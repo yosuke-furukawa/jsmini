@@ -6733,6 +6733,13 @@ var jsmini = (() => {
             }
           }
         }
+        if (instr.op === "LdaUpvalue" && instr.operand !== void 0) {
+          const box = frame.upvalueBoxes[instr.operand];
+          if (box?.value && typeof box.value === "object" && "bytecode" in box.value && !seen.has(box.value.name)) {
+            relatedFuncs.push(box.value);
+            seen.add(box.value.name);
+          }
+        }
       }
       for (const c of func.constants) {
         if (c && typeof c === "object" && "bytecode" in c && !seen.has(c.name)) {
