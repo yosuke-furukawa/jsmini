@@ -5400,6 +5400,7 @@ var jsmini = (() => {
 
   // src/jit/wasm-builder.ts
   var SECTION_TYPE = 1;
+  var SECTION_IMPORT = 2;
   var SECTION_FUNCTION = 3;
   var SECTION_MEMORY = 5;
   var SECTION_GLOBAL = 6;
@@ -5495,6 +5496,7 @@ var jsmini = (() => {
       __publicField(this, "functions", []);
       __publicField(this, "structs", []);
       __publicField(this, "arrays", []);
+      __publicField(this, "imports", []);
       __publicField(this, "memoryPages", 0);
       __publicField(this, "globals", []);
     }
@@ -5522,6 +5524,16 @@ var jsmini = (() => {
         extraLocalGroups
       });
     }
+    // import 追加 (func import)。返り値は import index (= func index)
+    addImport(module, name2, params, results) {
+      const idx = this.imports.length;
+      this.imports.push({ module, name: name2, params, results });
+      return idx;
+    }
+    // import 数を返す (func index のオフセット計算用)
+    get importCount() {
+      return this.imports.length;
+    }
     enableMemory(pages = 1) {
       this.memoryPages = pages;
     }
@@ -5537,6 +5549,10 @@ var jsmini = (() => {
       buf.push(1, 0, 0, 0);
       const typeSection = this.buildTypeSection();
       this.writeSection(buf, SECTION_TYPE, typeSection);
+      if (this.imports.length > 0) {
+        const importSection = this.buildImportSection();
+        this.writeSection(buf, SECTION_IMPORT, importSection);
+      }
       const funcSection = this.buildFunctionSection();
       this.writeSection(buf, SECTION_FUNCTION, funcSection);
       if (this.memoryPages > 0) {
@@ -5584,13 +5600,30 @@ var jsmini = (() => {
     get arrayCount() {
       return this.arrays.length;
     }
-    // func の type index は structs + arrays の後
+    // local func の type index は structs + arrays + imports の後
     get funcTypeOffset() {
-      return this.structs.length + this.arrays.length;
+      return this.structs.length + this.arrays.length + this.imports.length;
+    }
+    buildImportSection() {
+      const buf = [];
+      writeLEB128(buf, this.imports.length);
+      for (let i = 0; i < this.imports.length; i++) {
+        const imp = this.imports[i];
+        const enc = new TextEncoder();
+        const modBytes = enc.encode(imp.module);
+        writeLEB128(buf, modBytes.length);
+        buf.push(...modBytes);
+        const nameBytes = enc.encode(imp.name);
+        writeLEB128(buf, nameBytes.length);
+        buf.push(...nameBytes);
+        buf.push(0);
+        writeLEB128(buf, this.structs.length + this.arrays.length + i);
+      }
+      return buf;
     }
     buildTypeSection() {
       const buf = [];
-      writeLEB128(buf, this.structs.length + this.arrays.length + this.functions.length);
+      writeLEB128(buf, this.structs.length + this.arrays.length + this.imports.length + this.functions.length);
       for (const s of this.structs) {
         buf.push(WASM_TYPE.struct);
         writeLEB128(buf, s.fields.length);
@@ -5603,6 +5636,13 @@ var jsmini = (() => {
         buf.push(WASM_TYPE.array);
         buf.push(a.elementType);
         buf.push(a.mutable ? 1 : 0);
+      }
+      for (const imp of this.imports) {
+        buf.push(WASM_TYPE.func);
+        writeLEB128(buf, imp.params.length);
+        buf.push(...imp.params);
+        writeLEB128(buf, imp.results.length);
+        buf.push(...imp.results);
       }
       for (const fn of this.functions) {
         buf.push(WASM_TYPE.func);
@@ -5631,7 +5671,7 @@ var jsmini = (() => {
         writeLEB128(buf, nameBytes.length);
         buf.push(...nameBytes);
         buf.push(0);
-        writeLEB128(buf, i);
+        writeLEB128(buf, this.imports.length + i);
       }
       if (this.memoryPages > 0) {
         const memName = new TextEncoder().encode("memory");
@@ -6786,6 +6826,7 @@ var jsmini = (() => {
               pc = currentFrame.pc;
               savedLocals = currentFrame.locals;
               savedStack = [];
+              for (let si = 0; si <= vm.sp; si++) savedStack.push(vm.stack[si]);
               vm.frames.pop();
               const awaitedValue = e.value;
               JSPromise.resolve(awaitedValue).then(
@@ -7786,6 +7827,14 @@ var jsmini = (() => {
               }
               this.setArguments(fn, locals, args);
               if (fn.isAsync) {
+                if (this.feedback) this.feedback.recordCall(fn, args);
+                if (this.jit) {
+                  const jitResult = this.jit.tryCall(fn, args, closureBoxes.map((b) => b.value));
+                  if (jitResult !== null) {
+                    this.push(jitResult.result);
+                    break;
+                  }
+                }
                 const asyncPromise = this.runAsyncFunction(fn, locals, closureBoxes);
                 this.push(asyncPromise);
               } else if (fn.isGenerator) {
@@ -7829,6 +7878,14 @@ var jsmini = (() => {
               }
               this.setArguments(fn, locals, args);
               if (fn.isAsync) {
+                if (this.feedback) this.feedback.recordCall(fn, args);
+                if (this.jit) {
+                  const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map((b) => b.value), thisObj);
+                  if (jitResult !== null) {
+                    this.push(jitResult.result);
+                    break;
+                  }
+                }
                 const asyncPromise = this.runAsyncFunction(fn, locals, closure.capturedBoxes);
                 this.push(asyncPromise);
               } else if (fn.isGenerator) {
@@ -7853,6 +7910,14 @@ var jsmini = (() => {
               }
               this.setArguments(fn, locals, args);
               if (fn.isAsync) {
+                if (this.feedback) this.feedback.recordCall(fn, args);
+                if (this.jit) {
+                  const jitResult = this.jit.tryCall(fn, args, [], thisObj);
+                  if (jitResult !== null) {
+                    this.push(jitResult.result);
+                    break;
+                  }
+                }
                 const asyncPromise = this.runAsyncFunction(fn, locals, []);
                 this.push(asyncPromise);
               } else if (fn.isGenerator) {
@@ -8589,6 +8654,14 @@ var jsmini = (() => {
           }
           case "LoadThis": {
             const op = registerOp(createOp(irFunc, "LoadThis", [], "i32"));
+            block.ops.push(op);
+            stack.push(op.id);
+            break;
+          }
+          case "Await": {
+            const value = stack.pop();
+            const op = registerOp(createOp(irFunc, "Call", [value], "i32"));
+            op.calleeName = "__await";
             block.ops.push(op);
             stack.push(op.id);
             break;
@@ -9850,10 +9923,18 @@ var jsmini = (() => {
         break;
       }
       case "Call": {
-        for (let i = 1; i < op.args.length; i++) {
-          emitLoadValue(op.args[i], body, opToLocal, opById, forceF64);
+        if (op.calleeName === "__await") {
+          for (const argId of op.args) {
+            emitLoadValue(argId, body, opToLocal, opById, forceF64);
+          }
+          body.push(WASM_OP.call, 0);
+        } else {
+          for (let i = 1; i < op.args.length; i++) {
+            emitLoadValue(op.args[i], body, opToLocal, opById, forceF64);
+          }
+          const hasAwaitImport = irFunc.blocks.some((b) => b.ops.some((o) => o.opcode === "Call" && o.calleeName === "__await"));
+          body.push(WASM_OP.call, hasAwaitImport ? 1 : 0);
         }
-        body.push(WASM_OP.call, 0);
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
@@ -10123,10 +10204,13 @@ var jsmini = (() => {
     try {
       let hasArrayOps = false;
       let hasSelfRecursion = false;
+      let hasAwait = false;
       for (const block of irFunc.blocks) {
         for (const op of block.ops) {
           if (op.opcode === "Call") {
-            if (op.calleeName === irFunc.name && !hasArrayOps) {
+            if (op.calleeName === "__await") {
+              hasAwait = true;
+            } else if (op.calleeName === irFunc.name && !hasArrayOps) {
               hasSelfRecursion = true;
             } else {
               return null;
@@ -10139,6 +10223,10 @@ var jsmini = (() => {
         }
       }
       const builder = new WasmBuilder();
+      if (hasAwait) {
+        const awaitType = functionNeedsF64(irFunc) ? WASM_TYPE.f64 : WASM_TYPE.i32;
+        builder.addImport("env", "__await", [awaitType], [awaitType]);
+      }
       const useF64 = functionNeedsF64(irFunc);
       const wasmType = useF64 ? WASM_TYPE.f64 : WASM_TYPE.i32;
       let arrayTypeIdx = -1;
@@ -10264,8 +10352,21 @@ var jsmini = (() => {
       }
       const wasmBytes = builder.build();
       const module = new WebAssembly.Module(wasmBytes);
-      const instance = new WebAssembly.Instance(module);
+      const importObject = {};
+      if (hasAwait && typeof WebAssembly.Suspending === "function") {
+        importObject.env = {
+          __await: new WebAssembly.Suspending(async (v) => {
+            const resolved = await Promise.resolve(v);
+            return resolved;
+          })
+        };
+      }
+      const instance = new WebAssembly.Instance(module, hasAwait ? importObject : void 0);
       const memory = hasPropertyOps ? instance.exports.memory : void 0;
+      let jspiWrapped;
+      if (hasAwait && typeof WebAssembly.promising === "function") {
+        jspiWrapped = WebAssembly.promising(instance.exports[irFunc.name]);
+      }
       return {
         instance,
         funcName: irFunc.name,
@@ -10273,9 +10374,12 @@ var jsmini = (() => {
         arrayParams: [...arrayParams],
         upvalueCount: upvalueCount > 0 ? upvalueCount : void 0,
         hasThis: hasThis || void 0,
-        memory
+        memory,
+        hasAwait: hasAwait || void 0,
+        jspiWrapped
       };
     } catch (e) {
+      if (typeof process !== "undefined" && process.env?.DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e);
       return null;
     }
   }
@@ -10385,7 +10489,9 @@ var jsmini = (() => {
         const createArray = result.hasArrayOps ? result.instance.exports.__create_array ?? null : null;
         const getArray = result.hasArrayOps ? result.instance.exports.__get_array ?? null : null;
         const setArray = result.hasArrayOps ? result.instance.exports.__set_array ?? null : null;
-        return { fn: wasmFn, memory: result.memory ?? null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
+        const cached = { fn: wasmFn, memory: result.memory ?? null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
+        if (result.jspiWrapped) cached.jspiWrapped = result.jspiWrapped;
+        return cached;
       } catch {
         return null;
       }
@@ -10535,6 +10641,10 @@ var jsmini = (() => {
           dst++;
         }
         wasmArgs.push(base2);
+      }
+      if (cached.jspiWrapped) {
+        this.logTier(func, "Wasm (JSPI)", callCount);
+        return { result: cached.jspiWrapped(...wasmArgs) };
       }
       this.logTier(func, "Wasm", callCount);
       return { result: fn(...wasmArgs) };
