@@ -7167,7 +7167,7 @@ var jsmini = (() => {
                       box = { value: frame.locals[uv.parentSlot] };
                       localBoxes.set(uv.parentSlot, box);
                     } else {
-                      box.value = frame.locals[uv.parentSlot];
+                      frame.locals[uv.parentSlot] = box.value;
                     }
                     return box;
                   } else {

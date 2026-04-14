@@ -626,8 +626,9 @@ export class VM {
                     box = { value: frame.locals[uv.parentSlot] };
                     localBoxes.set(uv.parentSlot, box);
                   } else {
-                    // ボックスの値を最新のローカル値に同期
-                    box.value = frame.locals[uv.parentSlot];
+                    // ボックスが既にあるなら、box が真のソース (StaUpvalue で更新済み)
+                    // locals をボックスの値で同期 (LdaLocal との整合性のため)
+                    frame.locals[uv.parentSlot] = box.value;
                   }
                   return box;
                 } else {
