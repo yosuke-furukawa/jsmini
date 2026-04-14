@@ -167,21 +167,26 @@ Source Code
 
 ## パフォーマンス比較
 
-V8-JIT を無効にした状態での純粋な jsmini の性能比較 (`npm run bench`):
+jsmini の 3 層実行エンジン (TW → VM → JIT) の性能比較 (`npm run bench`):
 
-| Benchmark | Tree-Walking | Bytecode VM | Wasm JIT |
-|-----------|-------------|-------------|----------|
-| fibonacci(25) | 1631ms | 1054ms (1.55x) | **0.43ms (3822x)** |
-| for loop sum (10K) | 53ms | 52ms (1.02x) | **0.70ms (76x)** |
-| nested loop (100x100) | 54ms | 51ms (1.06x) | **0.72ms (74x)** |
-| ackermann(3,4) | 88ms | 57ms (1.55x) | **0.27ms (324x)** |
-| hot add (10K calls) | 100ms | 86ms (1.17x) | 79ms (1.27x) |
-| quicksort (200 x10) | 484ms | 444ms (1.09x) | **61ms (7.9x)** |
+| Benchmark | Tree-Walking | Bytecode VM | Wasm JIT | TW→JIT 倍率 |
+|-----------|-------------|-------------|----------|------------|
+| fibonacci(25) | 438ms | 91ms | 0.38ms | **1153x** |
+| for loop sum (10K) | 9.3ms | 1.9ms | 0.13ms | **72x** |
+| nested loop (100x100) | 9.3ms | 1.9ms | 0.12ms | **78x** |
+| ackermann(3,4) | 24ms | 4.6ms | 0.10ms | **240x** |
+| quicksort (200x10) | 98ms | 24ms | 14ms | **7.0x** |
+| inlining cube(square) | 36ms | 15ms | 9.2ms | **3.9x** |
+| LICM (200x10K) | 2488ms | 1235ms | 2.95ms | **843x** |
+| OSR sum(5M) 1call | — | 1082ms | 5.0ms | **215x** |
+| Promise chain (1000) | 5.4ms | 0.84ms | — | VM 6.4x |
 
-- **Wasm JIT** が圧倒的に速い: fibonacci 3822x、ackermann 324x、for loop 76x、nested loop 74x
-- **quicksort も JIT で 7.9x**: Phase 14 の WasmGC Array により配列操作が Wasm 内で完結 (以前は 0.97x で TW に負けていた)
-- **VM が TW に勝つ** のは再帰が深いパターン (fibonacci 1.55x, ackermann 1.55x)
-- 詳細は [BENCHMARK.md](./BENCHMARK.md)、学んだことは [LEARN-VM.md](./LEARN-VM.md)、[LEARN-JIT.md](./LEARN-JIT.md) を参照
+- **TW < VM < JIT** の階層が一貫: VM は TW の 2-5x、JIT は TW の 72-1153x
+- **Proper OSR**: 1 回呼び出しの関数でもループ途中から Wasm に切り替え (215x)
+- **JIT には Direct / IR の 2 パス**: Direct は単純ループに強い、IR は Inlining + 正確性 (overflow 検出) に強い
+- **Promise**: VM が TW の 6.4x (microtask の bytecode dispatch が高速)
+
+詳細は [BENCHMARK.md](./BENCHMARK.md)、学んだことは [LEARN-VM.md](./LEARN-VM.md)、[LEARN-JIT.md](./LEARN-JIT.md) を参照
 
 ## Test262 準拠率
 
@@ -250,7 +255,7 @@ npm start -- --trace-tier 'function add(a,b){return a+b;} for(var i=0;i<110;i=i+
 ### テストを実行
 
 ```bash
-# ユニットテスト (685 tests)
+# ユニットテスト (753 tests)
 npm test
 
 # ベンチマーク
@@ -343,8 +348,9 @@ src/
 - [x] **Phase 19** — Stackifier + ループ Wasm 化 (for loop 79x, nested 80x)
 - [x] **Phase 20** — Range Analysis + i32 overflow → f64 昇格 + 配列 IR 対応
 - [x] **Phase 21** — LICM + CSE + Strength Reduction + クロージャ/プロパティ/Construct IR 対応
-- [x] **Phase 22** — Proper OSR (全 locals を Wasm に渡して途中から再開, 185x)
-- [ ] **Phase 23** — Promise + microtask キュー + async/await (進行中)
+- [x] **Phase 22** — Proper OSR (全 locals を Wasm に渡して途中から再開, 215x)
+- [x] **Phase 23** — Promise + microtask キュー + async/await (TW + VM, 753 テスト)
+- [x] **Phase 24** — JSPI (Wasm Stack Switching) async JIT 検証
 
 詳細は [PLAN.md](./PLAN.md) を参照。
 
@@ -359,6 +365,7 @@ src/
 - [LEARN-Phase17-19.md](./LEARN-Phase17-19.md) — Type Specialization + Inlining + Stackifier
 - [LEARN-Phase20.md](./LEARN-Phase20.md) — Range Analysis + overflow 安全性 + 配列 IR
 - [LEARN-Phase21.md](./LEARN-Phase21.md) — LICM + CSE + Strength Reduction + LICM×LoadProperty 79x
+- [LEARN-Phase24.md](./LEARN-Phase24.md) — JSPI: suspend 15.7x 速いが microtask queue がボトルネック
 - [RESEARCH-IR.md](./RESEARCH-IR.md) — V8, JSC, SpiderMonkey の IR 設計調査
 - [RESEARCH-Promise.md](./RESEARCH-Promise.md) — Promise/async-await + JSPI (Wasm Stack Switching)
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — jsmini 全パイプライン解説 (Lexer→Parser→VM→JIT→IR→Wasm)
