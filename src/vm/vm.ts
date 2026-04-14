@@ -125,7 +125,7 @@ export class VM {
     // 関連関数を収集 (LdaGlobal + Call で参照される関数 + constants のクロージャ)
     const relatedFuncs = [func];
     const seen = new Set<string>([func.name]);
-    // bytecode 内の LdaGlobal + Call パターンから参照される関数
+    // bytecode 内の LdaGlobal / LdaUpvalue + Call パターンから参照される関数
     for (const instr of func.bytecode) {
       if (instr.op === "LdaGlobal" && instr.operand !== undefined) {
         const name = func.constants[instr.operand] as string;
@@ -135,6 +135,14 @@ export class VM {
             relatedFuncs.push(globalVal as BytecodeFunction);
             seen.add(name);
           }
+        }
+      }
+      // let/const で定義された関数は LdaUpvalue 経由で参照される
+      if (instr.op === "LdaUpvalue" && instr.operand !== undefined) {
+        const box = frame.upvalueBoxes[instr.operand];
+        if (box?.value && typeof box.value === "object" && "bytecode" in box.value && !seen.has((box.value as BytecodeFunction).name)) {
+          relatedFuncs.push(box.value as BytecodeFunction);
+          seen.add((box.value as BytecodeFunction).name);
         }
       }
     }
