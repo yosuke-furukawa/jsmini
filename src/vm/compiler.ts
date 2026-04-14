@@ -26,6 +26,7 @@ class BytecodeCompiler {
   private hasRestParam = false;
   private isGenerator = false;
   private isAsync = false;
+  private lexicalLocals = new Set<string>(); // let/const で宣言されたローカル変数名
   private upvalues: { name: string; parentSlot: number }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
@@ -124,11 +125,15 @@ class BytecodeCompiler {
       return;
     }
     if (this.isFunction) {
-      // トップレベル変数は global を優先（JIT が LdaGlobal で関連関数を検出するため）
+      // トップレベル変数: var は global、let/const は upvalue
       if (this.parent && !this.parent.isFunction && this.parent.resolveLocal(name) !== null) {
-        const nameIdx = this.addConstant(name);
-        this.emit("LdaGlobal", nameIdx);
-        return;
+        if (!this.parent.lexicalLocals.has(name)) {
+          // var: global を優先（JIT が LdaGlobal で関連関数を検出するため）
+          const nameIdx = this.addConstant(name);
+          this.emit("LdaGlobal", nameIdx);
+          return;
+        }
+        // let/const: upvalue として解決 (global には昇格しない)
       }
       const upIdx = this.resolveUpvalue(name);
       if (upIdx >= 0) {
@@ -376,6 +381,10 @@ class BytecodeCompiler {
         if (!this.isFunction && stmt.kind !== "var") {
           for (const decl of stmt.declarations) {
             this.preDeclareBindingNames(decl.id);
+            // lexical 変数を記録 (子関数で upvalue として解決するため)
+            if (decl.id.type === "Identifier") {
+              this.lexicalLocals.add(decl.id.name);
+            }
           }
         }
         for (const decl of stmt.declarations) {

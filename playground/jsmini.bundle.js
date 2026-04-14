@@ -3954,6 +3954,8 @@ var jsmini = (() => {
       __publicField(this, "hasRestParam", false);
       __publicField(this, "isGenerator", false);
       __publicField(this, "isAsync", false);
+      __publicField(this, "lexicalLocals", /* @__PURE__ */ new Set());
+      // let/const で宣言されたローカル変数名
       __publicField(this, "upvalues", []);
       this.parent = parent;
       this.isFunction = parent !== null;
@@ -4036,9 +4038,11 @@ var jsmini = (() => {
       }
       if (this.isFunction) {
         if (this.parent && !this.parent.isFunction && this.parent.resolveLocal(name2) !== null) {
-          const nameIdx2 = this.addConstant(name2);
-          this.emit("LdaGlobal", nameIdx2);
-          return;
+          if (!this.parent.lexicalLocals.has(name2)) {
+            const nameIdx2 = this.addConstant(name2);
+            this.emit("LdaGlobal", nameIdx2);
+            return;
+          }
         }
         const upIdx = this.resolveUpvalue(name2);
         if (upIdx >= 0) {
@@ -4254,6 +4258,9 @@ var jsmini = (() => {
           if (!this.isFunction && stmt.kind !== "var") {
             for (const decl of stmt.declarations) {
               this.preDeclareBindingNames(decl.id);
+              if (decl.id.type === "Identifier") {
+                this.lexicalLocals.add(decl.id.name);
+              }
             }
           }
           for (const decl of stmt.declarations) {
