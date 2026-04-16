@@ -35,7 +35,7 @@ https://yosuke-furukawa.github.io/jsmini/
 
 ---
 
-## デモ 1: `console.log(1 + 2)` の裏側
+## デモ 1: `console.log(1 + 2)` の裏側 (1/2)
 
 Playground に入力して各タブを見る:
 
@@ -52,6 +52,10 @@ CallExpression
        └── BinaryExpression(1 + 2)
 ```
 → 単語の並びから「構造」を理解する
+
+---
+
+## デモ 1: `console.log(1 + 2)` の裏側 (2/2)
 
 **Bytecode タブ:**
 ```
