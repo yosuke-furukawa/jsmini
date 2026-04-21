@@ -116,3 +116,41 @@ describe("Phase 25 - Object.getOwnPropertyNames / getOwnPropertySymbols", () => 
   });
 });
 
+describe("Phase 25 - Promise.withResolvers", () => {
+  it("resolve through withResolvers (TW)", () => {
+    assert.deepEqual(run(`
+      var d = Promise.withResolvers();
+      d.promise.then(function(v){ console.log(v); });
+      d.resolve(123);
+    `), [123]);
+  });
+
+  it("reject through withResolvers (TW)", () => {
+    assert.deepEqual(run(`
+      var d = Promise.withResolvers();
+      d.promise.then(function(v){ console.log("ok"); }, function(r){ console.log(r); });
+      d.reject("boom");
+    `), ["boom"]);
+  });
+
+  it("resolve through withResolvers (VM)", () => {
+    assert.deepEqual(runVM(`
+      var d = Promise.withResolvers();
+      d.promise.then(function(v){ console.log(v); });
+      d.resolve(456);
+    `), [456]);
+  });
+
+  it("await withResolvers promise (TW)", () => {
+    assert.deepEqual(run(`
+      async function f() {
+        var d = Promise.withResolvers();
+        d.resolve(7);
+        var v = await d.promise;
+        console.log(v);
+      }
+      f();
+    `), [7]);
+  });
+});
+

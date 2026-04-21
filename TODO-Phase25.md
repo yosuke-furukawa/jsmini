@@ -56,11 +56,10 @@ PLAN-v6 の Phase 25 に該当:
 
 ### 25-4: Promise.withResolvers
 
-- [ ] 25-4a: VM: `PromiseConstructor.withResolvers = () => { ... }`
-      で `{promise, resolve, reject}` を返す
-- [ ] 25-4b: TW 側も同等に追加
-- [ ] 25-4c: テスト: `const {promise, resolve} = Promise.withResolvers();
-      resolve(42); await promise === 42`
+- [x] 25-4a: VM: `PromiseConstructor.withResolvers = () => { ... }`
+      で `{promise, resolve, reject}` を返す (VM 側は JSObjectInternal で返す)
+- [x] 25-4b: TW 側も同等に追加 (TW はプレーン object)
+- [x] 25-4c: テスト: resolve / reject / await 経由のラウンドトリップ
 
 ### 25-5: test262 再計測
 

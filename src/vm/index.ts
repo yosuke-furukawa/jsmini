@@ -512,6 +512,16 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   PromiseConstructor.race = (promises: unknown[]) => JSPromise.race(promises);
   PromiseConstructor.allSettled = (promises: unknown[]) => JSPromise.allSettled(promises);
   PromiseConstructor.any = (promises: unknown[]) => JSPromise.any(promises);
+  PromiseConstructor.withResolvers = () => {
+    let resolve!: (v: unknown) => void;
+    let reject!: (r: unknown) => void;
+    const promise = new JSPromise((res, rej) => { resolve = res; reject = rej; });
+    const result = vm.heap.allocate(createJSObject());
+    jsObjSet(result, "promise", promise);
+    jsObjSet(result, "resolve", resolve);
+    jsObjSet(result, "reject", reject);
+    return result;
+  };
   vm.setGlobal("Promise", PromiseConstructor);
 
   // Promise handler を VM の callFunction で実行するフック
