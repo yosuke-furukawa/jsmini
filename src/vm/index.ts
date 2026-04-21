@@ -358,6 +358,80 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   };
   ObjectWrapper.freeze = (obj: unknown) => obj;
   ObjectWrapper.prototype = vm.objectPrototype;
+
+  const descField = (desc: unknown, name: string): unknown => {
+    if (isJSObject(desc)) return jsObjGet(desc, name);
+    if (desc && typeof desc === "object") return (desc as Record<string, unknown>)[name];
+    return undefined;
+  };
+  const descHas = (desc: unknown, name: string): boolean => {
+    if (isJSObject(desc)) return getHiddenClass(desc).properties.has(name);
+    if (desc && typeof desc === "object") return name in (desc as object);
+    return false;
+  };
+  const toKey = (key: unknown): string => {
+    if (isJSSymbol(key)) return key.key;
+    return isJSString(key) ? jsStringToString(key) : String(key);
+  };
+  ObjectWrapper.defineProperty = (obj: unknown, key: unknown, desc: unknown) => {
+    const k = toKey(key);
+    if (descHas(desc, "get") || descHas(desc, "set")) {
+      throw new TypeError("accessor descriptors not yet supported");
+    }
+    if (descHas(desc, "value")) {
+      jsObjSet(obj as any, k, descField(desc, "value"));
+    }
+    return obj;
+  };
+  ObjectWrapper.defineProperties = (obj: unknown, descs: unknown) => {
+    const keys = isJSObject(descs) ? [...getHiddenClass(descs).properties.keys()].filter(k => k !== "__proto__") :
+                 (descs && typeof descs === "object" ? Object.keys(descs as object) : []);
+    for (const k of keys) {
+      const d = descField(descs, k);
+      ObjectWrapper.defineProperty(obj, k, d);
+    }
+    return obj;
+  };
+  ObjectWrapper.getOwnPropertyDescriptor = (obj: unknown, key: unknown): unknown => {
+    const k = toKey(key);
+    if (isJSObject(obj)) {
+      const props = getHiddenClass(obj).properties;
+      if (!props.has(k)) return undefined;
+      const d = vm.heap.allocate(createJSObject());
+      jsObjSet(d, "value", jsObjGet(obj, k));
+      jsObjSet(d, "writable", true);
+      jsObjSet(d, "enumerable", true);
+      jsObjSet(d, "configurable", true);
+      return d;
+    }
+    if (obj && typeof obj === "object") {
+      return Object.getOwnPropertyDescriptor(obj, k);
+    }
+    return undefined;
+  };
+  ObjectWrapper.getPrototypeOf = (obj: unknown): unknown => {
+    if (isJSObject(obj)) {
+      const props = getHiddenClass(obj).properties;
+      if (!props.has("__proto__")) return vm.objectPrototype;
+      return jsObjGet(obj, "__proto__");
+    }
+    if (obj && typeof obj === "object") return Object.getPrototypeOf(obj);
+    return null;
+  };
+  ObjectWrapper.setPrototypeOf = (obj: unknown, proto: unknown) => {
+    if (isJSObject(obj)) jsObjSet(obj, "__proto__", proto);
+    else if (obj && typeof obj === "object") Object.setPrototypeOf(obj, proto as object | null);
+    return obj;
+  };
+  ObjectWrapper.getOwnPropertyNames = (obj: unknown) => {
+    const keys = jsObjKeys(obj);
+    return keys.filter(k => !k.startsWith("@@")).map(k => internString(k));
+  };
+  ObjectWrapper.getOwnPropertySymbols = (_obj: unknown) => {
+    // Note: JSSymbol の登録が無いので現状は空配列を返す (最小実装)
+    return [];
+  };
+
   vm.setGlobal("Object", ObjectWrapper);
 
   // Math

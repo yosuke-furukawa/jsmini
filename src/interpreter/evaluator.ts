@@ -200,6 +200,60 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   twObjectWrapper.assign = Object.assign;
   twObjectWrapper.create = Object.create;
   twObjectWrapper.freeze = (obj: unknown) => obj;
+  const twToKey = (key: unknown): string | symbol => {
+    if (isJSString(key)) return jsStringToString(key);
+    return typeof key === "symbol" ? key : String(key);
+  };
+  twObjectWrapper.defineProperty = (obj: unknown, key: unknown, desc: any) => {
+    if (obj === null || typeof obj !== "object") {
+      throw new TypeError("Object.defineProperty called on non-object");
+    }
+    const k = twToKey(key);
+    if (desc && typeof desc === "object" && ("get" in desc || "set" in desc)) {
+      throw new TypeError("accessor descriptors not yet supported");
+    }
+    if (desc && typeof desc === "object" && "value" in desc) {
+      (obj as any)[k] = desc.value;
+    }
+    return obj;
+  };
+  twObjectWrapper.defineProperties = (obj: unknown, descs: any) => {
+    if (descs && typeof descs === "object") {
+      for (const k of Object.keys(descs)) {
+        twObjectWrapper.defineProperty(obj, k, descs[k]);
+      }
+    }
+    return obj;
+  };
+  twObjectWrapper.getOwnPropertyDescriptor = (obj: unknown, key: unknown) => {
+    if (obj === null || typeof obj !== "object") return undefined;
+    const k = twToKey(key);
+    if (!Object.prototype.hasOwnProperty.call(obj, k)) return undefined;
+    return {
+      value: (obj as any)[k],
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    };
+  };
+  twObjectWrapper.getPrototypeOf = (obj: unknown) => {
+    if (obj === null || typeof obj !== "object") return null;
+    return Object.getPrototypeOf(obj);
+  };
+  twObjectWrapper.setPrototypeOf = (obj: unknown, proto: unknown) => {
+    if (obj && typeof obj === "object") Object.setPrototypeOf(obj, proto as object | null);
+    return obj;
+  };
+  twObjectWrapper.getOwnPropertyNames = (obj: unknown) => {
+    if (obj === null || typeof obj !== "object") return [];
+    return Object.getOwnPropertyNames(obj).filter(
+      k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(") && !k.startsWith("@@"),
+    );
+  };
+  twObjectWrapper.getOwnPropertySymbols = (obj: unknown) => {
+    if (obj === null || typeof obj !== "object") return [];
+    return Object.getOwnPropertySymbols(obj);
+  };
   env.defineReadOnly("Object", twObjectWrapper);
 
   // JSON

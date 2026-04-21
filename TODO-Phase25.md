@@ -27,32 +27,32 @@ PLAN-v6 の Phase 25 に該当:
 
 ### 25-1: Object.defineProperty / getOwnPropertyDescriptor
 
-- [ ] 25-1a: HiddenClass にプロパティ属性 (writable / enumerable / configurable) を
+- [x] 25-1a: HiddenClass にプロパティ属性 (writable / enumerable / configurable) を
       持たせるか、最小実装 (属性無視、常に true) で済ますかを決める。
-      → propertyHelper.js が投げる assertion を見て判断
-- [ ] 25-1b: VM (`src/vm/index.ts`): `ObjectWrapper.defineProperty(obj, key, desc)`
-      を実装。`jsObjSet` を経由して value を書き込む。accessor (get/set) は後続で可。
-- [ ] 25-1c: VM: `ObjectWrapper.getOwnPropertyDescriptor(obj, key)` を実装。
+      → **最小実装を採用**。propertyHelper.js の assertion で落ちたら都度追加。
+- [x] 25-1b: VM (`src/vm/index.ts`): `ObjectWrapper.defineProperty(obj, key, desc)`
+      を実装。`jsObjSet` を経由して value を書き込む。accessor (get/set) は TypeError。
+- [x] 25-1c: VM: `ObjectWrapper.getOwnPropertyDescriptor(obj, key)` を実装。
       `{value, writable, enumerable, configurable}` を返す。
-- [ ] 25-1d: TW (`src/interpreter/evaluator.ts`): 同等のものを `twObjectWrapper` に追加
-- [ ] 25-1e: テスト: 両モードで `Object.defineProperty({}, "x", {value: 1})` が動く
-- [ ] 25-1f: テスト: `Object.getOwnPropertyDescriptor({x:1}, "x").value === 1`
+- [x] 25-1d: TW (`src/interpreter/evaluator.ts`): 同等のものを `twObjectWrapper` に追加
+- [x] 25-1e: テスト: 両モードで `Object.defineProperty({}, "x", {value: 1})` が動く
+- [x] 25-1f: テスト: `Object.getOwnPropertyDescriptor({x:1}, "x").value === 1`
 
 ### 25-2: Object.getPrototypeOf / setPrototypeOf
 
-- [ ] 25-2a: VM: `getPrototypeOf` = `jsObjGet(obj, "__proto__")` ラッパー
-- [ ] 25-2b: VM: `setPrototypeOf(obj, proto)` = `jsObjSet(obj, "__proto__", proto)`
-- [ ] 25-2c: TW 側も同じ API で追加
-- [ ] 25-2d: テスト: `class C extends B {}` の prototype チェーンを検査
+- [x] 25-2a: VM: `getPrototypeOf` = `jsObjGet(obj, "__proto__")` ラッパー
+- [x] 25-2b: VM: `setPrototypeOf(obj, proto)` = `jsObjSet(obj, "__proto__", proto)`
+- [x] 25-2c: TW 側も同じ API で追加
+- [x] 25-2d: テスト: setPrototypeOf → getPrototypeOf ラウンドトリップ + メソッド呼び出し
 
 ### 25-3: Object.getOwnPropertyNames / getOwnPropertySymbols
 
-- [ ] 25-3a: VM: `getOwnPropertyNames` = HiddenClass の properties から
-      `__proto__` / symbol キーを除外して返す
-- [ ] 25-3b: VM: `getOwnPropertySymbols` = symbol キーだけを返す
-      (`internString` 経由の Symbol 判定)
-- [ ] 25-3c: TW 側も同等実装
-- [ ] 25-3d: テスト: 両方の結果が `Object.keys` と整合するか
+- [x] 25-3a: VM: `getOwnPropertyNames` = HiddenClass の properties から
+      `__proto__` / `@@` 始まりの symbol キーを除外して返す
+- [x] 25-3b: VM: `getOwnPropertySymbols` = 空配列を返す最小実装
+      (JSSymbol の逆引きレジストリが無いため。必要になったら追加)
+- [x] 25-3c: TW 側も同等実装
+- [x] 25-3d: テスト: length 比較 (JSString 等価性は別問題)
 
 ### 25-4: Promise.withResolvers
 
