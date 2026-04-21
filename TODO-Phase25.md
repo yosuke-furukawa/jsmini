@@ -63,11 +63,15 @@ PLAN-v6 の Phase 25 に該当:
 
 ### 25-5: test262 再計測
 
-- [ ] 25-5a: 計測前の baseline を記録 (現行 runner で全体と Promise の通過率)
-- [ ] 25-5b: Phase 25 実装後に再計測 (同条件)
-- [ ] 25-5c: propertyHelper.js 依存で前は落ちていたテスト群の内訳を追う
-- [ ] 25-5d: Promise.withResolvers 関連テスト 6 本の通過を確認
-- [ ] 25-5e: LEARN-Phase25.md に結果と学びをまとめる
+- [x] 25-5a: runner に `test/built-ins/Promise` を追加。baseline (Phase 24 時点) を
+      worktree で計測: **5112 pass / 4128 fail / 2109 skip (55.3%)**
+- [x] 25-5b: Phase 25 実装後に再計測: **5133 pass / 4107 fail / 2109 skip (55.5%)**
+      → **+21 テスト**
+- [x] 25-5c: propertyHelper.js の整合は次フェーズ。
+      本フェーズは Promise.withResolvers と Object.defineProperty 追加分が主
+- [x] 25-5d: Promise.withResolvers の `ctx-non-ctor.js` / `ctx-non-object.js` で
+      一時的に regression → `this` 検査追加で解消
+- [x] 25-5e: LEARN-Phase25.md に結果と学びをまとめた
 
 ## 期待される効果
 

@@ -321,7 +321,10 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   PromiseConstructor.race = (promises: unknown[]) => JSPromise.race(promises);
   PromiseConstructor.allSettled = (promises: unknown[]) => JSPromise.allSettled(promises);
   PromiseConstructor.any = (promises: unknown[]) => JSPromise.any(promises);
-  PromiseConstructor.withResolvers = () => {
+  PromiseConstructor.withResolvers = function(this: unknown) {
+    if (this !== PromiseConstructor) {
+      throw new TypeError("Promise.withResolvers called on non-Promise");
+    }
     let resolve!: (v: unknown) => void;
     let reject!: (r: unknown) => void;
     const promise = new JSPromise((res, rej) => { resolve = res; reject = rej; });

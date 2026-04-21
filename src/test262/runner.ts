@@ -296,6 +296,8 @@ const TEST_DIRS = [
   "test/language/types/reference",
   "test/language/types/string",
   "test/language/types/undefined",
+  // built-ins (Phase 25 以降に拡張)
+  "test/built-ins/Promise",
 ];
 
 const allTests: string[] = [];
