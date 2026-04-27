@@ -30,15 +30,15 @@ vm.setGlobal("Math", {
 
 ### 26-1: Math 三角関数 + 拡張
 
-- [ ] 26-1a: VM (`src/vm/index.ts`): Math wrapper に追加
-      `sin, cos, tan, asin, acos, atan, atan2`
-- [ ] 26-1b: VM: 拡張系も追加
-      `exp, log2, log10, log1p, expm1, hypot, cbrt, sinh, cosh, tanh, asinh, acosh, atanh`
-- [ ] 26-1c: VM: 定数も追加
-      `LN2, LN10, LOG2E, LOG10E, SQRT2, SQRT1_2`
-- [ ] 26-1d: TW (`src/interpreter/evaluator.ts`): 同等に追加
-- [ ] 26-1e: テスト: `Math.sin(0) === 0`, `Math.atan2(1,1) === Math.PI/4` 等を
-      TW/VM 両方で検証
+- [x] 26-1a: VM: 三角関数 `sin, cos, tan, asin, acos, atan, atan2`
+- [x] 26-1b: VM: 拡張 `exp, log2, log10, log1p, expm1, hypot, cbrt,
+      sinh, cosh, tanh, asinh, acosh, atanh`、整数 `fround, clz32, imul`
+- [x] 26-1c: VM: 定数 `LN2, LN10, LOG2E, LOG10E, SQRT2, SQRT1_2`
+- [x] 26-1d: TW (`src/interpreter/evaluator.ts`): 同等に追加
+- [x] 26-1e: テスト: TW/VM 両方で 15 ケース通過
+
+**おまけ**: Math テストで `1e-15` 等の許容誤差を書きたかったので
+lexer に指数表記サポートを追加 (`1e10 / 1.5e-3 / 2E+5`)。
 
 ### 26-2: Date
 
