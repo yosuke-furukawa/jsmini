@@ -172,8 +172,19 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     floor: Math.floor, ceil: Math.ceil, round: Math.round,
     abs: Math.abs, min: Math.min, max: Math.max,
     sqrt: Math.sqrt, pow: Math.pow, log: Math.log,
-    random: Math.random, PI: Math.PI, E: Math.E,
-    sign: Math.sign, trunc: Math.trunc,
+    random: Math.random, sign: Math.sign, trunc: Math.trunc,
+    sin: Math.sin, cos: Math.cos, tan: Math.tan,
+    asin: Math.asin, acos: Math.acos, atan: Math.atan, atan2: Math.atan2,
+    sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,
+    asinh: Math.asinh, acosh: Math.acosh, atanh: Math.atanh,
+    exp: Math.exp, log2: Math.log2, log10: Math.log10,
+    log1p: Math.log1p, expm1: Math.expm1,
+    hypot: Math.hypot, cbrt: Math.cbrt,
+    fround: Math.fround, clz32: Math.clz32, imul: Math.imul,
+    PI: Math.PI, E: Math.E,
+    LN2: Math.LN2, LN10: Math.LN10,
+    LOG2E: Math.LOG2E, LOG10E: Math.LOG10E,
+    SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
   });
 
   // Object
