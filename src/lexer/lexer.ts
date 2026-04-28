@@ -117,6 +117,16 @@ export function tokenize(source: string): Token[] {
           advance(); // '.'
           while (pos < source.length && isDigit(peek())) advance();
         }
+        // 指数表記: 1e10, 1.5e-3, 2E+5
+        if (peek() === "e" || peek() === "E") {
+          const next = peek(1);
+          const after = peek(2);
+          if (isDigit(next) || ((next === "+" || next === "-") && isDigit(after))) {
+            advance(); // 'e' / 'E'
+            if (peek() === "+" || peek() === "-") advance();
+            while (pos < source.length && isDigit(peek())) advance();
+          }
+        }
       }
       pushToken("Number", source.slice(start, pos), startCol);
       continue;
