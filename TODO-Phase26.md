@@ -57,22 +57,29 @@ lexer に指数表記サポートを追加 (`1e10 / 1.5e-3 / 2E+5`)。
 
 Phase 24 で `WasmBuilder.addImport` を作った。これを sync 版で流用 (Suspending
 ラップ無し) して Math.sin 等を Wasm から host import 経由で呼ぶ。
-ハンドライト WAT による高速化は将来フェーズに先送り。
 
-- [ ] 26-3a: Wasm native でカバーできる Math op を inline 化:
+- [x] 26-3a: Wasm native でカバーできる Math op を inline 化:
       `sqrt → f64.sqrt`, `abs → f64.abs`, `floor → f64.floor`,
-      `ceil → f64.ceil`, `trunc → f64.trunc`, `min → f64.min`, `max → f64.max`
-- [ ] 26-3b: それ以外 (`sin, cos, tan, asin, acos, atan, atan2, exp, log,
-      log2, log10, pow, hypot, cbrt, ...`) は host import で `call $__math_xxx`
-- [ ] 26-3c: IR で `Math.X(args)` パターンを検出する仕組み:
-      compiler/IR builder で `LdaGlobal "Math" → GetProperty "sin" → Call`
-      を `MathCall(name, args)` に縮約する
-- [ ] 26-3d: codegen: `MathCall` を inline (native op) または
-      `call $__math_X` import に lowering
-- [ ] 26-3e: JitManager で imports に host Math 関数を渡す
-      (Phase 24 JSPI と同パス、Suspending 不要)
-- [ ] 26-3f: tier log 確認: hot loop 内 `Math.sin(x)` が Wasm 化される
-- [ ] 26-3g: ベンチ: `for (i; i < N; i++) sum += Math.sin(i)` の VM vs JIT 比較
+      `ceil → f64.ceil`, `trunc → f64.trunc`, `min → f64.min` (2 引数),
+      `max → f64.max` (2 引数)
+- [x] 26-3b: それ以外 (sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh,
+      asinh, acosh, atanh, exp, log, log2, log10, log1p, expm1, hypot, cbrt,
+      pow, round, sign) は host import で `call $Math.X`
+- [x] 26-3c: IR builder で `LoadGlobal "Math" → GetProperty "sin"` を検出し
+      LoadProperty に `calleeName = "Math.sin"` をタグ付け。
+      CallMethod ハンドラも calleeName を優先するよう修正。
+      Math.X は `this` を使わないので thisObj を引数から落とす
+- [x] 26-3d: codegen: classifyMathCall() で native_unary / native_binary / host
+      に分類し、それぞれ inline op / `call importIdx` を emit
+- [x] 26-3e: compileIRToWasm が必要な Math import を集めて addImport、
+      importObject に host `Math.<name>` を inject
+- [x] 26-3f: tier log 確認: `function f(x){return Math.sin(x)+Math.cos(x);}` を
+      hot loop で呼ぶと `Wasm compiled` に tier-up
+- [x] 26-3g: 既存 791 → 797 tests (回帰なし)。ベンチは 26-4 で本格的に取る
+
+**追加修正**: Math.X 用の LoadProperty / `LoadGlobal "Math"` は dead code
+として codegen 側でスキップ (これらが i32.load を吐いて型不一致になっていた)。
+functionNeedsF64 は Math.X 含む関数を強制 f64 化。
 
 ### 26-4: SunSpider math/date 試行
 

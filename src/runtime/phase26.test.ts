@@ -115,6 +115,93 @@ describe("Phase 26 - Math 定数", () => {
   });
 });
 
+describe("Phase 26 - JIT で Math.X が動く (host import + native ops)", () => {
+  it("hot loop の Math.sqrt: JIT 結果と VM 結果が一致", async () => {
+    const src = `
+      function f(n) {
+        var s = 0;
+        for (var i = 1; i <= n; i = i + 1) s = s + Math.sqrt(i);
+        return s;
+      }
+      f(50);
+    `;
+    const noJit = vmEvaluate(src);
+    const withJit = await vmEvaluate(src, { jit: true, jitThreshold: 1, useIR: true });
+    assert.equal(withJit, noJit);
+  });
+
+  it("hot loop の Math.sin: host import 経由で JIT", async () => {
+    const src = `
+      function f(n) {
+        var s = 0;
+        for (var i = 0; i < n; i = i + 1) s = s + Math.sin(i);
+        return s;
+      }
+      f(50);
+    `;
+    const noJit = vmEvaluate(src);
+    const withJit = await vmEvaluate(src, { jit: true, jitThreshold: 1, useIR: true });
+    // 浮動小数点演算の累積誤差を許容
+    assert.ok(Math.abs((withJit as number) - (noJit as number)) < 1e-10);
+  });
+
+  it("Math.atan2 (2 引数 host import)", async () => {
+    const src = `
+      function f(n) {
+        var s = 0;
+        for (var i = 1; i <= n; i = i + 1) s = s + Math.atan2(i, n);
+        return s;
+      }
+      f(20);
+    `;
+    const noJit = vmEvaluate(src);
+    const withJit = await vmEvaluate(src, { jit: true, jitThreshold: 1, useIR: true });
+    assert.ok(Math.abs((withJit as number) - (noJit as number)) < 1e-10);
+  });
+
+  it("Math.floor (Wasm native f64.floor)", async () => {
+    const src = `
+      function f(n) {
+        var s = 0;
+        for (var i = 1; i <= n; i = i + 1) s = s + Math.floor(i / 2);
+        return s;
+      }
+      f(20);
+    `;
+    const noJit = vmEvaluate(src);
+    const withJit = await vmEvaluate(src, { jit: true, jitThreshold: 1, useIR: true });
+    assert.equal(withJit, noJit);
+  });
+
+  it("複数 Math 関数の組み合わせ", async () => {
+    const src = `
+      function f(n) {
+        var s = 0;
+        for (var i = 1; i <= n; i = i + 1) s = s + Math.sqrt(Math.abs(Math.sin(i)));
+        return s;
+      }
+      f(30);
+    `;
+    const noJit = vmEvaluate(src);
+    const withJit = await vmEvaluate(src, { jit: true, jitThreshold: 1, useIR: true });
+    assert.ok(Math.abs((withJit as number) - (noJit as number)) < 1e-10);
+  });
+
+  it("tier log: Math.sin を含む関数が Wasm 化される", () => {
+    const result = vmEvaluate(`
+      function f(x) { return Math.sin(x) + Math.cos(x); }
+      var s = 0;
+      for (var i = 0; i < 50; i = i + 1) s = s + f(i);
+      s;
+    `, { jit: true, jitThreshold: 1, traceTier: true, useIR: true });
+    const r = result as { tierLog?: string[] };
+    const log = r.tierLog ?? [];
+    // f が Wasm 化された痕跡を確認
+    assert.ok(log.some(l => l.includes("f:") && l.toLowerCase().includes("wasm")),
+              `expected tierLog to contain Wasm tier-up for f, got: ${JSON.stringify(log)}`);
+  });
+});
+
 describe("Phase 26 - Date", () => {
   it("Date.now() returns a number", () => {
     const [tw, vm] = both(`typeof Date.now() === "number";`);
