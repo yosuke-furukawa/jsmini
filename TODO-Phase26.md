@@ -42,18 +42,16 @@ lexer に指数表記サポートを追加 (`1e10 / 1.5e-3 / 2E+5`)。
 
 ### 26-2: Date
 
-- [ ] 26-2a: VM: `Date` グローバルを追加
-      - `Date()` / `new Date()` → 現在時刻
-      - `new Date(ms)` → ms から
-      - `new Date(year, month, day, ...)` → 個別フィールド
-      - `Date.now()` → 現在時刻 ms
-- [ ] 26-2b: VM: インスタンスメソッドを delegate
-      `getTime, getFullYear, getMonth, getDate, getDay, getHours, getMinutes,
-      getSeconds, getMilliseconds, valueOf, toString, toISOString`
-- [ ] 26-2c: TW 側も同様に追加
-- [ ] 26-2d: VM の HiddenClass 経由のオブジェクトと Date インスタンスの
-      共存に注意 (Date インスタンスはネイティブ Date を返す方針)
-- [ ] 26-2e: テスト: `Date.now()` が数値を返す、`new Date(0).getFullYear() === 1970` 等
+- [x] 26-2a: VM: `Date` グローバル追加 (DateCtor wrapper)
+      - `new Date()`, `new Date(ms)`, `new Date(y, m, d, ...)`
+      - `Date()` (new なし) は内部で `internString` した文字列を返す
+- [x] 26-2b: インスタンスメソッドは host `Date.prototype` をそのまま使う
+      (`DateCtor.prototype = Date.prototype`)
+- [x] 26-2c: TW 側も同様に追加
+- [x] 26-2d: 文字列引数は JSString → native string に変換
+      (`Date.parse`, `new Date("...")`)
+- [x] 26-2e: テスト: 7 ケース通過 (Date.now / getTime / getUTCFullYear /
+      フィールド accessors / Date.parse round-trip / Date.UTC / 計測)
 
 ### 26-3: JIT host import for Math
 

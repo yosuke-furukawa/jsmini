@@ -187,6 +187,23 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
   });
 
+  // Date: host Date を公開。string 引数は JSString → string 変換。
+  const twUnwrapStr = (v: unknown) => isJSString(v) ? jsStringToString(v) : v;
+  const twDateCtor: any = function(this: unknown, ...args: unknown[]) {
+    const a = args.map(twUnwrapStr);
+    if (new.target) {
+      if (a.length === 0) return new Date();
+      if (a.length === 1) return new Date(a[0] as any);
+      return new (Date as any)(...a);
+    }
+    return Date();
+  };
+  twDateCtor.now = () => Date.now();
+  twDateCtor.parse = (s: unknown) => Date.parse(String(twUnwrapStr(s)));
+  twDateCtor.UTC = (...args: unknown[]) => (Date.UTC as any)(...args.map(twUnwrapStr));
+  twDateCtor.prototype = Date.prototype;
+  env.defineReadOnly("Date", twDateCtor);
+
   // Object
   const strArg = (v: unknown) => isJSString(v) ? jsStringToString(v) : String(v);
   const twObjectWrapper: any = function(...args: unknown[]) { return new Object(...args); };

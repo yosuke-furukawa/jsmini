@@ -114,3 +114,61 @@ describe("Phase 26 - Math 定数", () => {
     assert.equal(vm, true);
   });
 });
+
+describe("Phase 26 - Date", () => {
+  it("Date.now() returns a number", () => {
+    const [tw, vm] = both(`typeof Date.now() === "number";`);
+    assert.equal(tw, true);
+    assert.equal(vm, true);
+  });
+
+  it("new Date(0).getTime() === 0", () => {
+    const [tw, vm] = both(`new Date(0).getTime();`);
+    assert.equal(tw, 0);
+    assert.equal(vm, 0);
+  });
+
+  it("new Date(0).getUTCFullYear() === 1970", () => {
+    const [tw, vm] = both(`new Date(0).getUTCFullYear();`);
+    assert.equal(tw, 1970);
+    assert.equal(vm, 1970);
+  });
+
+  it("new Date(2024, 0, 15) field accessors", () => {
+    const [tw, vm] = both(`
+      var d = new Date(2024, 0, 15);
+      d.getFullYear() === 2024 && d.getMonth() === 0 && d.getDate() === 15;
+    `);
+    assert.equal(tw, true);
+    assert.equal(vm, true);
+  });
+
+  it("Date.parse round-trip via toISOString", () => {
+    const [tw, vm] = both(`
+      var ms = Date.parse("2024-01-15T00:00:00.000Z");
+      var d = new Date(ms);
+      d.toISOString();
+    `);
+    assert.equal(tw, "2024-01-15T00:00:00.000Z");
+    assert.equal(vm, "2024-01-15T00:00:00.000Z");
+  });
+
+  it("Date.UTC(2024, 0, 1) returns expected ms", () => {
+    const [tw, vm] = both(`Date.UTC(2024, 0, 1);`);
+    const expected = Date.UTC(2024, 0, 1);
+    assert.equal(tw, expected);
+    assert.equal(vm, expected);
+  });
+
+  it("Date.now() can be used to time work", () => {
+    const [tw, vm] = both(`
+      var start = Date.now();
+      var s = 0;
+      for (var i = 0; i < 100; i = i + 1) s = s + i;
+      var elapsed = Date.now() - start;
+      typeof elapsed === "number" && elapsed >= 0;
+    `);
+    assert.equal(tw, true);
+    assert.equal(vm, true);
+  });
+});

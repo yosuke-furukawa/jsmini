@@ -454,6 +454,25 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
   });
 
+  // Date: ネイティブ Date を公開。string 引数は JSString → string 変換。
+  const unwrapStr = (v: unknown) => isJSString(v) ? jsStringToString(v) : v;
+  const DateCtor: any = function(this: unknown, ...args: unknown[]) {
+    const a = args.map(unwrapStr);
+    if (new.target) {
+      // new Date(...)
+      if (a.length === 0) return new Date();
+      if (a.length === 1) return new Date(a[0] as any);
+      return new (Date as any)(...a);
+    }
+    // Date() — 文字列を返す (jsmini に渡すなら intern が安全)
+    return internString(Date());
+  };
+  DateCtor.now = () => Date.now();
+  DateCtor.parse = (s: unknown) => Date.parse(String(unwrapStr(s)));
+  DateCtor.UTC = (...args: unknown[]) => (Date.UTC as any)(...args.map(unwrapStr));
+  DateCtor.prototype = Date.prototype;
+  vm.setGlobal("Date", DateCtor);
+
   // JSON (JSString ↔ ネイティブ文字列の変換が必要)
   vm.setGlobal("JSON", {
     stringify: (val: unknown) => {
