@@ -105,11 +105,28 @@ functionNeedsF64 は Math.X 含む関数を強制 f64 化。
 
 ### 26-4: SunSpider math/date 試行
 
-- [ ] 26-4a: SunSpider の `math-cordic.js` を取得して jsmini で実行
-- [ ] 26-4b: `math-spectral-norm.js`, `math-partial-sums.js` を試行
-- [ ] 26-4c: `date-format-tofte.js`, `date-format-xparb.js` を試行
-- [ ] 26-4d: 動作したベンチで TW vs VM vs JIT の時間比較
-      (V8-JITless 条件: `--noopt --no-sparkplug --no-maglev`)
+WebKit GitHub mirror から `bench/sunspider/` に 5 ファイル取得。
+`src/sunspider-bench.ts` で TW / VM / JIT を計測。
+
+- [x] 26-4a: `math-cordic.js` 取得 → **完動** (TW 1079ms / VM 248ms / JIT 259ms)
+      CORDIC は整数 `>>` ベースで Math 呼び出し無し。JIT は VM の f64 promote が
+      要らないため compile コストが乗って僅かに遅い (+11ms)。これは正常。
+- [x] 26-4b: `math-spectral-norm.js`, `math-partial-sums.js` 取得・実行
+      - spectral-norm: TW OK (419ms)、VM/JIT で計算結果が違う
+        (期待 5.086 → VM 49.27 / JIT NaN) — 配列内 f64 演算で何か壊れている
+      - partial-sums: TW で `a9 is not defined`
+        (chain assign `var a1 = a2 = ... = a9 = 0` で a2-a9 が未宣言なまま使われる)
+        VM は 83ms で動く、JIT は計算結果が違う
+- [x] 26-4c: `date-format-tofte.js`, `date-format-xparb.js` 取得・実行
+      - tofte: 全モード `Y is not defined` (chain assign 系)
+      - xparb: lexer が regex リテラル `/.../` 未対応 (Phase 28 範囲)
+- [x] 26-4d: 動作したベンチで TW vs VM vs JIT の比較 → math-cordic のみ
+      (V8-JIT 有効。JITless は実用時間で取れず)
+
+**結論**: 5 中 1 完動 (math-cordic)。残りは Phase 26 範囲外:
+- chain assignment の sloppy global → 言語機能の別タスク
+- 配列内 f64 計算の VM バグ → 別タスク
+- regex リテラル → Phase 28 (RegExp) で対応予定
 
 ### 26-5: test262 (オプション)
 
