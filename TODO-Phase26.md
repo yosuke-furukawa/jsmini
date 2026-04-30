@@ -75,7 +75,29 @@ Phase 24 で `WasmBuilder.addImport` を作った。これを sync 版で流用 
       importObject に host `Math.<name>` を inject
 - [x] 26-3f: tier log 確認: `function f(x){return Math.sin(x)+Math.cos(x);}` を
       hot loop で呼ぶと `Wasm compiled` に tier-up
-- [x] 26-3g: 既存 791 → 797 tests (回帰なし)。ベンチは 26-4 で本格的に取る
+- [x] 26-3g: 既存 791 → 797 tests (回帰なし)。`src/math-bench.ts` で計測:
+
+      **V8-JITless** (`--noopt --no-sparkplug --no-maglev`):
+
+      | ベンチ | TW | VM | JIT | JIT/VM |
+      |---|---|---|---|---|
+      | Math.sin 50K | 327ms | 395ms | 2.1ms | **187x** |
+      | Math.sqrt 100K (native) | 650ms | 789ms | 1.3ms | **610x** |
+      | Math.atan2 30K | 206ms | 248ms | 1.7ms | 147x |
+      | sin+cos+sqrt 混合 30K | 502ms | 588ms | 3.2ms | 186x |
+
+      **V8-JIT あり**:
+
+      | ベンチ | TW | VM | JIT | JIT/VM |
+      |---|---|---|---|---|
+      | Math.sin 50K | 59ms | 18ms | 1.3ms | 14x |
+      | Math.sqrt 100K | 115ms | 34ms | 0.45ms | 75x |
+      | Math.atan2 30K | 36ms | 12ms | 0.67ms | 18x |
+      | sin+cos+sqrt 混合 30K | 101ms | 33ms | 1.2ms | 26x |
+
+      Wasm native (f64.sqrt) は host import より圧倒的に効く (255-610x)。
+      host import (sin/cos/atan2) も境界コスト分は遅いが、ループ中の
+      bytecode dispatch が消えるので JIT/VM で 14-187x の改善。
 
 **追加修正**: Math.X 用の LoadProperty / `LoadGlobal "Math"` は dead code
 として codegen 側でスキップ (これらが i32.load を吐いて型不一致になっていた)。
