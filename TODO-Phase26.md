@@ -137,8 +137,14 @@ WebKit GitHub mirror から `bench/sunspider/` に 5 ファイル取得。
 
 ### 26-6: まとめ
 
-- [ ] 26-6a: LEARN-Phase26.md に結果を記録 (host import 方針の根拠を含む)
-- [ ] 26-6b: ベンチ結果を BENCHMARK.md に追記
+- [x] 26-6a: LEARN-Phase26.md に結果を記録 (host import 方針の根拠、
+      VM Math = host Math の事実、native vs host import の差、SunSpider 5/1 等)
+- [ ] 26-6b: ベンチ結果を BENCHMARK.md に追記 (任意 — TODO-Phase26.md と
+      LEARN-Phase26.md に既に詳細あり)
+
+### 26-5: test262 (オプション)
+
+- [ ] 26-5a-c: skip。math-cordic で動作確認できたので別タスクで対応する
 
 ## 期待される効果
 
