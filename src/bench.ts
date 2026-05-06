@@ -387,6 +387,57 @@ const benchmarks = [
     `,
     jitEligible: true,
   },
+  // ===== Math host import (Phase 26-3) =====
+  {
+    name: "Math.sin hot loop (50K iter)",
+    source: `
+      function bench(n) {
+        var s = 0;
+        for (var i = 0; i < n; i = i + 1) s = s + Math.sin(i);
+        return s;
+      }
+      bench(50000);
+    `,
+    jitEligible: true,
+  },
+  {
+    name: "Math.sqrt native f64.sqrt (100K iter)",
+    source: `
+      function bench(n) {
+        var s = 0;
+        for (var i = 1; i <= n; i = i + 1) s = s + Math.sqrt(i);
+        return s;
+      }
+      bench(100000);
+    `,
+    jitEligible: true,
+  },
+  {
+    name: "Math sin+cos+sqrt mix (50K iter)",
+    source: `
+      function bench(n) {
+        var s = 0;
+        for (var i = 1; i <= n; i = i + 1) {
+          s = s + Math.sqrt(Math.sin(i) * Math.sin(i) + Math.cos(i) * Math.cos(i));
+        }
+        return s;
+      }
+      bench(50000);
+    `,
+    jitEligible: true,
+  },
+  {
+    name: "Math.atan2 (50K iter)",
+    source: `
+      function bench(n) {
+        var s = 0;
+        for (var i = 1; i <= n; i = i + 1) s = s + Math.atan2(i, n);
+        return s;
+      }
+      bench(50000);
+    `,
+    jitEligible: true,
+  },
 ];
 
 function bench(fn: () => unknown, warmup = 5, runs = 10): { result: unknown; avg: number; min: number; error?: string } {

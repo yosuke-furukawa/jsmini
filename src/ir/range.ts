@@ -191,6 +191,12 @@ function computePhiRange(phi: PhiOp, ranges: Map<number, Range>): Range {
 
 // 関数内の全演算が i32 に収まるか判定
 export function functionNeedsF64(irFunc: IRFunction): boolean {
+  // Math.X 呼び出しは f64 in/out → 関数全体を f64 に格上げ
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      if (op.opcode === "Call" && op.calleeName?.startsWith("Math.")) return true;
+    }
+  }
   const ranges = analyzeRanges(irFunc);
   for (const [, range] of ranges) {
     if (!canFitI32(range)) return true;

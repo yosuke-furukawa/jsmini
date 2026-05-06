@@ -150,7 +150,7 @@ export class JitManager {
         buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs },
       });
       const result = compileIRToWasm(ir);
-      if (!result) return null;
+      if (!result) { if (process.env?.DEBUG_WASM) console.error("[compileViaIR] compileIRToWasm returned null for", ir.name); return null; }
       const wasmFn = (result.instance.exports as any)[ir.name] as (...args: number[]) => number;
       if (!wasmFn) return null;
 
@@ -163,7 +163,8 @@ export class JitManager {
       const cached: CachedWasm = { fn: wasmFn, memory: result.memory ?? null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
       if (result.jspiWrapped) cached.jspiWrapped = result.jspiWrapped;
       return cached;
-    } catch {
+    } catch (e: any) {
+      if (process.env?.DEBUG_WASM) console.error("[compileViaIR] threw", e.message || e, e.stack);
       return null;
     }
   }

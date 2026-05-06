@@ -69,6 +69,22 @@ describe("Lexer - Step 1-1: 数値リテラルと四則演算", () => {
     assert.equal(tokens[0].type, "Number");
     assert.equal(tokens[0].value, "3.14");
   });
+
+  it("指数表記を認識できる (1e10 / 1.5e-3 / 2E+5)", () => {
+    const a = tokenize("1e10");
+    assert.equal(a[0].type, "Number"); assert.equal(a[0].value, "1e10");
+    const b = tokenize("1.5e-3");
+    assert.equal(b[0].type, "Number"); assert.equal(b[0].value, "1.5e-3");
+    const c = tokenize("2E+5");
+    assert.equal(c[0].type, "Number"); assert.equal(c[0].value, "2E+5");
+  });
+
+  it("e の後ろが数字でないなら数値の一部にしない (1e + foo)", () => {
+    const tokens = tokenize("1 + foo");
+    assert.equal(tokens[0].value, "1");
+    assert.equal(tokens[2].type, "Identifier");
+    assert.equal(tokens[2].value, "foo");
+  });
 });
 
 describe("Lexer - Step 1-2: var と変数参照", () => {

@@ -18,7 +18,41 @@ export interface IRCodegenResult {
   funcIndex: number;
 }
 
-export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1): { body: number[]; extraLocals: number; wat: string } {
+// Math.X → Wasm native f64 op (1 引数)
+const MATH_NATIVE_UNARY: Record<string, number> = {
+  "Math.sqrt": WASM_OP.f64_sqrt,
+  "Math.abs": WASM_OP.f64_abs,
+  "Math.floor": WASM_OP.f64_floor,
+  "Math.ceil": WASM_OP.f64_ceil,
+  "Math.trunc": WASM_OP.f64_trunc,
+  // 注: Math.round は half-up、f64.nearest は half-to-even (≠ JS spec)。host import に回す
+};
+// Math.X → Wasm native f64 op (2 引数)
+const MATH_NATIVE_BINARY: Record<string, number> = {
+  // 注: 2 引数の Math.min / max のみネイティブで対応。可変長引数は host へ回す
+  "Math.min": WASM_OP.f64_min,
+  "Math.max": WASM_OP.f64_max,
+};
+// host import が必要な Math.X (引数数も併記)
+const MATH_HOST_IMPORTS: Record<string, number> = {
+  "Math.sin": 1, "Math.cos": 1, "Math.tan": 1,
+  "Math.asin": 1, "Math.acos": 1, "Math.atan": 1,
+  "Math.sinh": 1, "Math.cosh": 1, "Math.tanh": 1,
+  "Math.asinh": 1, "Math.acosh": 1, "Math.atanh": 1,
+  "Math.exp": 1, "Math.log": 1, "Math.log2": 1, "Math.log10": 1,
+  "Math.log1p": 1, "Math.expm1": 1, "Math.cbrt": 1,
+  "Math.round": 1, "Math.sign": 1,
+  "Math.atan2": 2, "Math.pow": 2, "Math.hypot": 2,
+};
+
+function classifyMathCall(name: string, argc: number): "native_unary" | "native_binary" | "host" | "unsupported" {
+  if (MATH_NATIVE_UNARY[name] !== undefined && argc === 1) return "native_unary";
+  if (MATH_NATIVE_BINARY[name] !== undefined && argc === 2) return "native_binary";
+  if (MATH_HOST_IMPORTS[name] !== undefined && MATH_HOST_IMPORTS[name] === argc) return "host";
+  return "unsupported";
+}
+
+export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0): { body: number[]; extraLocals: number; wat: string } {
   const body: number[] = [];
   const watLines: string[] = [];
   let watIndent = 1;
@@ -285,7 +319,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         wat("return");
       } else {
         const beforeLen = body.length;
-        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets);
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets, importIndices, importCount);
         // emitOp が出力した命令を WAT に変換
         watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
       }
@@ -354,6 +388,8 @@ function emitOp(
   arrayTypeIdx = -1,
   upvalueCount = 0,
   propOffsets: Map<string, number> = new Map(),
+  importIndices: Map<string, number> = new Map(),
+  importCount = 0,
 ): void {
   // forceF64 なら全演算を f64 として扱う
   const effectiveType = forceF64 ? "f64" : op.type;
@@ -390,6 +426,8 @@ function emitOp(
     case "LoadGlobal": {
       // 自己再帰の callee 参照は skip (Call で直接 call 0 する)
       if (op.globalName === irFunc.name) break;
+      // "Math" の参照は Math.X dispatch で消費されるので emit 不要
+      if (op.globalName === "Math") break;
       const gLocal = globalToLocal.get(op.globalName!);
       if (gLocal !== undefined) {
         body.push(WASM_OP.local_get, gLocal);
@@ -460,6 +498,8 @@ function emitOp(
       break;
     }
     case "LoadProperty": {
+      // Math.X の参照: Call dispatch で消費されるので emit 不要
+      if (op.calleeName?.startsWith("Math.")) break;
       // obj.name → i32.load(obj + propOffset * 4)
       const offset = propOffsets.get(op.globalName!);
       if (offset !== undefined) {
@@ -494,24 +534,40 @@ function emitOp(
     }
 
     case "Call": {
-      if (op.calleeName === "__await") {
+      const cname = op.calleeName;
+      if (cname === "__await") {
         // JSPI: call import $__await(value) → suspend/resume
-        // args: [value] (calleeRef なし、Await は単一引数)
+        // args: [value] (Await は IR builder で calleeRef を持たず単一引数)
         for (const argId of op.args) {
           emitLoadValue(argId, body, opToLocal, opById, forceF64);
         }
-        body.push(WASM_OP.call, 0); // import index 0 = __await
+        const idx = importIndices?.get("__await") ?? 0;
+        body.push(WASM_OP.call, idx);
+      } else if (cname && cname.startsWith("Math.")) {
+        // op.args = [calleeRef, arg0, arg1, ...]
+        const argc = op.args.length - 1;
+        const cls = classifyMathCall(cname, argc);
+        for (let i = 1; i < op.args.length; i++) {
+          emitLoadValue(op.args[i], body, opToLocal, opById, /* forceF64 */ true);
+        }
+        if (cls === "native_unary") {
+          body.push(MATH_NATIVE_UNARY[cname]);
+        } else if (cls === "native_binary") {
+          body.push(MATH_NATIVE_BINARY[cname]);
+        } else if (cls === "host") {
+          const idx = importIndices?.get(cname);
+          if (idx === undefined) throw new Error(`Math import not registered: ${cname}`);
+          body.push(WASM_OP.call, idx);
+        } else {
+          throw new Error(`Unsupported Math call: ${cname}/${argc}`);
+        }
       } else {
-        // 自己再帰: call (import count + 0)
+        // 自己再帰: func index = importCount + 0 (自分自身は最初に追加された関数)
         // args: [calleeRef, arg0, arg1, ...]
         for (let i = 1; i < op.args.length; i++) {
           emitLoadValue(op.args[i], body, opToLocal, opById, forceF64);
         }
-        // func index = imports + 0 (自分自身)
-        // import count は compileIRToWasm で builder.importCount として設定
-        // ここでは hasAwait flag で判定: __await import があれば +1
-        const hasAwaitImport = irFunc.blocks.some(b => b.ops.some(o => o.opcode === "Call" && o.calleeName === "__await"));
-        body.push(WASM_OP.call, hasAwaitImport ? 1 : 0);
+        body.push(WASM_OP.call, importCount);
       }
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
@@ -833,6 +889,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     let hasArrayOps = false;
     let hasSelfRecursion = false;
     let hasAwait = false;
+    const mathHostImports = new Set<string>(); // 必要な Math host import (Math.sin など)
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if (op.opcode === "Call") {
@@ -840,7 +897,17 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
             hasAwait = true; // JSPI await → import call
           } else if (op.calleeName === irFunc.name && !hasArrayOps) {
             hasSelfRecursion = true;
+          } else if (op.calleeName?.startsWith("Math.")) {
+            const argc = op.args.length - 1;
+            const cls = classifyMathCall(op.calleeName, argc);
+            if (cls === "unsupported") {
+              if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: unsupported Math call", op.calleeName, "argc=", argc);
+              return null;
+            }
+            if (cls === "host") mathHostImports.add(op.calleeName);
+            // native_unary / native_binary は import 不要
           } else {
+            if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: unknown call", op.calleeName, "args=", op.args.length);
             return null; // 他の関数 or 自己再帰+配列 → 未対応
           }
         }
@@ -855,12 +922,22 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     }
 
     const builder = new WasmBuilder();
+    const importIndices = new Map<string, number>();
 
     // JSPI: __await import を追加 (型は wasmType に合わせる)
     if (hasAwait) {
       // Range Analysis の結果に合わせて f64 or i32
       const awaitType = functionNeedsF64(irFunc) ? WASM_TYPE.f64 : WASM_TYPE.i32;
-      builder.addImport("env", "__await", [awaitType], [awaitType]);
+      const idx = builder.addImport("env", "__await", [awaitType], [awaitType]);
+      importIndices.set("__await", idx);
+    }
+
+    // Math host import を追加 (全て f64 in / f64 out)
+    for (const name of mathHostImports) {
+      const arity = MATH_HOST_IMPORTS[name];
+      const params = arity === 2 ? [WASM_TYPE.f64, WASM_TYPE.f64] : [WASM_TYPE.f64];
+      const idx = builder.addImport("env", name, params, [WASM_TYPE.f64]);
+      importIndices.set(name, idx);
     }
 
     // Range Analysis: i32 で overflow するなら全体を f64 に昇格
@@ -903,12 +980,14 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     }
 
     // this / property ops の検出
+    // Math.X の LoadProperty / "Math" の LoadGlobal は dead code 扱いなので除外
     let hasThis = false;
     let hasPropertyOps = false;
     for (const block of irFunc.blocks) {
       for (const op of block.ops) {
         if (op.opcode === "LoadThis") hasThis = true;
-        if (op.opcode === "LoadProperty" || op.opcode === "StoreProperty") hasPropertyOps = true;
+        if (op.opcode === "StoreProperty") hasPropertyOps = true;
+        if (op.opcode === "LoadProperty" && !op.calleeName?.startsWith("Math.")) hasPropertyOps = true;
       }
     }
 
@@ -949,7 +1028,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     }
     const results = [wasmType];
 
-    const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx);
+    const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount);
 
     // OSR モード: extra locals もパラメータに含める (VM から全 locals を受け取る)
     if (osrLocalCount !== undefined && osrLocalCount > irFunc.paramCount) {
@@ -1005,19 +1084,25 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
 
     const module = new WebAssembly.Module(wasmBytes);
 
-    // JSPI: __await import を Suspending でラップ
+    // imports: JSPI __await + Math host imports
     const importObject: Record<string, Record<string, unknown>> = {};
+    const env: Record<string, unknown> = {};
     if (hasAwait && typeof (WebAssembly as any).Suspending === "function") {
-      importObject.env = {
-        __await: new (WebAssembly as any).Suspending(async (v: unknown) => {
-          // Promise.resolve で await した値を返す
-          const resolved = await Promise.resolve(v);
-          return resolved;
-        }),
-      };
+      env.__await = new (WebAssembly as any).Suspending(async (v: unknown) => {
+        const resolved = await Promise.resolve(v);
+        return resolved;
+      });
+    }
+    for (const name of mathHostImports) {
+      // "Math.sin" → Math.sin
+      const methodName = name.slice(5); // strip "Math."
+      env[name] = (Math as any)[methodName];
+    }
+    if (hasAwait || mathHostImports.size > 0) {
+      importObject.env = env;
     }
 
-    const instance = new WebAssembly.Instance(module, hasAwait ? importObject : undefined);
+    const instance = new WebAssembly.Instance(module, (hasAwait || mathHostImports.size > 0) ? importObject : undefined);
     const memory = hasPropertyOps ? (instance.exports as any).memory as WebAssembly.Memory : undefined;
 
     // JSPI: export を promising でラップ
@@ -1039,7 +1124,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     };
   } catch (e: any) {
     // Wasm コンパイルエラー → null (フォールバック)
-    if (typeof process !== "undefined" && process.env?.DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e);
+    if (typeof process !== "undefined" && process.env?.DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e, e.stack);
     return null;
   }
 }

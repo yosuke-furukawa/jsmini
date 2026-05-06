@@ -439,9 +439,39 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     floor: Math.floor, ceil: Math.ceil, round: Math.round,
     abs: Math.abs, min: Math.min, max: Math.max,
     sqrt: Math.sqrt, pow: Math.pow, log: Math.log,
-    random: Math.random, PI: Math.PI, E: Math.E,
-    sign: Math.sign, trunc: Math.trunc,
+    random: Math.random, sign: Math.sign, trunc: Math.trunc,
+    sin: Math.sin, cos: Math.cos, tan: Math.tan,
+    asin: Math.asin, acos: Math.acos, atan: Math.atan, atan2: Math.atan2,
+    sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,
+    asinh: Math.asinh, acosh: Math.acosh, atanh: Math.atanh,
+    exp: Math.exp, log2: Math.log2, log10: Math.log10,
+    log1p: Math.log1p, expm1: Math.expm1,
+    hypot: Math.hypot, cbrt: Math.cbrt,
+    fround: Math.fround, clz32: Math.clz32, imul: Math.imul,
+    PI: Math.PI, E: Math.E,
+    LN2: Math.LN2, LN10: Math.LN10,
+    LOG2E: Math.LOG2E, LOG10E: Math.LOG10E,
+    SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
   });
+
+  // Date: ネイティブ Date を公開。string 引数は JSString → string 変換。
+  const unwrapStr = (v: unknown) => isJSString(v) ? jsStringToString(v) : v;
+  const DateCtor: any = function(this: unknown, ...args: unknown[]) {
+    const a = args.map(unwrapStr);
+    if (new.target) {
+      // new Date(...)
+      if (a.length === 0) return new Date();
+      if (a.length === 1) return new Date(a[0] as any);
+      return new (Date as any)(...a);
+    }
+    // Date() — 文字列を返す (jsmini に渡すなら intern が安全)
+    return internString(Date());
+  };
+  DateCtor.now = () => Date.now();
+  DateCtor.parse = (s: unknown) => Date.parse(String(unwrapStr(s)));
+  DateCtor.UTC = (...args: unknown[]) => (Date.UTC as any)(...args.map(unwrapStr));
+  DateCtor.prototype = Date.prototype;
+  vm.setGlobal("Date", DateCtor);
 
   // JSON (JSString ↔ ネイティブ文字列の変換が必要)
   vm.setGlobal("JSON", {

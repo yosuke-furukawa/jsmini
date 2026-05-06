@@ -378,6 +378,11 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
             // named property: obj.name
             const op = registerOp(createOp(irFunc, "LoadProperty", [obj], "i32"));
             op.globalName = name;
+            // Math.X 検出: 後続の Call が Math.X として lowering できるよう calleeName をタグ
+            const objOp = opById.get(obj);
+            if (objOp?.opcode === "LoadGlobal" && objOp.globalName === "Math") {
+              op.calleeName = "Math." + name;
+            }
             block.ops.push(op); stack.push(op.id);
           }
           break;
@@ -401,11 +406,16 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           const thisObj = stack.pop()!;    // Dup の結果 (thisObj)
           const args: number[] = [];
           for (let j = 0; j < argc; j++) args.unshift(stack.pop()!);
-          // methodRef から calleeName を取得
+          // methodRef から calleeName を取得 (Math.X は LoadProperty で
+          // calleeName="Math.sin" 等がタグ付け済み。それを優先する)
           const methodOp = opById.get(methodRef);
-          const methodName = methodOp?.globalName;
-          // Call(methodRef, args..., thisObj) として表現
-          const op = registerOp(createOp(irFunc, "Call", [methodRef, ...args, thisObj], "any"));
+          const isMathCall = methodOp?.calleeName?.startsWith("Math.");
+          const methodName = methodOp?.calleeName ?? methodOp?.globalName;
+          // Math.X は this を使わないので thisObj を落として通常の Call 形式にする
+          const callArgs = isMathCall
+            ? [methodRef, ...args]
+            : [methodRef, ...args, thisObj];
+          const op = registerOp(createOp(irFunc, "Call", callArgs, "any"));
           if (methodName) op.calleeName = methodName;
           block.ops.push(op); stack.push(op.id); break;
         }
