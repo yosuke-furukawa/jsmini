@@ -265,12 +265,108 @@ host GC と連携する仕組みが無い限り「弱参照」にならない (�
 **Wasm GC + WeakRef proposal** が要るか、**host import に丸投げ** か。
 今回は後者。
 
+## test262 結果と「prototype 汚染の波及」
+
+27-7 で sparse-checkout を拡張 (`test/built-ins/{Map,Set,WeakMap,WeakSet}`)
+し +813 テストを追加。VM での通過率は **515 / 813 = 63%**。
+
+| 項目 | pre | post |
+|---|---|---|
+| Total | 11349 | 12162 |
+| Pass | 5148 | 5663 |
+| 新規 Map/Set 通過 | — | 515 / 813 (63%) |
+
+通過率が 63% で頭打ちになる残り要因:
+
+1. **`verifyProperty` が runner harness で no-op stub** (Phase 25 で属性
+   フラグは ignore 方針) → 100+ テストが該当
+2. **`isConstructor` `$262` 等の harness 未定義**
+3. **`accessor descriptors not yet supported`** — Object.defineProperty で
+   getter/setter を当てるテスト (jsmini の HiddenClass はまだ accessor
+   prop に未対応)
+4. **エラー型一致しない** — `Expected a Test262Error but got TypeError`
+   系。ホスト wrapper の throw が `TypeError` 固定で、テストが期待する
+   サブクラスと違う
+
+### 一番の落とし穴: prototype 汚染
+
+`get-set-method-failure.js` のようなテストはこんなことをする:
+
+```js
+Object.defineProperty(Map.prototype, 'set', {
+  get: function() { throw new Test262Error(); }
+});
+new Map([]);  // ← .set を読みに行って Test262Error
+```
+
+**問題**: jsmini は `MapCtor.prototype = Map.prototype` で **host の
+Map.prototype をそのまま使っている**。test が host Map.prototype.set を
+改変すると、その状態のまま **次のテストの compile 時に jsmini 自身が
+内部で `new Map()` を使った瞬間に死ぬ**:
+
+```ts
+// src/vm/compiler.ts
+this.locals.set(name, slot);  // ← Map.prototype.set が乗っ取られていると死
+```
+
+これで連鎖的に **183 テストが "this.locals.set is not a function"** で
+失敗していた (Map ディレクトリ単体で)。
+
+修正: runner で各テストの前後に **PROTOS_TO_SNAPSHOT** に列挙された
+全 prototype の own property descriptor をスナップ → 復元。
+
+```ts
+const PROTOS_TO_SNAPSHOT = [
+  Map.prototype, Set.prototype, WeakMap.prototype, WeakSet.prototype,
+  Array.prototype, Object.prototype,
+];
+const ORIGINAL = snapshotPrototypes();  // 起動時に取る
+function runTest(...) {
+  try {
+    ...
+  } finally {
+    restorePrototypes(ORIGINAL);
+  }
+}
+```
+
+`Object.defineProperty` で復元できる descriptor なら全部巻き戻せる。
+configurable: false なものは諦める。
+
+**汎用的な学び**: host built-in を **薄いラッパー** で公開する処理系は、
+ユーザコードが host prototype を改変したとき自分自身が壊れない設計が
+要る。完全に切り離すには **jsmini 専用 prototype を別に持つ** のが
+本筋だが、コストが高いので今回は **runner レベルの snapshot/restore**
+で逃げた。本番処理系 (V8 等) は **realm 分離** でこれをやっている。
+
+## ベンチ結果 (27-6: 自前 Map/Set micro-bench)
+
+SunSpider 1.0.2 (2010-2013 製) は ES6 Map 普及前なので Map/Set を使う
+テストが無い。代わりに `src/map-set-bench.ts` を作って TW vs VM 計測:
+
+| ベンチ | TW (JITless) | VM (JITless) | TW (V8-JIT) | VM (V8-JIT) |
+|---|---|---|---|---|
+| Map insert 10K | 49ms | 83ms | 13ms | 7.9ms |
+| Map get 10K | 95ms | 165ms | 20ms | 8.5ms |
+| Map iterate 10K (for-of) | 75ms | 197ms | 15ms | 9.9ms |
+| Set add 10K | 38ms | 72ms | 8.4ms | 4.0ms |
+| Set has 10K | 87ms | 169ms | 18ms | 8.2ms |
+| WeakMap set/get 5K | 82ms | 116ms | 17ms | 9.1ms |
+
+**観察**:
+- **JITless** では VM のほうが TW より遅い。Map 本体は host call なので
+  Map.set 自体には差が出ず、bytecode dispatch のコストだけが乗る
+- **V8-JIT 有効** だと VM が TW の 2x 速い。host の Map.set が JIT 化
+  されるため、VM の bytecode dispatch コストを差し引いても有利
+- ループの hot path で **`Math.X` のように Wasm-inline 化** すれば
+  もっと差が出るが、Map 本体を Wasm 化するのは LEARN 上記の "B"
+  (linear memory hash table) が必要。**Phase X+1 の候補**
+
 ## 範囲外 (Phase 27 ではやらない)
 
 - Map/Set の JIT 化 (上記 D)
 - 自前 Wasm hash table (上記 B、別フェーズ候補)
 - WeakRef / FinalizationRegistry
-- test262 の `built-ins/Map` `built-ins/Set` 取り込み (sparse-checkout 拡張)
 
 ## 次フェーズ (Phase 28) 予告
 

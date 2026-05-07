@@ -78,16 +78,27 @@ Phase 26 で Math/Date を host JS の薄いラッパーで動かす方針が刺
       - WeakMap/WeakSet: 基本動作、primitive key で TypeError
 - [x] 27-5b: TW/VM の両方で同じテストを通す
 
-### 27-6: SunSpider 試行 (任意)
+### 27-6: ベンチ (SunSpider は該当無しなので自前 micro-bench)
 
-- [x] 27-6a: SunSpider の Map/Set 出現確認 → bench/sunspider/ の 5 本には
-      出てこないので skip
+- [x] 27-6a: SunSpider 1.0.2 全 26 テストに Map/Set 出現無し (2010-2013
+      製で ES6 Map がまだ普及前)。代わりに `src/map-set-bench.ts` を作成
+- [x] 27-6b: TW vs VM 計測。V8-JIT 有効で VM が 2x 速い (bytecode dispatch
+      の効果)、JITless だと VM のほうがむしろ遅い (Map 本体は host call の
+      ため、ループ dispatch コストで TW の方が有利)。
+      Map/Set の hot loop で差を出すには JIT 化 (Phase X+1 候補) が必要
 
-### 27-7: test262 (オプション)
+### 27-7: test262
 
-- [ ] 27-7a: sparse-checkout で `test/built-ins/Map` `test/built-ins/Set`
-      `test/built-ins/WeakMap` `test/built-ins/WeakSet` を追加 (要ユーザー確認、skip)
-- [ ] 27-7b: pre/post 計測 (skip)
+- [x] 27-7a: sparse-checkout 拡張 (`test/built-ins/{Map,Set,WeakMap,WeakSet}`)
+      → +813 テスト
+- [x] 27-7b: pre/post 計測 (VM)
+      - **pre**:  Total 11349 / Pass 5148 (45.4%)
+      - **post**: Total 12162 / Pass 5663 (46.6%) — 新規 813 中 **515 通過 (63%)**
+      - 残りは harness 不足 (verifyProperty no-op、isConstructor 未定義、
+        $262 未定義) や属性チェック (Phase 25 で属性は ignore 方針) が主
+      - **副作用**: 一部のテストが host built-in prototype を改変するため、
+        runner 側で各テスト前後にプロトタイプスナップショット/復元を実装
+        (これが無いと jsmini 内部の compiler が壊れる連鎖が起きる)
 
 ### 27-8: まとめ
 
