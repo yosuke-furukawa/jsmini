@@ -27,72 +27,72 @@ Phase 26 で Math/Date を host JS の薄いラッパーで動かす方針が刺
 
 ### 27-1: Map (VM)
 
-- [ ] 27-1a: `MapCtor` を host `Map` のラッパーとして定義
+- [x] 27-1a: `MapCtor` を host `Map` のラッパーとして定義
       - `new Map()` / `new Map(iterable)` 両対応
       - iterable 引数は jsmini の Array (host Array) でも、`@@iterator` を
         持つ user-defined iterable でも受け付ける
       - 後者のために、引数を host iterable に変換するヘルパー
         `toHostIterable(v)` を作る (Symbol.iterator を呼んで next を回し、
         host Array にフラット化)
-- [ ] 27-1b: prototype メソッド: `get, set, has, delete, clear, size,
+- [x] 27-1b: prototype メソッド: `get, set, has, delete, clear, size,
       forEach, keys, values, entries`
       - キーは isJSString → そのまま使う (intern 済みなら identity OK)
       - 値が JSString のときも素通しでよい
       - `forEach(cb, thisArg)` は VM の callFunction でラップ
-- [ ] 27-1c: `Map.prototype[Symbol.iterator]` → `entries()` を返す
+- [x] 27-1c: `Map.prototype[Symbol.iterator]` → `entries()` を返す
       VM の `@@iterator` プロトコルとつなぐ。返す iterator は
       `{ next: () => { value, done } }` 形式
-- [ ] 27-1d: `MapCtor.prototype = Map.prototype` で `instanceof Map` 動作
+- [x] 27-1d: `MapCtor.prototype = Map.prototype` で `instanceof Map` 動作
 
 ### 27-2: Set (VM)
 
-- [ ] 27-2a: `SetCtor` を host `Set` のラッパーとして定義
-- [ ] 27-2b: prototype メソッド: `add, has, delete, clear, size,
+- [x] 27-2a: `SetCtor` を host `Set` のラッパーとして定義
+- [x] 27-2b: prototype メソッド: `add, has, delete, clear, size,
       forEach, keys, values, entries`
       - `keys` は `values` と同じ (Set の慣例)
-- [ ] 27-2c: `Set.prototype[Symbol.iterator]` → `values()`
-- [ ] 27-2d: `instanceof Set`
+- [x] 27-2c: `Set.prototype[Symbol.iterator]` → `values()`
+- [x] 27-2d: `instanceof Set`
 
 ### 27-3: WeakMap / WeakSet (VM)
 
-- [ ] 27-3a: `WeakMapCtor` / `WeakSetCtor` を host のラッパーで定義
+- [x] 27-3a: `WeakMapCtor` / `WeakSetCtor` を host のラッパーで定義
       - メソッド: `get/set/has/delete` (WeakMap), `add/has/delete` (WeakSet)
       - `size` / iterator は **無い** (仕様通り)
-- [ ] 27-3b: 主要な失敗ケース確認:
+- [x] 27-3b: 主要な失敗ケース確認:
       - key に primitive を渡したら TypeError
       - key に JSObject を渡したら正しく動く
 
 ### 27-4: TW (interpreter/evaluator.ts)
 
-- [ ] 27-4a: VM 27-1〜27-3 を TW に移植
-- [ ] 27-4b: TW 側の for-of が Map/Set を回せることを確認
+- [x] 27-4a: VM 27-1〜27-3 を TW に移植
+- [x] 27-4b: TW 側の for-of が Map/Set を回せることを確認
       (TW の for-of 実装は VM とは別系統なので、`@@iterator` 経路を踏むか
       要確認)
 
 ### 27-5: テスト
 
-- [ ] 27-5a: `src/runtime/phase27.test.ts` を作成
+- [x] 27-5a: `src/runtime/phase27.test.ts` を作成
       - Map: 基本 (set/get/has/delete/size)、iterable 引数、forEach、
         for-of、Symbol.iterator、instanceof、JSString キー
       - Set: 基本 (add/has/delete)、iterable 引数、forEach、for-of
       - WeakMap/WeakSet: 基本動作、primitive key で TypeError
-- [ ] 27-5b: TW/VM の両方で同じテストを通す
+- [x] 27-5b: TW/VM の両方で同じテストを通す
 
 ### 27-6: SunSpider 試行 (任意)
 
-- [ ] 27-6a: SunSpider の `access-fannkuch.js` などで Map/Set が出てくる
-      テストを試す (要調査) — 出てこなければ skip
+- [x] 27-6a: SunSpider の Map/Set 出現確認 → bench/sunspider/ の 5 本には
+      出てこないので skip
 
 ### 27-7: test262 (オプション)
 
 - [ ] 27-7a: sparse-checkout で `test/built-ins/Map` `test/built-ins/Set`
-      `test/built-ins/WeakMap` `test/built-ins/WeakSet` を追加 (要ユーザー確認)
-- [ ] 27-7b: pre/post 計測
+      `test/built-ins/WeakMap` `test/built-ins/WeakSet` を追加 (要ユーザー確認、skip)
+- [ ] 27-7b: pre/post 計測 (skip)
 
 ### 27-8: まとめ
 
-- [ ] 27-8a: LEARN-Phase27.md
-- [ ] 27-8b: BENCHMARK.md 追記 (任意)
+- [x] 27-8a: LEARN-Phase27.md (Wasm Map/Set 実装の話含む)
+- [ ] 27-8b: BENCHMARK.md 追記 (任意 — TODO/LEARN に必要な内容あり、skip)
 
 ## 技術メモ
 
