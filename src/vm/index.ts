@@ -473,6 +473,130 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   DateCtor.prototype = Date.prototype;
   vm.setGlobal("Date", DateCtor);
 
+  // Map / Set / WeakMap / WeakSet
+  // host Map/Set を薄くラップし、prototype をそのまま使う。iterable 引数は
+  // jsmini の @@iterator か host Symbol.iterator のどちらでも吸収する。
+  function* toHostIterable(v: unknown): Generator<unknown> {
+    if (v === null || v === undefined) return;
+    // host iterable (host Array, host Map, ...)
+    if (typeof (v as any)[Symbol.iterator] === "function") {
+      for (const x of (v as Iterable<unknown>)) yield x;
+      return;
+    }
+    // jsmini の iterable (@@iterator を持つ JSObject)
+    const iterFn = isJSObject(v) ? jsObjGet(v, "@@iterator") : (v as any)?.["@@iterator"];
+    if (typeof iterFn !== "function") throw new TypeError("argument is not iterable");
+    const iter = (iterFn as Function).call(v);
+    while (true) {
+      const nextFn = isJSObject(iter) ? jsObjGet(iter, "next") : (iter as any)?.next;
+      const r = (nextFn as Function).call(iter);
+      const done = isJSObject(r) ? jsObjGet(r, "done") : (r as any)?.done;
+      if (done) return;
+      const val = isJSObject(r) ? jsObjGet(r, "value") : (r as any)?.value;
+      yield val;
+    }
+  }
+  // [k, v] の取り出し: host Array は [0]/[1]、jsmini Array も同じ、JSObject は length/get
+  function unwrapEntry(entry: unknown): [unknown, unknown] {
+    if (Array.isArray(entry)) return [entry[0], entry[1]];
+    if (isJSObject(entry)) return [jsObjGet(entry, "0"), jsObjGet(entry, "1")];
+    throw new TypeError("Map iterable entry must be an array");
+  }
+  // forEach 等のコールバックを VM で実行できるようラップ
+  const wrapVMCallback = (cb: unknown): ((...a: unknown[]) => unknown) => {
+    if (typeof cb === "function") return cb as any;
+    return (...args: unknown[]) => vm.callFunction(cb, undefined, args);
+  };
+
+  const MapCtor: any = function MapCtorFn(this: unknown, iterable?: unknown) {
+    if (!new.target) throw new TypeError("Map must be called with new");
+    const m = new Map<unknown, unknown>();
+    if (iterable !== undefined && iterable !== null) {
+      for (const entry of toHostIterable(iterable)) {
+        const [k, v] = unwrapEntry(entry);
+        m.set(k, v);
+      }
+    }
+    return m;
+  };
+  MapCtor.prototype = Map.prototype;
+  vm.setGlobal("Map", MapCtor);
+
+  const SetCtor: any = function SetCtorFn(this: unknown, iterable?: unknown) {
+    if (!new.target) throw new TypeError("Set must be called with new");
+    const s = new Set<unknown>();
+    if (iterable !== undefined && iterable !== null) {
+      for (const v of toHostIterable(iterable)) s.add(v);
+    }
+    return s;
+  };
+  SetCtor.prototype = Set.prototype;
+  vm.setGlobal("Set", SetCtor);
+
+  const WeakMapCtor: any = function WeakMapCtorFn(this: unknown, iterable?: unknown) {
+    if (!new.target) throw new TypeError("WeakMap must be called with new");
+    const m = new WeakMap<object, unknown>();
+    if (iterable !== undefined && iterable !== null) {
+      for (const entry of toHostIterable(iterable)) {
+        const [k, v] = unwrapEntry(entry);
+        if (k === null || (typeof k !== "object" && typeof k !== "function")) {
+          throw new TypeError("Invalid value used as weak map key");
+        }
+        m.set(k as object, v);
+      }
+    }
+    return m;
+  };
+  WeakMapCtor.prototype = WeakMap.prototype;
+  vm.setGlobal("WeakMap", WeakMapCtor);
+
+  const WeakSetCtor: any = function WeakSetCtorFn(this: unknown, iterable?: unknown) {
+    if (!new.target) throw new TypeError("WeakSet must be called with new");
+    const s = new WeakSet<object>();
+    if (iterable !== undefined && iterable !== null) {
+      for (const v of toHostIterable(iterable)) {
+        if (v === null || (typeof v !== "object" && typeof v !== "function")) {
+          throw new TypeError("Invalid value used in weak set");
+        }
+        s.add(v as object);
+      }
+    }
+    return s;
+  };
+  WeakSetCtor.prototype = WeakSet.prototype;
+  vm.setGlobal("WeakSet", WeakSetCtor);
+
+  // forEach のコールバックは BytecodeFunction の場合があるので、
+  // Map.prototype.forEach / Set.prototype.forEach を wrap する代わりに
+  // VM 側で見つけたら wrapVMCallback で包む。
+  // 実装は "プロトタイプ method 呼び出し" 経路で透過的に動かしたいので、
+  // host の Map/Set prototype はそのまま、ただし MapCtor/SetCtor.prototype を
+  // 見たときに wrap layer を挟むのが綺麗。今回は簡易対応として、global hook を
+  // 置かず、テストで `for-of` 経由を主軸にする。forEach はラップ済み版を別名で
+  // 提供 (wrapVMCallback)。
+  // これは host Map.prototype.forEach をそのまま使うパスでは BytecodeFunction
+  // が直接呼ばれて壊れるため、jsmini ユーザコードからは for-of を推奨。
+  // テストの forEach は wrapVMCallback を通すヘルパで対応する。
+  // ここでは Map.prototype.forEach 等を「callback を wrap する版」で上書きする。
+  // ※ host のグローバル Map に影響するが、jsmini ランタイム内は問題無し。
+  const origMapForEach = Map.prototype.forEach;
+  if (!(Map.prototype as any).__jsminiPatched) {
+    (Map.prototype as any).__jsminiPatched = true;
+    Map.prototype.forEach = function(this: Map<unknown, unknown>, cb: unknown, thisArg?: unknown) {
+      const wrapped = wrapVMCallback(cb);
+      origMapForEach.call(this, function(this: unknown, v: unknown, k: unknown, m: Map<unknown, unknown>) {
+        wrapped.call(thisArg, v, k, m);
+      } as any, thisArg);
+    } as any;
+    const origSetForEach = Set.prototype.forEach;
+    Set.prototype.forEach = function(this: Set<unknown>, cb: unknown, thisArg?: unknown) {
+      const wrapped = wrapVMCallback(cb);
+      origSetForEach.call(this, function(this: unknown, v: unknown, _v2: unknown, s: Set<unknown>) {
+        wrapped.call(thisArg, v, v, s);
+      } as any, thisArg);
+    } as any;
+  }
+
   // JSON (JSString ↔ ネイティブ文字列の変換が必要)
   vm.setGlobal("JSON", {
     stringify: (val: unknown) => {

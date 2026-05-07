@@ -579,7 +579,22 @@ export class VM {
   private run(baseFrameCount = 0): unknown {
     const prevBase = this._runBaseFrameCount;
     this._runBaseFrameCount = baseFrameCount;
-    try { return this._runLoop(baseFrameCount); } finally { this._runBaseFrameCount = prevBase; }
+    try {
+      while (true) {
+        try {
+          return this._runLoop(baseFrameCount);
+        } catch (e: any) {
+          // YieldSignal などの内部制御フローはそのまま伝播させる
+          if (e instanceof YieldSignal) throw e;
+          // VM 内 Throw opcode (`__thrown`) は _runLoop 内で処理済み — ここに来るのは
+          // host が投げた素の Error (WeakMap の primitive 拒否、host 例外 etc)。
+          // VM の try/catch ハンドラに変換。
+          if (e?.__thrown) throw e;
+          if (this.unwindToHandler(e, baseFrameCount)) continue;
+          throw e;
+        }
+      }
+    } finally { this._runBaseFrameCount = prevBase; }
   }
 
   private _runLoop(baseFrameCount: number): unknown {
@@ -1102,8 +1117,11 @@ export class VM {
             const chars = [...str].map(c => internString(c));
             this.push({ __arrayIter__: true, arr: chars, idx: 0 });
           } else {
-            // @@iterator を取得
-            const iterFn = isJSObject(obj) ? jsObjGet(obj, "@@iterator") : (obj as any)?.["@@iterator"];
+            // @@iterator を取得 (host Symbol.iterator にもフォールバック: host Map/Set 等)
+            let iterFn = isJSObject(obj) ? jsObjGet(obj, "@@iterator") : (obj as any)?.["@@iterator"];
+            if (!iterFn && obj !== null && typeof obj === "object" && typeof (obj as any)[Symbol.iterator] === "function") {
+              iterFn = (obj as any)[Symbol.iterator].bind(obj);
+            }
             if (!iterFn) throw new TypeError("obj is not iterable");
             const iterator = this.callAny(iterFn, obj, []);
             if (iterator === THROWN_SENTINEL) break;
