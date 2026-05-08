@@ -68,6 +68,9 @@ export function getProperty(obj: JSObject, key: string): unknown {
   let current: JSObject | null = obj;
   while (current !== null && current !== undefined) {
     if (Object.prototype.hasOwnProperty.call(current, key)) {
+      // host getter (Set.prototype.size 等) は元の receiver で呼ぶ必要がある
+      const desc = Object.getOwnPropertyDescriptor(current, key);
+      if (desc && typeof desc.get === "function") return desc.get.call(obj);
       return current[key];
     }
     current = (current[PROTO_KEY] as JSObject | null) ?? null;

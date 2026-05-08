@@ -169,6 +169,49 @@ type TestResult = {
   error?: string;
 };
 
+// テストが host の built-in prototype を改変できる (例: Object.defineProperty を
+// Map.prototype.set に当てて throw させる)。jsmini の compiler/VM 自体が host の
+// Map/Set を内部的に使っているため、汚染は次のテスト以降に波及する。
+// → 各テストの前後で関連 prototype のスナップショット/復元を行う。
+const PROTOS_TO_SNAPSHOT: { name: string; proto: object }[] = [
+  { name: "Map", proto: Map.prototype },
+  { name: "Set", proto: Set.prototype },
+  { name: "WeakMap", proto: WeakMap.prototype },
+  { name: "WeakSet", proto: WeakSet.prototype },
+  { name: "Array", proto: Array.prototype },
+  { name: "Object", proto: Object.prototype },
+];
+type ProtoSnapshot = { proto: object; descriptors: Record<string | symbol, PropertyDescriptor>; keys: (string | symbol)[] };
+function snapshotPrototypes(): ProtoSnapshot[] {
+  return PROTOS_TO_SNAPSHOT.map(({ proto }) => {
+    const keys = [...Object.getOwnPropertyNames(proto), ...Object.getOwnPropertySymbols(proto)];
+    const descriptors: Record<string | symbol, PropertyDescriptor> = {};
+    for (const k of keys) {
+      const d = Object.getOwnPropertyDescriptor(proto, k);
+      if (d) descriptors[k as any] = d;
+    }
+    return { proto, descriptors, keys };
+  });
+}
+function restorePrototypes(snaps: ProtoSnapshot[]): void {
+  for (const { proto, descriptors, keys } of snaps) {
+    // 1. 元から無かったキーは削除
+    const currentKeys = [...Object.getOwnPropertyNames(proto), ...Object.getOwnPropertySymbols(proto)];
+    for (const k of currentKeys) {
+      if (!keys.includes(k)) {
+        try { delete (proto as any)[k]; } catch { /* configurable: false なら諦め */ }
+      }
+    }
+    // 2. 既存キーは descriptor 復元
+    for (const k of keys) {
+      const orig = descriptors[k as any];
+      if (!orig) continue;
+      try { Object.defineProperty(proto, k, orig); } catch { /* configurable: false 等 */ }
+    }
+  }
+}
+const ORIGINAL_PROTOTYPES = snapshotPrototypes();
+
 function runTest(filePath: string): TestResult {
   const relPath = path.relative(TEST262_ROOT, filePath);
   const source = fs.readFileSync(filePath, "utf-8");
@@ -193,21 +236,25 @@ function runTest(filePath: string): TestResult {
     ? { maxSteps: 100_000 }
     : { onStep: () => { if (++steps > 100_000) throw new Error("timeout: exceeded 100k steps"); } };
 
-  if (meta.negative) {
-    // negative test: エラーが投げられることを期待する
+  try {
+    if (meta.negative) {
+      try {
+        run(fullSource, opts);
+        return { file: relPath, status: "fail", error: "Expected error but none was thrown" };
+      } catch {
+        return { file: relPath, status: "pass" };
+      }
+    }
+
     try {
       run(fullSource, opts);
-      return { file: relPath, status: "fail", error: "Expected error but none was thrown" };
-    } catch {
       return { file: relPath, status: "pass" };
+    } catch (e: any) {
+      return { file: relPath, status: "fail", error: extractErrorMessage(e) };
     }
-  }
-
-  try {
-    run(fullSource, opts);
-    return { file: relPath, status: "pass" };
-  } catch (e: any) {
-    return { file: relPath, status: "fail", error: extractErrorMessage(e) };
+  } finally {
+    // テストが host built-in prototype を汚染した可能性 → 必ず復元
+    restorePrototypes(ORIGINAL_PROTOTYPES);
   }
 }
 
@@ -298,6 +345,10 @@ const TEST_DIRS = [
   "test/language/types/undefined",
   // built-ins (Phase 25 以降に拡張)
   "test/built-ins/Promise",
+  "test/built-ins/Map",
+  "test/built-ins/Set",
+  "test/built-ins/WeakMap",
+  "test/built-ins/WeakSet",
 ];
 
 const allTests: string[] = [];

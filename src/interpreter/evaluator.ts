@@ -204,6 +204,85 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   twDateCtor.prototype = Date.prototype;
   env.defineReadOnly("Date", twDateCtor);
 
+  // Map / Set / WeakMap / WeakSet (host wrapper) — Phase 27
+  function* twToHostIterable(v: unknown): Generator<unknown> {
+    if (v === null || v === undefined) return;
+    if (typeof (v as any)[Symbol.iterator] === "function") {
+      for (const x of (v as Iterable<unknown>)) yield x;
+      return;
+    }
+    const iterFn = (v as any)?.["@@iterator"];
+    if (typeof iterFn !== "function") throw new TypeError("argument is not iterable");
+    const iter = (iterFn as Function).call(v);
+    while (true) {
+      const r = (iter.next as Function).call(iter);
+      if (r?.done) return;
+      yield r?.value;
+    }
+  }
+  function twUnwrapEntry(entry: unknown): [unknown, unknown] {
+    if (Array.isArray(entry)) return [entry[0], entry[1]];
+    if (entry && typeof entry === "object") return [(entry as any)[0], (entry as any)[1]];
+    throw new TypeError("Map iterable entry must be an array");
+  }
+  const twMapCtor: any = function(this: unknown, iterable?: unknown) {
+    if (!new.target) throw new TypeError("Map must be called with new");
+    const m = new Map<unknown, unknown>();
+    if (iterable !== undefined && iterable !== null) {
+      for (const entry of twToHostIterable(iterable)) {
+        const [k, v] = twUnwrapEntry(entry);
+        m.set(k, v);
+      }
+    }
+    return m;
+  };
+  twMapCtor.prototype = Map.prototype;
+  env.defineReadOnly("Map", twMapCtor);
+
+  const twSetCtor: any = function(this: unknown, iterable?: unknown) {
+    if (!new.target) throw new TypeError("Set must be called with new");
+    const s = new Set<unknown>();
+    if (iterable !== undefined && iterable !== null) {
+      for (const v of twToHostIterable(iterable)) s.add(v);
+    }
+    return s;
+  };
+  twSetCtor.prototype = Set.prototype;
+  env.defineReadOnly("Set", twSetCtor);
+
+  const twWeakMapCtor: any = function(this: unknown, iterable?: unknown) {
+    if (!new.target) throw new TypeError("WeakMap must be called with new");
+    const m = new WeakMap<object, unknown>();
+    if (iterable !== undefined && iterable !== null) {
+      for (const entry of twToHostIterable(iterable)) {
+        const [k, v] = twUnwrapEntry(entry);
+        if (k === null || (typeof k !== "object" && typeof k !== "function")) {
+          throw new TypeError("Invalid value used as weak map key");
+        }
+        m.set(k as object, v);
+      }
+    }
+    return m;
+  };
+  twWeakMapCtor.prototype = WeakMap.prototype;
+  env.defineReadOnly("WeakMap", twWeakMapCtor);
+
+  const twWeakSetCtor: any = function(this: unknown, iterable?: unknown) {
+    if (!new.target) throw new TypeError("WeakSet must be called with new");
+    const s = new WeakSet<object>();
+    if (iterable !== undefined && iterable !== null) {
+      for (const v of twToHostIterable(iterable)) {
+        if (v === null || (typeof v !== "object" && typeof v !== "function")) {
+          throw new TypeError("Invalid value used in weak set");
+        }
+        s.add(v as object);
+      }
+    }
+    return s;
+  };
+  twWeakSetCtor.prototype = WeakSet.prototype;
+  env.defineReadOnly("WeakSet", twWeakSetCtor);
+
   // Object
   const strArg = (v: unknown) => isJSString(v) ? jsStringToString(v) : String(v);
   const twObjectWrapper: any = function(...args: unknown[]) { return new Object(...args); };
