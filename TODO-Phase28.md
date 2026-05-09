@@ -103,16 +103,15 @@ RegExp 引数を受け取るようにする:
 - [x] 28-6a: `bench/sunspider/regexp-dna.js` `string-tagcloud.js`
       `string-validate-input.js` を取得 + 文字列リテラル行継続 `\<newline>`
       の lexer 対応
-- [x] 28-6b: 3 本ともテストファイル側に **`var` を補って strict mode 化** →
-      regexp-dna.js / string-validate-input.js の 2 本が完動。string-tagcloud は
-      `Array.prototype.foo = ...` のような host built-in prototype 拡張を
-      使っているため別軸 (vm.arrayPrototype が host Array.prototype にフォールバック
-      しない問題)。bench 結果 (V8-JIT 有効):
-      - regexp-dna: TW 21ms / VM 14ms / JIT 14ms
-      - string-validate-input: TW 232ms / VM 99ms / JIT 106ms
-      VM が TW の ~1.5-2x 速い、JIT は VM とほぼ同等 (regex hot path が
-      JIT 化されてないため)
-- [x] 28-6c: VM の stringPrototype に `concat` を追加 (validate-input が使う)
+- [x] 28-6b: テストファイル側 `var` 補完 + engine 側 8 修正で **3 本全部完動**:
+      - regexp-dna:           TW 21ms / VM 14ms / JIT 14ms
+      - string-tagcloud:      TW 190ms / VM 2049ms / JIT 2101ms (出力長一致)
+      - string-validate-input: TW 233ms / VM 118ms / JIT 124ms
+- [x] 28-6c: built-in prototype 拡張対応 + 関連バグ修正 (詳細は LEARN):
+      ArrayCtor.prototype = Array.prototype、JSString method の host fallback、
+      callJSFunctionSync の this/hoist、VM の nested fn hoist、for-in/of の
+      local slot 化、JSString 比較、hasOwnProperty JSString unwrap 等
+      → test262 にも効いて +54 pass (6558 → 6612)
 
 ### 28-7: test262
 

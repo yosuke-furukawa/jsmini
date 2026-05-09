@@ -155,32 +155,63 @@ if (peek() === "\\") {
 ## SunSpider 状況
 
 `bench/sunspider/` に regexp-dna.js / string-tagcloud.js /
-string-validate-input.js を取得。**手元で各ファイルに `var` を補って
-strict mode 化** したところ、3 本中 2 本が完動:
+string-validate-input.js を取得。`var` 補完で strict mode 化しつつ、
+`Array.prototype.toJSONString = ...` のような **built-in prototype 拡張**
+パターンに対応するため engine 側にも手を入れて 3 本完動:
 
-| ベンチ | 状態 | 修正 |
-|---|---|---|
-| regexp-dna | ✅ 完動 | `for(i in seqs)` → `for(var i in seqs)` (2 箇所) |
-| string-validate-input | ✅ 完動 | `letters = ...` 等 3 行に `var` 追加 + `String.prototype.concat` を VM stringPrototype に追加 |
-| string-tagcloud | ❌ 別軸 | `Array.prototype.toJSONString = ...` のような **host Array.prototype 拡張** を多用。VM の arrayPrototype が host にフォールバックしないため動かない |
-
-ベンチ結果 (V8-JIT 有効):
-
-| ベンチ | TW | VM | JIT (VM IR) |
+| ベンチ | TW | VM | JIT |
 |---|---|---|---|
 | regexp-dna | 21ms | 14ms | 14ms |
-| string-validate-input | 232ms | 99ms | 106ms |
+| string-tagcloud | **190ms** | 2049ms | 2101ms |
+| string-validate-input | 233ms | 118ms | 124ms |
 
-**観察**: VM が TW の ~1.5-2x 速い。JIT は VM と同等 (regex の hot path
-が JIT 化されてないので、bytecode dispatch 削減効果以上の加速はない)。
-host RegExp の execute 部分は V8 native に任せているので、ここを Wasm
-化する余地は (Stage B が完成すれば) 大きい。
+string-tagcloud は出力長が node と完全一致 (315244 chars)。
 
-**「sloppy → strict」 patch のスタンス**: SunSpider 1.0.2 は 2010 年代の
-JS code で、当時普通だった sloppy global 依存が散見される。jsmini は
-教育目的で strict-only なので、ベンチを動かすときは **テストファイル
-側に最小の `var` を足す方針**。upstream からの差分は git で確認可能で、
-原コードの本質的なロジックは変わらない。
+### tagcloud を動かすために要った 8 個の engine 修正
+
+string-tagcloud は 2007 年製の "json2.js" 風コードで、host built-in
+prototype に重く依存している。それを動かすには jsmini 側の見直しが必要:
+
+1. **`ArrayCtor.prototype = Array.prototype`** — ユーザの
+   `Array.prototype.foo = ...` が host にも反映され、VM の `(obj as any)[name]`
+   フォールバックで見える
+2. **JSString メソッド呼び出しの fallback** (VM/TW 両方) — vm.stringPrototype
+   や TW の `s.method()` が見つけられないとき host String.prototype に
+   fall through。host method なら wrap、BytecodeFunction/JSFunction なら
+   そのまま CallMethod に渡す or callJSFunctionSync で呼ぶ
+3. **`callJSFunctionSync` の this バインド + hoisting** — `String.prototype.foo`
+   経由の jsmini 関数を呼ぶとき、`this` を渡し、function 宣言を hoist
+4. **VM の nested function declaration hoisting** — `function outer() {
+   function walk() { walk(); } }` の再帰呼び出し対応
+5. **VM の for-in / for-of を local slot 化** — 従来は loop 状態を global 名
+   (`__iter_<offset>`、`__forin_idx_<offset>`) で持っていて、**再帰呼び出し
+   時に同名の global を上書きして iteration が消えていた** 。これが
+   tagcloud の reviver が popularity を 1 つしか変換しなかった真因
+6. **JSString の `<` `>` `<=` `>=` 比較** (VM) — 両辺 JSString のときは
+   `jsStringToString` して文字列比較。なしだと sort が壊れる
+7. **`Object.prototype.hasOwnProperty` の JSString 引数 unwrap** — for-in が
+   JSString を yield するので、`hasOwnProperty.apply(obj, [k])` で k が
+   JSString だと常に false。host-patches.ts で対応
+8. **VM stringPrototype に `concat`** — string-validate-input が使う
+
+**観察**: tagcloud は TW (190ms) のほうが VM (2049ms) より 10x 速い。
+普通は逆のはずで、VM 側に最適化の余地があるのが見えた (おそらく
+host method dispatch の wrap 関数が hot loop で重い)。
+
+### 「sloppy → strict」 patch のスタンス
+
+SunSpider 1.0.2 (2010 年代製) は当時普通だった sloppy global 依存が散見
+される。jsmini は教育目的で strict-only なので、ベンチを動かすときは
+**テストファイル側に最小の `var` を足す方針**。git diff で原版との差
+を確認可能。
+
+date-format-tofte / date-format-xparb は更に深い sloppy global 連鎖が
+あり別タスク。
+
+### 副次効果: test262 +54 pass
+
+上記の修正 (特に for-in 再帰、JSString 比較、hasOwnProperty unwrap) は
+他のテストにも効いた。test262 (VM) は **6558 → 6612** に上昇。
 
 ## Stage B (自前 NFA エンジン) のスケッチ
 
