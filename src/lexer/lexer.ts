@@ -190,6 +190,13 @@ export function tokenize(source: string): Token[] {
       while (pos < source.length && peek() !== quote) {
         if (peek() === "\\") {
           advance(); // backslash
+          // line continuation: `\` 直後に改行 → 改行を消費して次行に続ける
+          if (peek() === "\n") { pos++; line++; column = 1; continue; }
+          if (peek() === "\r") {
+            pos++;
+            if (peek() === "\n") pos++;
+            line++; column = 1; continue;
+          }
           const esc = advance();
           switch (esc) {
             case "n": str += "\n"; break;
