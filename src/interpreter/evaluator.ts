@@ -16,6 +16,7 @@ import "../runtime/host-patches.js";
 // JSFunction を同期的に呼び出すヘルパー (Promise executor / then callback 用)
 function callJSFunctionSync(fn: JSFunction, thisValue: unknown, args: unknown[]): unknown {
   const callEnv = new Environment(fn.closure, true);
+  if (!fn.isArrow) callEnv.setThis(thisValue);
   const params: any[] = fn.params;
   for (let i = 0; i < params.length; i++) {
     if (params[i].type === "Identifier") {
@@ -25,6 +26,8 @@ function callJSFunctionSync(fn: JSFunction, thisValue: unknown, args: unknown[])
     }
   }
   if (fn.name) callEnv.define(fn.name, fn);
+  hoistVarDeclarations(fn.body.body, callEnv);
+  hoistFunctionDeclarations(fn.body.body, callEnv);
 
   // async 関数: Promise を返して generator + microtask で駆動
   if ((fn as any).isAsync) {
@@ -1565,6 +1568,10 @@ function* evalCallExpression(
           if (Array.isArray(result)) return result.map((s: string) => typeof s === "string" ? internString(s) : s);
           return result;
         };
+      } else if (isJSFunction(nativeFn)) {
+        // user 拡張 (`String.prototype.foo = function(...) {...}` 等) — JSFunction を call
+        const jsFn = nativeFn;
+        fn = (...a: unknown[]) => callJSFunctionSync(jsFn, thisValue, a);
       }
     }
   } else {

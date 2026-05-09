@@ -25,6 +25,12 @@ if (!(globalThis as any)[PATCHED]) {
     return origExec.call(this, isJSString(s) ? jsStringToString(s) : String(s));
   } as any;
 
+  // Object.prototype.hasOwnProperty: JSString 引数を string に変換
+  const origHasOwn = Object.prototype.hasOwnProperty;
+  Object.prototype.hasOwnProperty = function(this: object, key: unknown) {
+    return origHasOwn.call(this, isJSString(key) ? jsStringToString(key) : key as PropertyKey);
+  } as any;
+
   // Map.prototype.forEach / Set.prototype.forEach: BytecodeFunction を wrap する側は
   // VM 側で動的に必要なので、wrap helper を渡せる仕組みは vm/index.ts 側に残す。
   // ここではそのフックを後付けできる形で。

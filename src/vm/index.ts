@@ -295,6 +295,10 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return [];
   };
   ArrayCtor.of = (...items: unknown[]) => [...items];
+  // ユーザコードの `Array.prototype.foo = ...` 拡張を有効にする (Phase 28-6)。
+  // ArrayCtor.prototype と host Array.prototype を結合 → 配列の method dispatch
+  // (vm.arrayPrototype の next に host Array.prototype を見にいく) で拡張が見える
+  ArrayCtor.prototype = Array.prototype;
   vm.setGlobal("Array", ArrayCtor);
 
   // Boolean/Number/String: new で呼ばれたらラッパーオブジェクト、関数呼びならプリミティブ変換
@@ -326,7 +330,9 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return s;
   }
   (StringCtor as any).fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
-  (StringCtor as any).prototype = {};
+  // ユーザの `String.prototype.foo = ...` 拡張を host String.prototype に当てて、
+  // VM 側の dispatch (vm.stringPrototype に無ければ host にフォールバック) で見えるように
+  (StringCtor as any).prototype = String.prototype;
   vm.setGlobal("String", StringCtor);
 
   // Function は new Function() が実用的でないので最低限
