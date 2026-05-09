@@ -1703,11 +1703,11 @@ clen = dnaInput.length
 
 var dnaOutputString = "";
 
-for(i in seqs)
+for(var i in seqs)
     dnaOutputString += seqs[i].source + " " + (dnaInput.match(seqs[i]) || []).length + "\n";
  // match returns null if no matches, so replace with empty
 
-for(k in subs)
+for(var k in subs)
  dnaInput = dnaInput.replace(k, subs[k]) // FIXME: Would like this to be a global substitution in a future version of SunSpider.
  // search string, replacement string, flags
 

@@ -130,7 +130,7 @@ if (!Object.prototype.toJSONString) {
             }
         } else {
 
-            for (k in this) {
+            for (var k in this) {
                 if (typeof k === 'string' &&
                         Object.prototype.hasOwnProperty.apply(this, [k])) {
                     v = this[k];
@@ -180,7 +180,7 @@ if (!Object.prototype.toJSONString) {
             function walk(k, v) {
                 var i, n;
                 if (v && typeof v === 'object') {
-                    for (i in v) {
+                    for (var i in v) {
                         if (Object.prototype.hasOwnProperty.apply(v, [i])) {
                             n = walk(i, v[i]);
                             if (n !== undefined) {

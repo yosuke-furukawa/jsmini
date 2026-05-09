@@ -103,10 +103,16 @@ RegExp 引数を受け取るようにする:
 - [x] 28-6a: `bench/sunspider/regexp-dna.js` `string-tagcloud.js`
       `string-validate-input.js` を取得 + 文字列リテラル行継続 `\<newline>`
       の lexer 対応
-- [x] 28-6b: `src/sunspider-bench.ts` で計測 → **3 本とも sloppy global**
-      (`for(i in seqs)` `letters = new Array(...)`) で実走できず。これは
-      Phase 28 の範囲外 (jsmini は strict-only)。手元で var を入れる加工
-      をすれば動かせる可能性あり。LEARN にメモ済み
+- [x] 28-6b: 3 本ともテストファイル側に **`var` を補って strict mode 化** →
+      regexp-dna.js / string-validate-input.js の 2 本が完動。string-tagcloud は
+      `Array.prototype.foo = ...` のような host built-in prototype 拡張を
+      使っているため別軸 (vm.arrayPrototype が host Array.prototype にフォールバック
+      しない問題)。bench 結果 (V8-JIT 有効):
+      - regexp-dna: TW 21ms / VM 14ms / JIT 14ms
+      - string-validate-input: TW 232ms / VM 99ms / JIT 106ms
+      VM が TW の ~1.5-2x 速い、JIT は VM とほぼ同等 (regex hot path が
+      JIT 化されてないため)
+- [x] 28-6c: VM の stringPrototype に `concat` を追加 (validate-input が使う)
 
 ### 28-7: test262
 

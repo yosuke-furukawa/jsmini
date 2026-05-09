@@ -155,16 +155,32 @@ if (peek() === "\\") {
 ## SunSpider 状況
 
 `bench/sunspider/` に regexp-dna.js / string-tagcloud.js /
-string-validate-input.js を取得。**全 3 本が動かない**:
+string-validate-input.js を取得。**手元で各ファイルに `var` を補って
+strict mode 化** したところ、3 本中 2 本が完動:
 
-| ベンチ | 壁 |
-|---|---|
-| regexp-dna | `for(i in seqs)` (sloppy global、jsmini は strict-only) |
-| string-tagcloud | 同様の sloppy global |
-| string-validate-input | `letters = new Array(...)` (sloppy global) |
+| ベンチ | 状態 | 修正 |
+|---|---|---|
+| regexp-dna | ✅ 完動 | `for(i in seqs)` → `for(var i in seqs)` (2 箇所) |
+| string-validate-input | ✅ 完動 | `letters = ...` 等 3 行に `var` 追加 + `String.prototype.concat` を VM stringPrototype に追加 |
+| string-tagcloud | ❌ 別軸 | `Array.prototype.toJSONString = ...` のような **host Array.prototype 拡張** を多用。VM の arrayPrototype が host にフォールバックしないため動かない |
 
-これは Phase 28 の範囲外。手元で var を入れる加工をすれば動かせる
-可能性あり。
+ベンチ結果 (V8-JIT 有効):
+
+| ベンチ | TW | VM | JIT (VM IR) |
+|---|---|---|---|
+| regexp-dna | 21ms | 14ms | 14ms |
+| string-validate-input | 232ms | 99ms | 106ms |
+
+**観察**: VM が TW の ~1.5-2x 速い。JIT は VM と同等 (regex の hot path
+が JIT 化されてないので、bytecode dispatch 削減効果以上の加速はない)。
+host RegExp の execute 部分は V8 native に任せているので、ここを Wasm
+化する余地は (Stage B が完成すれば) 大きい。
+
+**「sloppy → strict」 patch のスタンス**: SunSpider 1.0.2 は 2010 年代の
+JS code で、当時普通だった sloppy global 依存が散見される。jsmini は
+教育目的で strict-only なので、ベンチを動かすときは **テストファイル
+側に最小の `var` を足す方針**。upstream からの差分は git で確認可能で、
+原コードの本質的なロジックは変わらない。
 
 ## Stage B (自前 NFA エンジン) のスケッチ
 

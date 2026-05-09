@@ -257,6 +257,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     trimStart:   function(this: unknown) { return strRet(strArg(this).trimStart()); },
     trimEnd:     function(this: unknown) { return strRet(strArg(this).trimEnd()); },
     repeat:      function(this: unknown, n: number) { return strRet(strArg(this).repeat(n)); },
+    concat:      function(this: unknown, ...args: unknown[]) { return strRet(strArg(this) + args.map(strArg).join("")); },
     padStart:    function(this: unknown, len: number, fill?: unknown) { return strRet(strArg(this).padStart(len, fill !== undefined ? strArg(fill) : undefined)); },
     padEnd:      function(this: unknown, len: number, fill?: unknown) { return strRet(strArg(this).padEnd(len, fill !== undefined ? strArg(fill) : undefined)); },
     replace:     function(this: unknown, s: unknown, r: unknown) { return strRet(strArg(this).replace(strArg(s), strArg(r))); },
