@@ -1082,6 +1082,13 @@ export function parse(source: string): Program {
       case "Null":
         eat("Null");
         return { type: "Literal", value: null };
+      case "RegExp": {
+        eat("RegExp");
+        // value は "/pattern/flags" の生文字列。最後の `/` でパターンとフラグに分割
+        const raw = token.value;
+        const lastSlash = raw.lastIndexOf("/");
+        return { type: "RegExpLiteral", pattern: raw.slice(1, lastSlash), flags: raw.slice(lastSlash + 1) };
+      }
       case "Identifier":
         eat("Identifier");
         return { type: "Identifier", name: token.value };
