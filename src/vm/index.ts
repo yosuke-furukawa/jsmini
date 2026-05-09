@@ -8,6 +8,7 @@ import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_
 import { Heap } from "./heap.js";
 import { evaluate } from "../interpreter/evaluator.js";
 import { JSPromise, drainMicrotasks, isJSPromise, setHandlerCaller } from "../runtime/promise.js";
+import "../runtime/host-patches.js";
 export { disassemble } from "./bytecode.js";
 
 type ConsoleOptions = {
@@ -565,6 +566,81 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   };
   WeakSetCtor.prototype = WeakSet.prototype;
   vm.setGlobal("WeakSet", WeakSetCtor);
+
+  // RegExp: host RegExp に丸投げ。pattern/flags が JSString のとき unwrap
+  const RegExpCtor: any = function(this: unknown, pattern?: unknown, flags?: unknown) {
+    const p = isJSString(pattern) ? jsStringToString(pattern) : pattern;
+    const f = isJSString(flags) ? jsStringToString(flags) : flags;
+    if (new.target) {
+      return f !== undefined ? new RegExp(p as any, f as any) : new RegExp(p as any);
+    }
+    return f !== undefined ? new RegExp(p as any, f as any) : new RegExp(p as any);
+  };
+  RegExpCtor.prototype = RegExp.prototype;
+  vm.setGlobal("RegExp", RegExpCtor);
+
+  // String.prototype の RegExp 引数版を vm.stringPrototype に注入
+  // (上で生成した stringPrototype を後付けで上書き)
+  const origReplace = vm.stringPrototype.replace;
+  vm.stringPrototype.match = function(this: unknown, re: unknown) {
+    const s = isJSString(this) ? jsStringToString(this) : String(this);
+    const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re));
+    const m = s.match(r);
+    if (!m) return null;
+    for (let i = 0; i < m.length; i++) if (typeof m[i] === "string") m[i] = internString(m[i]) as any;
+    return m;
+  };
+  vm.stringPrototype.search = function(this: unknown, re: unknown) {
+    const s = isJSString(this) ? jsStringToString(this) : String(this);
+    const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re));
+    return s.search(r);
+  };
+  vm.stringPrototype.matchAll = function(this: unknown, re: unknown) {
+    const s = isJSString(this) ? jsStringToString(this) : String(this);
+    const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re), "g");
+    const arr: unknown[][] = [];
+    for (const m of s.matchAll(r)) {
+      const row: unknown[] = [];
+      for (let i = 0; i < m.length; i++) row.push(typeof m[i] === "string" ? internString(m[i]) : m[i]);
+      arr.push(row);
+    }
+    return arr; // host Array of arrays (iterator のかわりに配列で代替)
+  };
+  vm.stringPrototype.replace = function(this: unknown, search: unknown, replacement: unknown) {
+    const s = isJSString(this) ? jsStringToString(this) : String(this);
+    // search が RegExp なら host に丸投げ、replacement が関数なら wrap
+    if (search instanceof RegExp) {
+      if (typeof replacement === "function") {
+        return internString(s.replace(search, (...args: unknown[]) => {
+          const r = (replacement as Function).apply(undefined, args.map(a => typeof a === "string" ? internString(a) : a));
+          return isJSString(r) ? jsStringToString(r) : String(r);
+        }));
+      } else if (typeof replacement === "object" && replacement !== null && "bytecode" in (replacement as any)) {
+        // BytecodeFunction
+        return internString(s.replace(search, (...args: unknown[]) => {
+          const r = vm.callFunction(replacement, undefined, args.map(a => typeof a === "string" ? internString(a) : a));
+          return isJSString(r) ? jsStringToString(r) : String(r);
+        }));
+      } else if (typeof replacement === "object" && replacement !== null && "__closure" in (replacement as any)) {
+        return internString(s.replace(search, (...args: unknown[]) => {
+          const r = vm.callFunction(replacement, undefined, args.map(a => typeof a === "string" ? internString(a) : a));
+          return isJSString(r) ? jsStringToString(r) : String(r);
+        }));
+      }
+      const rep = isJSString(replacement) ? jsStringToString(replacement) : String(replacement);
+      return internString(s.replace(search, rep));
+    }
+    // 既存の文字列引数版にフォールバック
+    return origReplace.call(this, search, replacement);
+  };
+  const origSplit = vm.stringPrototype.split;
+  vm.stringPrototype.split = function(this: unknown, sep: unknown, limit?: number) {
+    if (sep instanceof RegExp) {
+      const s = isJSString(this) ? jsStringToString(this) : String(this);
+      return s.split(sep, limit).map(x => internString(x));
+    }
+    return origSplit.call(this, sep, limit);
+  };
 
   // forEach のコールバックは BytecodeFunction の場合があるので、
   // Map.prototype.forEach / Set.prototype.forEach を wrap する代わりに

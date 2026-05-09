@@ -926,6 +926,17 @@ class BytecodeCompiler {
         break;
       }
 
+      case "RegExpLiteral": {
+        // host RegExp を constant pool に入れて LdaConst で共有。
+        // ES5 セマンティクス (literal が同じ instance を返す)。ES6 以降の
+        // "毎回新しい instance" を厳密に守るには専用 opcode が必要だが、
+        // Stage A では割り切る。lastIndex を使う code はそこで踏む可能性あり
+        const re = new RegExp(expr.pattern, expr.flags);
+        const index = this.addConstant(re);
+        this.emit("LdaConst", index);
+        break;
+      }
+
       case "Identifier": {
         this.emitLoad(expr.name);
         break;

@@ -11,6 +11,7 @@ import {
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
 import { JSPromise, drainMicrotasks, isJSPromise } from "../runtime/promise.js";
+import "../runtime/host-patches.js";
 
 // JSFunction を同期的に呼び出すヘルパー (Promise executor / then callback 用)
 function callJSFunctionSync(fn: JSFunction, thisValue: unknown, args: unknown[]): unknown {
@@ -282,6 +283,18 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   };
   twWeakSetCtor.prototype = WeakSet.prototype;
   env.defineReadOnly("WeakSet", twWeakSetCtor);
+
+  // RegExp (host wrapper) — Phase 28
+  const twRegExpCtor: any = function(this: unknown, pattern?: unknown, flags?: unknown) {
+    const p = isJSString(pattern) ? jsStringToString(pattern) : pattern;
+    const f = isJSString(flags) ? jsStringToString(flags) : flags;
+    if (new.target) {
+      return f !== undefined ? new RegExp(p as any, f as any) : new RegExp(p as any);
+    }
+    return f !== undefined ? new RegExp(p as any, f as any) : new RegExp(p as any);
+  };
+  twRegExpCtor.prototype = RegExp.prototype;
+  env.defineReadOnly("RegExp", twRegExpCtor);
 
   // Object
   const strArg = (v: unknown) => isJSString(v) ? jsStringToString(v) : String(v);
@@ -1008,6 +1021,8 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
   switch (expr.type) {
     case "Literal":
       return typeof expr.value === "string" ? internString(expr.value) : expr.value;
+    case "RegExpLiteral":
+      return new RegExp(expr.pattern, expr.flags);
     case "Identifier":
       return env.get(expr.name);
     case "ThisExpression":
