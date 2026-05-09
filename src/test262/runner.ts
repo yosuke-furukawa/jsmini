@@ -180,6 +180,8 @@ const PROTOS_TO_SNAPSHOT: { name: string; proto: object }[] = [
   { name: "WeakSet", proto: WeakSet.prototype },
   { name: "Array", proto: Array.prototype },
   { name: "Object", proto: Object.prototype },
+  { name: "RegExp", proto: RegExp.prototype },
+  { name: "String", proto: String.prototype },
 ];
 type ProtoSnapshot = { proto: object; descriptors: Record<string | symbol, PropertyDescriptor>; keys: (string | symbol)[] };
 function snapshotPrototypes(): ProtoSnapshot[] {
@@ -349,6 +351,13 @@ const TEST_DIRS = [
   "test/built-ins/Set",
   "test/built-ins/WeakMap",
   "test/built-ins/WeakSet",
+  "test/built-ins/RegExp",
+  "test/built-ins/String/prototype/match",
+  "test/built-ins/String/prototype/replace",
+  "test/built-ins/String/prototype/search",
+  "test/built-ins/String/prototype/split",
+  "test/built-ins/String/prototype/matchAll",
+  "test/language/literals/regexp",
 ];
 
 const allTests: string[] = [];

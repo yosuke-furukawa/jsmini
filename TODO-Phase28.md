@@ -51,70 +51,74 @@ JS の lexer で `/` の意味は文脈依存:
   delete, throw, new, in, instanceof, void) などのとき → regex
 - それ以外 (Identifier、Number、String、`)`、`]`、`++`、`--`) → 除算
 
-- [ ] 28-1a: lexer に `previousTokenAllowsRegex(prevType)` ヘルパを追加
-- [ ] 28-1b: `/` を読むとき previousTokenAllowsRegex なら regex literal、
+- [x] 28-1a: lexer に `previousTokenAllowsRegex(prevType)` ヘルパを追加
+- [x] 28-1b: `/` を読むとき previousTokenAllowsRegex なら regex literal、
       `/.../flags` を一気に読む。class `[...]` 内の `/` は閉じない
       (escape 処理: `\/`、`\\`、文字クラス内など)
-- [ ] 28-1c: token type `RegExp` を追加。lexer test: 各種 regex literal
+- [x] 28-1c: token type `RegExp` を追加。lexer test: 各種 regex literal
       `/abc/`、`/[a-z]+/i`、`/foo\/bar/`、`/[/]/`、`/abc/gimsuy`
 
 ### 28-2: Parser & AST
 
-- [ ] 28-2a: AST に `RegExpLiteral` 型を追加
+- [x] 28-2a: AST に `RegExpLiteral` 型を追加
       `{ type: "RegExpLiteral", pattern: string, flags: string }`
-- [ ] 28-2b: parser の primary expression に `RegExp` token を加える
-- [ ] 28-2c: parser test: `/abc/i` を含む式 / 関数で AST が正しい
+- [x] 28-2b: parser の primary expression に `RegExp` token を加える
+- [x] 28-2c: parser test: `/abc/i` を含む式 / 関数で AST が正しい
 
 ### 28-3: TW/VM ランタイム
 
-- [ ] 28-3a: TW の `evalExpression` で `RegExpLiteral` → `new RegExp(pattern, flags)`
+- [x] 28-3a: TW の `evalExpression` で `RegExpLiteral` → `new RegExp(pattern, flags)`
       (host RegExp)
-- [ ] 28-3b: VM compiler で `RegExpLiteral` → `LdaConstant <RegExp instance>`
+- [x] 28-3b: VM compiler で `RegExpLiteral` → `LdaConstant <RegExp instance>`
       (constant pool に host RegExp を入れる方式が簡単)
-- [ ] 28-3c: `RegExp` グローバルを TW/VM に公開 (`new RegExp("abc", "i")`
+- [x] 28-3c: `RegExp` グローバルを TW/VM に公開 (`new RegExp("abc", "i")`
       も動くように。JSString 引数を unwrap)
-- [ ] 28-3d: `instanceof RegExp` テスト
+- [x] 28-3d: `instanceof RegExp` テスト
 
 ### 28-4: String.prototype の RegExp 版
 
 現状 `String.prototype.match/replace` は文字列引数のみ対応 (要確認)。
 RegExp 引数を受け取るようにする:
 
-- [ ] 28-4a: `String.prototype.match(re)` — re が RegExp なら host の
+- [x] 28-4a: `String.prototype.match(re)` — re が RegExp なら host の
       str.match(re) に delegate、結果は配列 (host Array)
-- [ ] 28-4b: `String.prototype.replace(re, replacement)` — replacement が
+- [x] 28-4b: `String.prototype.replace(re, replacement)` — replacement が
       関数の場合は VM callback wrap が要る
-- [ ] 28-4c: `String.prototype.search(re)` `String.prototype.matchAll(re)`
-- [ ] 28-4d: `String.prototype.split(re)` (区切り文字に regex を取れる)
-- [ ] 28-4e: TW/VM 両方で動く
+- [x] 28-4c: `String.prototype.search(re)` `String.prototype.matchAll(re)`
+- [x] 28-4d: `String.prototype.split(re)` (区切り文字に regex を取れる)
+- [x] 28-4e: TW/VM 両方で動く
 
 ### 28-5: テスト
 
-- [ ] 28-5a: `src/runtime/phase28.test.ts` を作成
+- [x] 28-5a: `src/runtime/phase28.test.ts` を作成
       - regex literal の Lexer/Parser
       - `/abc/i.test("ABC")` `/o+/.exec("foooo")`
       - String.match/replace/search/split の RegExp 引数版
       - `new RegExp("\\d+", "g")` のコンストラクタ呼び出し
       - flag combinations (i, g, m, s, u, y)
-- [ ] 28-5b: TW/VM 両方で同じテストを通す
+- [x] 28-5b: TW/VM 両方で同じテストを通す
 
 ### 28-6: SunSpider 試行
 
-- [ ] 28-6a: `bench/sunspider/regexp-dna.js` `string-tagcloud.js`
-      `string-validate-input.js` `string-unpack-code.js` を取得
-- [ ] 28-6b: `src/sunspider-bench.ts` の tests 配列に追加して計測
+- [x] 28-6a: `bench/sunspider/regexp-dna.js` `string-tagcloud.js`
+      `string-validate-input.js` を取得 + 文字列リテラル行継続 `\<newline>`
+      の lexer 対応
+- [x] 28-6b: `src/sunspider-bench.ts` で計測 → **3 本とも sloppy global**
+      (`for(i in seqs)` `letters = new Array(...)`) で実走できず。これは
+      Phase 28 の範囲外 (jsmini は strict-only)。手元で var を入れる加工
+      をすれば動かせる可能性あり。LEARN にメモ済み
 
 ### 28-7: test262
 
-- [ ] 28-7a: sparse-checkout 拡張: `test/built-ins/RegExp`
+- [x] 28-7a: sparse-checkout 拡張: `test/built-ins/RegExp`
       `test/built-ins/String/prototype/{match,replace,search,split,matchAll}`
-- [ ] 28-7b: pre/post 計測
-- [ ] 28-7c: `test/language/literals/regexp/` も追加 (regex literal の
+- [x] 28-7b: pre/post 計測
+- [x] 28-7c: `test/language/literals/regexp/` も追加 (regex literal の
       lexer/parser テスト)
 
 ### 28-8: まとめ
 
-- [ ] 28-8a: LEARN-Phase28.md
+- [x] 28-8a: LEARN-Phase28.md
       - Lexer の context-sensitive `/` 判定
       - host RegExp 丸投げの利点 / 限界
       - 自前 NFA を書く場合の設計 (Thompson 構築 → backtracking 実行)
