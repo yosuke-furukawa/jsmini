@@ -167,68 +167,89 @@ string-validate-input.js を取得。`var` 補完で strict mode 化しつつ、
 
 string-tagcloud は出力長が node と完全一致 (315244 chars)。
 
-### tagcloud を動かすために要った 8 個の engine 修正
+### 本当の教訓: TW と VM の "host への寄りかかり方" が非対称
 
-string-tagcloud は 2007 年製の "json2.js" 風コードで、host built-in
-prototype に重く依存している。それを動かすには jsmini 側の見直しが必要:
+string-tagcloud で **VM が TW より 10x 遅い** という結果が出た。表面的には
+「sort が insertion sort だった」が原因だが、なぜそんな書き方をしたかと
+いうと **TW と VM で host への delegation の境界がそもそも違う** のを
+自分が把握しきれていなかった。これが 28-6 の本当の教訓:
 
-1. **`ArrayCtor.prototype = Array.prototype`** — ユーザの
-   `Array.prototype.foo = ...` が host にも反映され、VM の `(obj as any)[name]`
-   フォールバックで見える
-2. **JSString メソッド呼び出しの fallback** (VM/TW 両方) — vm.stringPrototype
-   や TW の `s.method()` が見つけられないとき host String.prototype に
-   fall through。host method なら wrap、BytecodeFunction/JSFunction なら
-   そのまま CallMethod に渡す or callJSFunctionSync で呼ぶ
-3. **`callJSFunctionSync` の this バインド + hoisting** — `String.prototype.foo`
-   経由の jsmini 関数を呼ぶとき、`this` を渡し、function 宣言を hoist
-4. **VM の nested function declaration hoisting** — `function outer() {
-   function walk() { walk(); } }` の再帰呼び出し対応
-5. **VM の for-in / for-of を local slot 化** — 従来は loop 状態を global 名
-   (`__iter_<offset>`、`__forin_idx_<offset>`) で持っていて、**再帰呼び出し
-   時に同名の global を上書きして iteration が消えていた** 。これが
-   tagcloud の reviver が popularity を 1 つしか変換しなかった真因
-6. **JSString の `<` `>` `<=` `>=` 比較** (VM) — 両辺 JSString のときは
-   `jsStringToString` して文字列比較。なしだと sort が壊れる
-7. **`Object.prototype.hasOwnProperty` の JSString 引数 unwrap** — for-in が
-   JSString を yield するので、`hasOwnProperty.apply(obj, [k])` で k が
-   JSString だと常に false。host-patches.ts で対応
-8. **VM stringPrototype に `concat`** — string-validate-input が使う
-
-**観察**: 当初 tagcloud は TW (190ms) のほうが VM (2049ms) より 10x 速い
-という不可解な結果が出た。プロファイルすると犯人は **`vm.arrayPrototype.sort`
-が insertion sort (O(N²))** で、2500 要素の sort で **6.25M 回**
-comparator を呼んでいた (host Timsort なら ~27500 回)。
+#### TW: 薄いラッパーの集合 (delegating interpreter)
 
 ```ts
-// 修正前 (vm/index.ts):
-sort: function(this: unknown[], fn?: unknown) {
-  const cmp = fn ? ... : ...;
-  // simple insertion sort  ← O(N²)
-  for (let i = 1; i < this.length; i++) { ... }
-  return this;
+// src/interpreter/evaluator.ts
+env.defineReadOnly("Array", Array);          // ← host Array を直接渡す
+env.defineReadOnly("Number", Number);
+// String/Map/Set は wrapper だが prototype は host を流用
+```
+
+`[1,2,3].sort(cmp)` を TW でやると、**host JS の Array.prototype.sort
+(Timsort) が直接動く**。`cmp` が JSFunction だったら? — それは TW の
+CallExpression が `evalCallWithJSFunction` で呼ぶ仕組みになっているので
+host の sort が cmp(a, b) するときに JSFunction 呼び出しに繋がる。
+
+#### VM: 自前 prototype テーブル (isolated runtime)
+
+```ts
+// src/vm/vm.ts: GetProperty
+if (Array.isArray(obj) && name in this.arrayPrototype) {
+  this.push(this.arrayPrototype[name]);   // ← VM 専用の table を最優先
 }
 ```
 
-修正は **host `Array.prototype.sort` に丸投げ** するだけ:
-
 ```ts
-sort: function(this: unknown[], fn?: unknown) {
-  const cmp = fn === undefined ? undefined
-    : typeof fn === "function" ? fn
-    : (a, b) => vm.callFunction(fn, undefined, [a, b]) as number;
-  Array.prototype.sort.call(this, cmp ?? fallbackCmp);
-  return this;
-}
+// src/vm/index.ts
+vm.arrayPrototype = {
+  push: function(this) { ... },
+  sort: function(this, fn) { /* 自前 insertion sort */ },
+  map: function(this, fn) { /* 自前ループ + vm.callFunction */ },
+  ...
+};
 ```
 
-結果: VM 2049ms → **123ms** (17x faster)。tagcloud は VM が TW より
-1.5x 速いという普通の結果になった。
+VM は **`vm.arrayPrototype` という独自テーブル** を最優先で見る。これに
+入っているメソッドは host JS のものを使わない。**結果として:**
 
-**教訓**: 「**ジェネリックな組み込みアルゴリズムを自前で書かない**」。
-処理系を作ろうとすると組み込みも自前で書きたくなるが、大量データ × ループ
-× コールバックが絡む API (sort、map で複雑な fn 等) は host 実装が必ず
-強い。教育目的でも host 丸投げで OK で、自前にするのは「教育的に書くこと
-自体に意味がある時」だけ (例: Wasm hash table、自前 NFA エンジン等)。
+- 各メソッドは VM 内で改めて実装する必要がある
+- コールバックは `vm.callFunction(fn, ...)` で呼ぶ必要がある
+- アルゴリズム自体も自前 = host より遅くなりがち
+
+なぜこの設計にしたか? — おそらく早期に「VM は閉じていたほうが host と
+独立で安全」という設計判断があり、後から `Array.prototype.foo = ...` の
+ような extension fallback を追加した。
+
+#### Phase 28-6 で踏んだバグは全部この非対称から来ている
+
+| # | 修正 | TW では問題にならなかった理由 |
+|---|---|---|
+| 1 | `ArrayCtor.prototype = Array.prototype` | TW は `Array` を直接渡してたので user 拡張が host に乗る |
+| 2 | JSString メソッドの host fallback | TW は元から host String.prototype にフォールバックしていた |
+| 3 | `callJSFunctionSync` の this/hoist | TW の通常 call path が他にあって、これは別 path |
+| 4 | VM の nested fn hoisting | TW は host JS の関数を生成するので host が hoist する |
+| 5 | VM の for-in/of を local slot 化 | TW は host JS の for-of を使う、global 衝突しない |
+| 6 | JSString の `<` `>` 比較 | TW は host operator が JSString を String 化、または独自比較で動いてた |
+| 7 | hasOwnProperty 引数 unwrap | host-patches で globalThis に当てたので両者効く |
+| 8 | stringPrototype.concat | TW は host fallback で勝手に解決 |
+| 9 | sort O(N²) → host Timsort | TW は host sort なのでそもそも N log N |
+
+**全部「TW は host に寄りかかって free で得てた振る舞いを、VM が独自
+実装で再発明していて、再発明が不完全 or 遅かった」というパターン**。
+
+#### 教訓
+
+1. **VM/TW で挙動が違うバグに当たったら、まず「VM がここを独自実装
+   している/していないか」を見る**。同じ仕様の二重実装はバグの温床。
+2. **VM の独自実装は "boundary handling のための薄いラッパー" に留め、
+   アルゴリズム本体は host に丸投げできる場面が多い**。今回の sort
+   修正もその例 — comparator の wrap だけ自前、アルゴリズムは host。
+3. **`vm.arrayPrototype` `vm.stringPrototype` は本質的に "host prototype
+   と並走する第二の table"** で、両者の同期を取れていないと user 視点で
+   謎の挙動になる。今後の Phase でメソッド追加するときは TW でも VM でも
+   通るかをセットで確認する。
+
+これは Phase 27 (Map/Set) でやった「test262 で host Map.prototype が
+汚染されて jsmini 内部が壊れる」も同じ系統の話 — host との境界の
+不徹底が原因。
 
 ### 「sloppy → strict」 patch のスタンス
 
