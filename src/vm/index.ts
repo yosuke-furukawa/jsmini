@@ -148,19 +148,17 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
       return this;
     },
     sort: function(this: unknown[], fn?: unknown) {
-      const cmp = fn ? (a: unknown, b: unknown) => vm.callFunction(fn, undefined, [a, b]) as number
-                      : (a: unknown, b: unknown) => {
-                          const sa = isJSString(a) ? jsStringToString(a) : String(a);
-                          const sb = isJSString(b) ? jsStringToString(b) : String(b);
-                          return sa < sb ? -1 : sa > sb ? 1 : 0;
-                        };
-      // simple insertion sort
-      for (let i = 1; i < this.length; i++) {
-        const key = this[i];
-        let j = i - 1;
-        while (j >= 0 && cmp(this[j], key) > 0) { this[j + 1] = this[j]; j--; }
-        this[j + 1] = key;
-      }
+      // host Array.prototype.sort (Timsort, O(N log N)) に丸投げ。
+      // BytecodeFunction/closure の場合は callFunction で wrap。
+      const cmp = fn === undefined ? undefined
+        : typeof fn === "function" ? (fn as (a: unknown, b: unknown) => number)
+        : (a: unknown, b: unknown) => vm.callFunction(fn, undefined, [a, b]) as number;
+      const fallbackCmp = (a: unknown, b: unknown) => {
+        const sa = isJSString(a) ? jsStringToString(a) : String(a);
+        const sb = isJSString(b) ? jsStringToString(b) : String(b);
+        return sa < sb ? -1 : sa > sb ? 1 : 0;
+      };
+      Array.prototype.sort.call(this, cmp ?? fallbackCmp);
       return this;
     },
     map: function(this: unknown[], fn: unknown) {

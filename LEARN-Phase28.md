@@ -162,8 +162,8 @@ string-validate-input.js を取得。`var` 補完で strict mode 化しつつ、
 | ベンチ | TW | VM | JIT |
 |---|---|---|---|
 | regexp-dna | 21ms | 14ms | 14ms |
-| string-tagcloud | **190ms** | 2049ms | 2101ms |
-| string-validate-input | 233ms | 118ms | 124ms |
+| string-tagcloud | 188ms | **123ms** | 122ms |
+| string-validate-input | 223ms | 116ms | 122ms |
 
 string-tagcloud は出力長が node と完全一致 (315244 chars)。
 
@@ -194,9 +194,41 @@ prototype に重く依存している。それを動かすには jsmini 側の�
    JSString だと常に false。host-patches.ts で対応
 8. **VM stringPrototype に `concat`** — string-validate-input が使う
 
-**観察**: tagcloud は TW (190ms) のほうが VM (2049ms) より 10x 速い。
-普通は逆のはずで、VM 側に最適化の余地があるのが見えた (おそらく
-host method dispatch の wrap 関数が hot loop で重い)。
+**観察**: 当初 tagcloud は TW (190ms) のほうが VM (2049ms) より 10x 速い
+という不可解な結果が出た。プロファイルすると犯人は **`vm.arrayPrototype.sort`
+が insertion sort (O(N²))** で、2500 要素の sort で **6.25M 回**
+comparator を呼んでいた (host Timsort なら ~27500 回)。
+
+```ts
+// 修正前 (vm/index.ts):
+sort: function(this: unknown[], fn?: unknown) {
+  const cmp = fn ? ... : ...;
+  // simple insertion sort  ← O(N²)
+  for (let i = 1; i < this.length; i++) { ... }
+  return this;
+}
+```
+
+修正は **host `Array.prototype.sort` に丸投げ** するだけ:
+
+```ts
+sort: function(this: unknown[], fn?: unknown) {
+  const cmp = fn === undefined ? undefined
+    : typeof fn === "function" ? fn
+    : (a, b) => vm.callFunction(fn, undefined, [a, b]) as number;
+  Array.prototype.sort.call(this, cmp ?? fallbackCmp);
+  return this;
+}
+```
+
+結果: VM 2049ms → **123ms** (17x faster)。tagcloud は VM が TW より
+1.5x 速いという普通の結果になった。
+
+**教訓**: 「**ジェネリックな組み込みアルゴリズムを自前で書かない**」。
+処理系を作ろうとすると組み込みも自前で書きたくなるが、大量データ × ループ
+× コールバックが絡む API (sort、map で複雑な fn 等) は host 実装が必ず
+強い。教育目的でも host 丸投げで OK で、自前にするのは「教育的に書くこと
+自体に意味がある時」だけ (例: Wasm hash table、自前 NFA エンジン等)。
 
 ### 「sloppy → strict」 patch のスタンス
 

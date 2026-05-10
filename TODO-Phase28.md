@@ -103,10 +103,13 @@ RegExp 引数を受け取るようにする:
 - [x] 28-6a: `bench/sunspider/regexp-dna.js` `string-tagcloud.js`
       `string-validate-input.js` を取得 + 文字列リテラル行継続 `\<newline>`
       の lexer 対応
-- [x] 28-6b: テストファイル側 `var` 補完 + engine 側 8 修正で **3 本全部完動**:
+- [x] 28-6b: テストファイル側 `var` 補完 + engine 側 9 修正で **3 本全部完動**:
       - regexp-dna:           TW 21ms / VM 14ms / JIT 14ms
-      - string-tagcloud:      TW 190ms / VM 2049ms / JIT 2101ms (出力長一致)
-      - string-validate-input: TW 233ms / VM 118ms / JIT 124ms
+      - string-tagcloud:      TW 188ms / VM 123ms / JIT 122ms (出力長一致、node と完全一致)
+      - string-validate-input: TW 223ms / VM 116ms / JIT 122ms
+      - 当初 string-tagcloud は VM 2049ms (10x 遅) → vm.arrayPrototype.sort が
+        insertion sort (O(N²)) を使っていたのが原因。host Timsort に丸投げで
+        17x faster に
 - [x] 28-6c: built-in prototype 拡張対応 + 関連バグ修正 (詳細は LEARN):
       ArrayCtor.prototype = Array.prototype、JSString method の host fallback、
       callJSFunctionSync の this/hoist、VM の nested fn hoist、for-in/of の
