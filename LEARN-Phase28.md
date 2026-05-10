@@ -167,89 +167,98 @@ string-validate-input.js を取得。`var` 補完で strict mode 化しつつ、
 
 string-tagcloud は出力長が node と完全一致 (315244 chars)。
 
-### 本当の教訓: TW と VM の "host への寄りかかり方" が非対称
+### TW で 190ms / VM で 2049ms (10x) の原因調査
 
-string-tagcloud で **VM が TW より 10x 遅い** という結果が出た。表面的には
-「sort が insertion sort だった」が原因だが、なぜそんな書き方をしたかと
-いうと **TW と VM で host への delegation の境界がそもそも違う** のを
-自分が把握しきれていなかった。これが 28-6 の本当の教訓:
+string-tagcloud の sort 部分が支配的:
 
-#### TW: 薄いラッパーの集合 (delegating interpreter)
-
-```ts
-// src/interpreter/evaluator.ts
-env.defineReadOnly("Array", Array);          // ← host Array を直接渡す
-env.defineReadOnly("Number", Number);
-// String/Map/Set は wrapper だが prototype は host を流用
+```js
+tagInfo.sort(function(a, b) { if (a.tag < b.tag) return -1; ... });  // 2500 要素
 ```
 
-`[1,2,3].sort(cmp)` を TW でやると、**host JS の Array.prototype.sort
-(Timsort) が直接動く**。`cmp` が JSFunction だったら? — それは TW の
-CallExpression が `evalCallWithJSFunction` で呼ぶ仕組みになっているので
-host の sort が cmp(a, b) するときに JSFunction 呼び出しに繋がる。
-
-#### VM: 自前 prototype テーブル (isolated runtime)
+#### 原因: TW と VM で sort の実装が違う
 
 ```ts
-// src/vm/vm.ts: GetProperty
-if (Array.isArray(obj) && name in this.arrayPrototype) {
-  this.push(this.arrayPrototype[name]);   // ← VM 専用の table を最優先
-}
+// TW: src/interpreter/evaluator.ts
+env.defineReadOnly("Array", Array);
+// → arr.sort(cmp) は host Array.prototype.sort (V8 の Timsort, O(N log N))
 ```
 
 ```ts
-// src/vm/index.ts
+// VM: src/vm/index.ts
 vm.arrayPrototype = {
-  push: function(this) { ... },
-  sort: function(this, fn) { /* 自前 insertion sort */ },
-  map: function(this, fn) { /* 自前ループ + vm.callFunction */ },
-  ...
+  sort: function(this, fn) {
+    const cmp = fn ? (a, b) => vm.callFunction(fn, undefined, [a, b]) : ...;
+    // 旧: 手書き insertion sort  ← O(N²)
+    for (let i = 1; i < this.length; i++) {
+      let j = i - 1;
+      while (j >= 0 && cmp(this[j], key) > 0) { ... }
+    }
+  },
 };
 ```
 
-VM は **`vm.arrayPrototype` という独自テーブル** を最優先で見る。これに
-入っているメソッドは host JS のものを使わない。**結果として:**
+cmp 呼び出し回数:
+- TW (Timsort): 2500 × log₂2500 ≈ 27,500 回
+- VM (insertion, 旧): 2500² / 2 ≈ 3,100,000 回 — **約 113 倍**
 
-- 各メソッドは VM 内で改めて実装する必要がある
-- コールバックは `vm.callFunction(fn, ...)` で呼ぶ必要がある
-- アルゴリズム自体も自前 = host より遅くなりがち
+VM が独自実装で持っている sort が insertion sort で、N=2500 で O(N²)
+のスケーリングに引っかかっていた。
 
-なぜこの設計にしたか? — おそらく早期に「VM は閉じていたほうが host と
-独立で安全」という設計判断があり、後から `Array.prototype.foo = ...` の
-ような extension fallback を追加した。
+#### 修正: VM の sort を merge sort に置き換え
 
-#### Phase 28-6 で踏んだバグは全部この非対称から来ている
+VM の独自実装は維持したまま、アルゴリズムだけ insertion sort → top-down
+merge sort に。stable (ES2019+ で要求) で O(N log N)。補助領域 O(N)。
 
-| # | 修正 | TW では問題にならなかった理由 |
+```ts
+const merge = (left, right) => {
+  const out = []; let i = 0, j = 0;
+  while (i < left.length && j < right.length) {
+    if (cmp(left[i], right[j]) <= 0) out.push(left[i++]);  // <= で stable
+    else out.push(right[j++]);
+  }
+  // ...
+};
+const mergeSort = (arr) => {
+  if (arr.length <= 1) return arr;
+  const mid = arr.length >> 1;
+  return merge(mergeSort(arr.slice(0, mid)), mergeSort(arr.slice(mid)));
+};
+```
+
+#### 修正後の比較 (sort 単体ベンチ、ランダム数値)
+
+| N | TW (host Timsort) | VM (自前 merge sort) |
 |---|---|---|
-| 1 | `ArrayCtor.prototype = Array.prototype` | TW は `Array` を直接渡してたので user 拡張が host に乗る |
-| 2 | JSString メソッドの host fallback | TW は元から host String.prototype にフォールバックしていた |
-| 3 | `callJSFunctionSync` の this/hoist | TW の通常 call path が他にあって、これは別 path |
-| 4 | VM の nested fn hoisting | TW は host JS の関数を生成するので host が hoist する |
-| 5 | VM の for-in/of を local slot 化 | TW は host JS の for-of を使う、global 衝突しない |
-| 6 | JSString の `<` `>` 比較 | TW は host operator が JSString を String 化、または独自比較で動いてた |
-| 7 | hasOwnProperty 引数 unwrap | host-patches で globalThis に当てたので両者効く |
-| 8 | stringPrototype.concat | TW は host fallback で勝手に解決 |
-| 9 | sort O(N²) → host Timsort | TW は host sort なのでそもそも N log N |
+| 100 | 5.8ms | 2.3ms |
+| 500 | 13.4ms | 3.0ms |
+| 1000 | 13.9ms | 6.6ms |
+| 2500 | 37.6ms | 14.9ms |
+| 5000 | 80.4ms | 31.1ms |
+| 10000 | 172.2ms | 68.0ms |
 
-**全部「TW は host に寄りかかって free で得てた振る舞いを、VM が独自
-実装で再発明していて、再発明が不完全 or 遅かった」というパターン**。
+両者とも N log N でスケール。**全サイズで VM が 2-4x 速い**。
 
-#### 教訓
+#### なぜアルゴリズム的に有利な TW より VM が速いのか
 
-1. **VM/TW で挙動が違うバグに当たったら、まず「VM がここを独自実装
-   している/していないか」を見る**。同じ仕様の二重実装はバグの温床。
-2. **VM の独自実装は "boundary handling のための薄いラッパー" に留め、
-   アルゴリズム本体は host に丸投げできる場面が多い**。今回の sort
-   修正もその例 — comparator の wrap だけ自前、アルゴリズムは host。
-3. **`vm.arrayPrototype` `vm.stringPrototype` は本質的に "host prototype
-   と並走する第二の table"** で、両者の同期を取れていないと user 視点で
-   謎の挙動になる。今後の Phase でメソッド追加するときは TW でも VM でも
-   通るかをセットで確認する。
+両者とも N log N ≈ 同じ回数 cmp を呼ぶ。差は **per-call cost**:
 
-これは Phase 27 (Map/Set) でやった「test262 で host Map.prototype が
-汚染されて jsmini 内部が壊れる」も同じ系統の話 — host との境界の
-不徹底が原因。
+- TW の cmp 呼び出し: `evalCallWithJSFunction` → ジェネレータベースの
+  AST walker で関数本体を都度解釈
+- VM の cmp 呼び出し: `vm.callFunction` で BytecodeFunction の直接実行
+  (hot path 用に作られていてフレーム push/pop が軽い)
+
+`function(a, b){ return a.k - b.k }` のような小さい comparator では、
+解釈コスト (TW) vs bytecode dispatch (VM) の差が支配的になる。
+TW の Timsort のアルゴリズム優位 (Timsort の adaptive な特性 etc.) は
+per-call cost の差で覆い隠される。
+
+#### Phase 28-6 全体の SunSpider 結果
+
+| ベンチ | TW | VM | JIT |
+|---|---|---|---|
+| regexp-dna | 21ms | 14ms | 14ms |
+| string-tagcloud | 188ms | 125ms | 122ms |
+| string-validate-input | 223ms | 116ms | 122ms |
 
 ### 「sloppy → strict」 patch のスタンス
 

@@ -148,17 +148,33 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
       return this;
     },
     sort: function(this: unknown[], fn?: unknown) {
-      // host Array.prototype.sort (Timsort, O(N log N)) に丸投げ。
-      // BytecodeFunction/closure の場合は callFunction で wrap。
-      const cmp = fn === undefined ? undefined
-        : typeof fn === "function" ? (fn as (a: unknown, b: unknown) => number)
-        : (a: unknown, b: unknown) => vm.callFunction(fn, undefined, [a, b]) as number;
-      const fallbackCmp = (a: unknown, b: unknown) => {
-        const sa = isJSString(a) ? jsStringToString(a) : String(a);
-        const sb = isJSString(b) ? jsStringToString(b) : String(b);
-        return sa < sb ? -1 : sa > sb ? 1 : 0;
+      const cmp = fn ? (a: unknown, b: unknown) => vm.callFunction(fn, undefined, [a, b]) as number
+                      : (a: unknown, b: unknown) => {
+                          const sa = isJSString(a) ? jsStringToString(a) : String(a);
+                          const sb = isJSString(b) ? jsStringToString(b) : String(b);
+                          return sa < sb ? -1 : sa > sb ? 1 : 0;
+                        };
+      // top-down merge sort: O(N log N)、stable (ES2019+ で要求)。
+      // 補助領域 O(N) を取る。VM の独自実装として持っておく
+      const merge = (left: unknown[], right: unknown[]): unknown[] => {
+        const out: unknown[] = [];
+        let i = 0, j = 0;
+        while (i < left.length && j < right.length) {
+          // `<= 0` で左を優先 → 同値要素の順序が保たれる (stable)
+          if (cmp(left[i], right[j]) <= 0) out.push(left[i++]);
+          else out.push(right[j++]);
+        }
+        while (i < left.length) out.push(left[i++]);
+        while (j < right.length) out.push(right[j++]);
+        return out;
       };
-      Array.prototype.sort.call(this, cmp ?? fallbackCmp);
+      const mergeSort = (arr: unknown[]): unknown[] => {
+        if (arr.length <= 1) return arr;
+        const mid = arr.length >> 1;
+        return merge(mergeSort(arr.slice(0, mid)), mergeSort(arr.slice(mid)));
+      };
+      const sorted = mergeSort(this.slice());
+      for (let i = 0; i < sorted.length; i++) this[i] = sorted[i];
       return this;
     },
     map: function(this: unknown[], fn: unknown) {
