@@ -68,6 +68,24 @@ export function tokenize(source: string): Token[] {
     tokens.push({ type, value, line, column: startColumn });
   }
 
+  // `/` が regex リテラルの開始か除算演算子かを判別。
+  // 直前 token が「expression が来うる位置 (= operator や open-paren、keyword)」
+  // なら regex、識別子/数値/文字列/閉じ括弧/単項後置などの後なら除算。
+  // 先頭 (token 無し) も regex 許可。
+  function previousTokenAllowsRegex(): boolean {
+    if (tokens.length === 0) return true;
+    const prev = tokens[tokens.length - 1].type;
+    // expression を終端する token (これらの後は除算)
+    const expressionEnding: TokenType[] = [
+      "Identifier", "Number", "String",
+      "NoSubstitutionTemplate", "TemplateTail",
+      "RightParen", "RightBracket",
+      "PlusPlus", "MinusMinus",
+      "True", "False", "Null", "This", "Super",
+    ];
+    return !expressionEnding.includes(prev);
+  }
+
   while (pos < source.length) {
     const ch = peek();
 
@@ -83,6 +101,37 @@ export function tokenize(source: string): Token[] {
         else advance();
       }
       if (pos < source.length) { advance(); advance(); } // skip */
+      continue;
+    }
+
+    // RegExp リテラル: 直前 token が「式が来うる位置」なら regex、それ以外は除算
+    if (ch === "/" && previousTokenAllowsRegex()) {
+      const startCol = column;
+      const startPos = pos;
+      advance(); // opening /
+      let inClass = false;
+      while (pos < source.length) {
+        const c = peek();
+        if (c === "\n") {
+          throw new SyntaxError(`Unterminated regex literal at line ${line}, column ${startCol}`);
+        }
+        if (c === "\\") {
+          advance(); // backslash
+          if (pos < source.length) advance(); // escaped char
+          continue;
+        }
+        if (c === "[") { inClass = true; advance(); continue; }
+        if (c === "]") { inClass = false; advance(); continue; }
+        if (c === "/" && !inClass) break;
+        advance();
+      }
+      if (peek() !== "/") {
+        throw new SyntaxError(`Unterminated regex literal at line ${line}, column ${startCol}`);
+      }
+      advance(); // closing /
+      // フラグ: g i m s u y d (Unicode/sticky/dotAll/hasIndices)
+      while (pos < source.length && /[gimsuyd]/.test(peek())) advance();
+      pushToken("RegExp", source.slice(startPos, pos), startCol);
       continue;
     }
 
@@ -141,6 +190,13 @@ export function tokenize(source: string): Token[] {
       while (pos < source.length && peek() !== quote) {
         if (peek() === "\\") {
           advance(); // backslash
+          // line continuation: `\` 直後に改行 → 改行を消費して次行に続ける
+          if (peek() === "\n") { pos++; line++; column = 1; continue; }
+          if (peek() === "\r") {
+            pos++;
+            if (peek() === "\n") pos++;
+            line++; column = 1; continue;
+          }
           const esc = advance();
           switch (esc) {
             case "n": str += "\n"; break;

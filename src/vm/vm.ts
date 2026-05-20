@@ -781,25 +781,29 @@ export class VM {
         case "LessThan": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
-          this.push((l as number) < (r as number));
+          if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) < jsStringToString(r));
+          else this.push((l as number) < (r as number));
           break;
         }
         case "GreaterThan": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
-          this.push((l as number) > (r as number));
+          if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) > jsStringToString(r));
+          else this.push((l as number) > (r as number));
           break;
         }
         case "LessEqual": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
-          this.push((l as number) <= (r as number));
+          if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) <= jsStringToString(r));
+          else this.push((l as number) <= (r as number));
           break;
         }
         case "GreaterEqual": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
-          this.push((l as number) >= (r as number));
+          if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) >= jsStringToString(r));
+          else this.push((l as number) >= (r as number));
           break;
         }
 
@@ -1036,6 +1040,22 @@ export class VM {
                 this.push(this.arrayPrototype[name]);
               } else if (isJSString(obj) && name in this.stringPrototype) {
                 this.push(this.stringPrototype[name]);
+              } else if (isJSString(obj)) {
+                // user 拡張 (`String.prototype.parseJSON = ...` 等) のフォールバック:
+                // host string に unwrap して method を取得し、wrapper で呼び出す
+                const str = jsStringToString(obj);
+                const nativeFn = (str as any)[name];
+                if (typeof nativeFn === "function") {
+                  this.push((...a: unknown[]) => {
+                    const nativeArgs = a.map(x => isJSString(x) ? jsStringToString(x) : x);
+                    const result = (nativeFn as Function).apply(str, nativeArgs);
+                    if (typeof result === "string") return internString(result);
+                    if (Array.isArray(result)) return result.map((s: unknown) => typeof s === "string" ? internString(s) : s);
+                    return result;
+                  });
+                } else {
+                  this.push(nativeFn);
+                }
               } else if (this.isBytecodeCallable(obj) && (name === "call" || name === "apply" || name === "bind")) {
                 // BytecodeFunction / closure の .call / .apply / .bind
                 const self = this;

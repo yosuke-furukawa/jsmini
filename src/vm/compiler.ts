@@ -360,6 +360,14 @@ class BytecodeCompiler {
     if (!isArrow) {
       this.declareLocal("arguments");
     }
+    // function declaration hoisting: 本体内の `function f(){}` を事前に
+    // declareLocal しておく → 再帰呼び出しや前方参照が動く (`walk` recursive 等)
+    for (const stmt of body) {
+      if (stmt.type === "FunctionDeclaration" && (stmt as any).id?.name) {
+        const name = (stmt as any).id.name;
+        if (this.resolveLocal(name) === null) this.declareLocal(name);
+      }
+    }
     // 本体をコンパイル
     for (const stmt of body) {
       this.compileStatement(stmt);
@@ -800,54 +808,46 @@ class BytecodeCompiler {
       }
 
       case "ForInStatement": {
-        // for (var k in obj) — Object.keys(obj) をイテレート
-        // Object.keys を呼んで配列を取得し、for-of と同じパターンでループ
+        // for (var k in obj) — Object.keys(obj) を取って iterate。
+        // 関数内なら local slot、トップレベルなら global を使う (再帰時の衝突を避けるため)
+        const useLocal = this.isFunction;
+        const ldaTmp = (slot: number, gIdx: number) => useLocal ? this.emit("LdaLocal", slot) : this.emit("LdaGlobal", gIdx);
+        const staTmp = (slot: number, gIdx: number) => useLocal ? this.emit("StaLocal", slot) : this.emit("StaGlobal", gIdx);
+        const offset = this.currentOffset();
+        const keysSlot = useLocal ? this.localCount++ : 0;
+        const counterSlot = useLocal ? this.localCount++ : 0;
+        const keysG = !useLocal ? this.addConstant(`__forin_keys_${offset}`) : 0;
+        const counterG = !useLocal ? this.addConstant(`__forin_idx_${offset}`) : 0;
+
         this.compileExpression(stmt.right);
-        // Object.keys(obj) を呼ぶ: LdaGlobal "Object" → GetProperty "keys" → Call
-        // 簡易: Object.keys は globals に登録されてるので LdaGlobal + GetProperty + Call
-        // もっと簡易: ForIn 専用オペコードを使う代わりに、
-        // obj をスタックに残して ForIn opcode で keys 配列に変換
-        // → 既存の仕組みで: obj を temp に保存、keys を取得、for-of ループ
-        const objName = `__forin_obj_${this.currentOffset()}`;
-        const objIdx = this.addConstant(objName);
-        this.emit("StaGlobal", objIdx);
-        this.emit("Pop");
-        // Object.keys(obj) を呼ぶ
-        this.emit("LdaGlobal", objIdx);
+        // Object.keys(obj) を呼ぶ: スタックに [obj, Object.keys] を積んで Call
         this.emit("LdaGlobal", this.addConstant("Object"));
         this.emitWithIC("GetProperty", this.addConstant("keys"));
-        // CallMethod: this=Object, arg=obj
-        // → 実際は Call で Object.keys(obj)
-        // スタック: [obj, keys_fn] → Call 1 → keys_fn(obj)
         this.emit("Call", 1);
-        // 結果は keys 配列。for-of と同じパターン
-        const keysName = `__forin_keys_${this.currentOffset()}`;
-        const keysIdx = this.addConstant(keysName);
-        this.emit("StaGlobal", keysIdx);
+        staTmp(keysSlot, keysG);
         this.emit("Pop");
-        const counterName = `__forin_idx_${this.currentOffset()}`;
-        const counterIdx = this.addConstant(counterName);
+        // counter = 0
         this.emit("LdaConst", this.addConstant(0));
-        this.emit("StaGlobal", counterIdx);
+        staTmp(counterSlot, counterG);
         this.emit("Pop");
         const loopStart = this.currentOffset();
-        this.emit("LdaGlobal", counterIdx);
-        this.emit("LdaGlobal", keysIdx);
+        ldaTmp(counterSlot, counterG);
+        ldaTmp(keysSlot, keysG);
         this.emitWithIC("GetProperty", this.addConstant("length"));
         this.emit("LessThan");
         const exitJump = this.emit("JumpIfFalse", 0);
         // k = keys[i]
-        this.emit("LdaGlobal", keysIdx);
-        this.emit("LdaGlobal", counterIdx);
+        ldaTmp(keysSlot, keysG);
+        ldaTmp(counterSlot, counterG);
         this.emit("GetPropertyComputed");
         this.compileBindingTarget(stmt.left.declarations[0].id);
         // body
         this.compileStatement(stmt.body);
         // i++
-        this.emit("LdaGlobal", counterIdx);
+        ldaTmp(counterSlot, counterG);
         this.emit("LdaConst", this.addConstant(1));
         this.emit("Add");
-        this.emit("StaGlobal", counterIdx);
+        staTmp(counterSlot, counterG);
         this.emit("Pop");
         this.emit("Jump", loopStart);
         this.patch(exitJump, this.currentOffset());
@@ -855,21 +855,21 @@ class BytecodeCompiler {
       }
 
       case "ForOfStatement": {
-        // iterator protocol:
-        //   GetIterator → temp
-        //   loop: IteratorNext → IteratorComplete → break if done → IteratorValue → bind → body
+        // iterator protocol。再帰呼び出し時に衝突しないよう、関数内なら local slot を使う
+        const useLocal = this.isFunction;
+        const iterSlot = useLocal ? this.localCount++ : 0;
+        const iterG = !useLocal ? this.addConstant(`__iter_${this.currentOffset()}`) : 0;
+
         this.compileExpression(stmt.right);
         this.emit("GetIterator");
-        const iterName = `__iter_${this.currentOffset()}`;
-        const iterIdx = this.addConstant(iterName);
-        this.emit("StaGlobal", iterIdx);
+        if (useLocal) this.emit("StaLocal", iterSlot); else this.emit("StaGlobal", iterG);
         this.emit("Pop");
 
         const loopStart = this.currentOffset();
         this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
 
         // IteratorNext: pop iterator, push result
-        this.emit("LdaGlobal", iterIdx);
+        if (useLocal) this.emit("LdaLocal", iterSlot); else this.emit("LdaGlobal", iterG);
         this.emit("IteratorNext");
         // stack: [result]
 
@@ -923,6 +923,17 @@ class BytecodeCompiler {
           const index = this.addConstant(expr.value);
           this.emit("LdaConst", index);
         }
+        break;
+      }
+
+      case "RegExpLiteral": {
+        // host RegExp を constant pool に入れて LdaConst で共有。
+        // ES5 セマンティクス (literal が同じ instance を返す)。ES6 以降の
+        // "毎回新しい instance" を厳密に守るには専用 opcode が必要だが、
+        // Stage A では割り切る。lastIndex を使う code はそこで踏む可能性あり
+        const re = new RegExp(expr.pattern, expr.flags);
+        const index = this.addConstant(re);
+        this.emit("LdaConst", index);
         break;
       }
 

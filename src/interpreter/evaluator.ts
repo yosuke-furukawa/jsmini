@@ -11,10 +11,12 @@ import {
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
 import { JSPromise, drainMicrotasks, isJSPromise } from "../runtime/promise.js";
+import "../runtime/host-patches.js";
 
 // JSFunction を同期的に呼び出すヘルパー (Promise executor / then callback 用)
 function callJSFunctionSync(fn: JSFunction, thisValue: unknown, args: unknown[]): unknown {
   const callEnv = new Environment(fn.closure, true);
+  if (!fn.isArrow) callEnv.setThis(thisValue);
   const params: any[] = fn.params;
   for (let i = 0; i < params.length; i++) {
     if (params[i].type === "Identifier") {
@@ -24,6 +26,8 @@ function callJSFunctionSync(fn: JSFunction, thisValue: unknown, args: unknown[])
     }
   }
   if (fn.name) callEnv.define(fn.name, fn);
+  hoistVarDeclarations(fn.body.body, callEnv);
+  hoistFunctionDeclarations(fn.body.body, callEnv);
 
   // async 関数: Promise を返して generator + microtask で駆動
   if ((fn as any).isAsync) {
@@ -282,6 +286,18 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   };
   twWeakSetCtor.prototype = WeakSet.prototype;
   env.defineReadOnly("WeakSet", twWeakSetCtor);
+
+  // RegExp (host wrapper) — Phase 28
+  const twRegExpCtor: any = function(this: unknown, pattern?: unknown, flags?: unknown) {
+    const p = isJSString(pattern) ? jsStringToString(pattern) : pattern;
+    const f = isJSString(flags) ? jsStringToString(flags) : flags;
+    if (new.target) {
+      return f !== undefined ? new RegExp(p as any, f as any) : new RegExp(p as any);
+    }
+    return f !== undefined ? new RegExp(p as any, f as any) : new RegExp(p as any);
+  };
+  twRegExpCtor.prototype = RegExp.prototype;
+  env.defineReadOnly("RegExp", twRegExpCtor);
 
   // Object
   const strArg = (v: unknown) => isJSString(v) ? jsStringToString(v) : String(v);
@@ -1008,6 +1024,8 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
   switch (expr.type) {
     case "Literal":
       return typeof expr.value === "string" ? internString(expr.value) : expr.value;
+    case "RegExpLiteral":
+      return new RegExp(expr.pattern, expr.flags);
     case "Identifier":
       return env.get(expr.name);
     case "ThisExpression":
@@ -1550,6 +1568,10 @@ function* evalCallExpression(
           if (Array.isArray(result)) return result.map((s: string) => typeof s === "string" ? internString(s) : s);
           return result;
         };
+      } else if (isJSFunction(nativeFn)) {
+        // user 拡張 (`String.prototype.foo = function(...) {...}` 等) — JSFunction を call
+        const jsFn = nativeFn;
+        fn = (...a: unknown[]) => callJSFunctionSync(jsFn, thisValue, a);
       }
     }
   } else {

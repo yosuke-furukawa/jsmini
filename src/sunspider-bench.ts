@@ -33,6 +33,9 @@ const tests = [
   "math-partial-sums.js",
   "date-format-tofte.js",
   "date-format-xparb.js",
+  "regexp-dna.js",
+  "string-tagcloud.js",
+  "string-validate-input.js",
 ];
 
 function loadSource(name: string): string {

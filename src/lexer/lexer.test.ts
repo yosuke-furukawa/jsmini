@@ -23,12 +23,14 @@ describe("Lexer - Step 1-1: 数値リテラルと四則演算", () => {
   });
 
   it("全ての算術演算子を認識できる", () => {
-    const tokens = tokenize("+ - * / %");
-    assert.equal(tokens[0].type, "Plus");
-    assert.equal(tokens[1].type, "Minus");
-    assert.equal(tokens[2].type, "Star");
-    assert.equal(tokens[3].type, "Slash");
-    assert.equal(tokens[4].type, "Percent");
+    // a + b, a - b, a * b, a / b, a % b の operator 部分だけ確認
+    // (Phase 28 で regex literal を入れたので "+ - * / %" 単独は通らない)
+    const tokens = tokenize("a + b - c * d / e % f");
+    assert.equal(tokens[1].type, "Plus");
+    assert.equal(tokens[3].type, "Minus");
+    assert.equal(tokens[5].type, "Star");
+    assert.equal(tokens[7].type, "Slash");
+    assert.equal(tokens[9].type, "Percent");
   });
 
   it("括弧をトークン化できる", () => {
@@ -204,6 +206,63 @@ describe("Lexer - コメント", () => {
     const tokens = tokenize("// just a comment");
     assert.equal(tokens.length, 1);
     assert.equal(tokens[0].type, "EOF");
+  });
+});
+
+describe("Lexer - Phase 28: RegExp リテラル", () => {
+  it("単純な regex literal を認識する", () => {
+    const tokens = tokenize("/abc/");
+    assert.equal(tokens[0].type, "RegExp");
+    assert.equal(tokens[0].value, "/abc/");
+  });
+
+  it("flag 付き regex を認識する", () => {
+    const tokens = tokenize("/abc/gi");
+    assert.equal(tokens[0].type, "RegExp");
+    assert.equal(tokens[0].value, "/abc/gi");
+  });
+
+  it("文字クラス内の / は regex を閉じない", () => {
+    const tokens = tokenize("/[/]/");
+    assert.equal(tokens[0].type, "RegExp");
+    assert.equal(tokens[0].value, "/[/]/");
+  });
+
+  it("escape された / を含める", () => {
+    const tokens = tokenize("/a\\/b/");
+    assert.equal(tokens[0].type, "RegExp");
+    assert.equal(tokens[0].value, "/a\\/b/");
+  });
+
+  it("代入後は regex として扱う", () => {
+    const tokens = tokenize("var r = /foo/i;");
+    // var r = REGEX ;  → 6 tokens + EOF
+    const re = tokens.find(t => t.type === "RegExp");
+    assert.equal(re?.value, "/foo/i");
+  });
+
+  it("identifier の後の / は除算", () => {
+    const tokens = tokenize("a / b");
+    assert.equal(tokens[0].type, "Identifier");
+    assert.equal(tokens[1].type, "Slash");
+    assert.equal(tokens[2].type, "Identifier");
+  });
+
+  it("数値の後の / は除算", () => {
+    const tokens = tokenize("1 / 2");
+    assert.equal(tokens[1].type, "Slash");
+  });
+
+  it("return の後の / は regex", () => {
+    const tokens = tokenize("function f() { return /abc/; }");
+    const re = tokens.find(t => t.type === "RegExp");
+    assert.equal(re?.value, "/abc/");
+  });
+
+  it("行末改行があっても regex literal を閉じる", () => {
+    const tokens = tokenize("var r = /foo/g\nvar s = 1;");
+    const re = tokens.find(t => t.type === "RegExp");
+    assert.equal(re?.value, "/foo/g");
   });
 });
 

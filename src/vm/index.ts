@@ -8,6 +8,7 @@ import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_
 import { Heap } from "./heap.js";
 import { evaluate } from "../interpreter/evaluator.js";
 import { JSPromise, drainMicrotasks, isJSPromise, setHandlerCaller } from "../runtime/promise.js";
+import "../runtime/host-patches.js";
 export { disassemble } from "./bytecode.js";
 
 type ConsoleOptions = {
@@ -153,13 +154,27 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
                           const sb = isJSString(b) ? jsStringToString(b) : String(b);
                           return sa < sb ? -1 : sa > sb ? 1 : 0;
                         };
-      // simple insertion sort
-      for (let i = 1; i < this.length; i++) {
-        const key = this[i];
-        let j = i - 1;
-        while (j >= 0 && cmp(this[j], key) > 0) { this[j + 1] = this[j]; j--; }
-        this[j + 1] = key;
-      }
+      // top-down merge sort: O(N log N)、stable (ES2019+ で要求)。
+      // 補助領域 O(N) を取る。VM の独自実装として持っておく
+      const merge = (left: unknown[], right: unknown[]): unknown[] => {
+        const out: unknown[] = [];
+        let i = 0, j = 0;
+        while (i < left.length && j < right.length) {
+          // `<= 0` で左を優先 → 同値要素の順序が保たれる (stable)
+          if (cmp(left[i], right[j]) <= 0) out.push(left[i++]);
+          else out.push(right[j++]);
+        }
+        while (i < left.length) out.push(left[i++]);
+        while (j < right.length) out.push(right[j++]);
+        return out;
+      };
+      const mergeSort = (arr: unknown[]): unknown[] => {
+        if (arr.length <= 1) return arr;
+        const mid = arr.length >> 1;
+        return merge(mergeSort(arr.slice(0, mid)), mergeSort(arr.slice(mid)));
+      };
+      const sorted = mergeSort(this.slice());
+      for (let i = 0; i < sorted.length; i++) this[i] = sorted[i];
       return this;
     },
     map: function(this: unknown[], fn: unknown) {
@@ -256,6 +271,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     trimStart:   function(this: unknown) { return strRet(strArg(this).trimStart()); },
     trimEnd:     function(this: unknown) { return strRet(strArg(this).trimEnd()); },
     repeat:      function(this: unknown, n: number) { return strRet(strArg(this).repeat(n)); },
+    concat:      function(this: unknown, ...args: unknown[]) { return strRet(strArg(this) + args.map(strArg).join("")); },
     padStart:    function(this: unknown, len: number, fill?: unknown) { return strRet(strArg(this).padStart(len, fill !== undefined ? strArg(fill) : undefined)); },
     padEnd:      function(this: unknown, len: number, fill?: unknown) { return strRet(strArg(this).padEnd(len, fill !== undefined ? strArg(fill) : undefined)); },
     replace:     function(this: unknown, s: unknown, r: unknown) { return strRet(strArg(this).replace(strArg(s), strArg(r))); },
@@ -293,6 +309,10 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return [];
   };
   ArrayCtor.of = (...items: unknown[]) => [...items];
+  // ユーザコードの `Array.prototype.foo = ...` 拡張を有効にする (Phase 28-6)。
+  // ArrayCtor.prototype と host Array.prototype を結合 → 配列の method dispatch
+  // (vm.arrayPrototype の next に host Array.prototype を見にいく) で拡張が見える
+  ArrayCtor.prototype = Array.prototype;
   vm.setGlobal("Array", ArrayCtor);
 
   // Boolean/Number/String: new で呼ばれたらラッパーオブジェクト、関数呼びならプリミティブ変換
@@ -324,7 +344,9 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return s;
   }
   (StringCtor as any).fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
-  (StringCtor as any).prototype = {};
+  // ユーザの `String.prototype.foo = ...` 拡張を host String.prototype に当てて、
+  // VM 側の dispatch (vm.stringPrototype に無ければ host にフォールバック) で見えるように
+  (StringCtor as any).prototype = String.prototype;
   vm.setGlobal("String", StringCtor);
 
   // Function は new Function() が実用的でないので最低限
@@ -565,6 +587,81 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   };
   WeakSetCtor.prototype = WeakSet.prototype;
   vm.setGlobal("WeakSet", WeakSetCtor);
+
+  // RegExp: host RegExp に丸投げ。pattern/flags が JSString のとき unwrap
+  const RegExpCtor: any = function(this: unknown, pattern?: unknown, flags?: unknown) {
+    const p = isJSString(pattern) ? jsStringToString(pattern) : pattern;
+    const f = isJSString(flags) ? jsStringToString(flags) : flags;
+    if (new.target) {
+      return f !== undefined ? new RegExp(p as any, f as any) : new RegExp(p as any);
+    }
+    return f !== undefined ? new RegExp(p as any, f as any) : new RegExp(p as any);
+  };
+  RegExpCtor.prototype = RegExp.prototype;
+  vm.setGlobal("RegExp", RegExpCtor);
+
+  // String.prototype の RegExp 引数版を vm.stringPrototype に注入
+  // (上で生成した stringPrototype を後付けで上書き)
+  const origReplace = vm.stringPrototype.replace;
+  vm.stringPrototype.match = function(this: unknown, re: unknown) {
+    const s = isJSString(this) ? jsStringToString(this) : String(this);
+    const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re));
+    const m = s.match(r);
+    if (!m) return null;
+    for (let i = 0; i < m.length; i++) if (typeof m[i] === "string") m[i] = internString(m[i]) as any;
+    return m;
+  };
+  vm.stringPrototype.search = function(this: unknown, re: unknown) {
+    const s = isJSString(this) ? jsStringToString(this) : String(this);
+    const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re));
+    return s.search(r);
+  };
+  vm.stringPrototype.matchAll = function(this: unknown, re: unknown) {
+    const s = isJSString(this) ? jsStringToString(this) : String(this);
+    const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re), "g");
+    const arr: unknown[][] = [];
+    for (const m of s.matchAll(r)) {
+      const row: unknown[] = [];
+      for (let i = 0; i < m.length; i++) row.push(typeof m[i] === "string" ? internString(m[i]) : m[i]);
+      arr.push(row);
+    }
+    return arr; // host Array of arrays (iterator のかわりに配列で代替)
+  };
+  vm.stringPrototype.replace = function(this: unknown, search: unknown, replacement: unknown) {
+    const s = isJSString(this) ? jsStringToString(this) : String(this);
+    // search が RegExp なら host に丸投げ、replacement が関数なら wrap
+    if (search instanceof RegExp) {
+      if (typeof replacement === "function") {
+        return internString(s.replace(search, (...args: unknown[]) => {
+          const r = (replacement as Function).apply(undefined, args.map(a => typeof a === "string" ? internString(a) : a));
+          return isJSString(r) ? jsStringToString(r) : String(r);
+        }));
+      } else if (typeof replacement === "object" && replacement !== null && "bytecode" in (replacement as any)) {
+        // BytecodeFunction
+        return internString(s.replace(search, (...args: unknown[]) => {
+          const r = vm.callFunction(replacement, undefined, args.map(a => typeof a === "string" ? internString(a) : a));
+          return isJSString(r) ? jsStringToString(r) : String(r);
+        }));
+      } else if (typeof replacement === "object" && replacement !== null && "__closure" in (replacement as any)) {
+        return internString(s.replace(search, (...args: unknown[]) => {
+          const r = vm.callFunction(replacement, undefined, args.map(a => typeof a === "string" ? internString(a) : a));
+          return isJSString(r) ? jsStringToString(r) : String(r);
+        }));
+      }
+      const rep = isJSString(replacement) ? jsStringToString(replacement) : String(replacement);
+      return internString(s.replace(search, rep));
+    }
+    // 既存の文字列引数版にフォールバック
+    return origReplace.call(this, search, replacement);
+  };
+  const origSplit = vm.stringPrototype.split;
+  vm.stringPrototype.split = function(this: unknown, sep: unknown, limit?: number) {
+    if (sep instanceof RegExp) {
+      const s = isJSString(this) ? jsStringToString(this) : String(this);
+      return s.split(sep, limit).map(x => internString(x));
+    }
+    return origSplit.call(this, sep, limit);
+  };
 
   // forEach のコールバックは BytecodeFunction の場合があるので、
   // Map.prototype.forEach / Set.prototype.forEach を wrap する代わりに

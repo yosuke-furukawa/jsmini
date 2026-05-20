@@ -6,6 +6,7 @@ export type TokenType =
   | "TemplateHead"            // `hello ${      (先頭〜最初の${)
   | "TemplateMiddle"          // } ... ${       (} 〜 次の${)
   | "TemplateTail"            // } ... `        (} 〜 閉じ`)
+  | "RegExp"                  // /pattern/flags  (regex literal)
 
 
   // Identifiers & Keywords

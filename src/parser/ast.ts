@@ -181,6 +181,7 @@ export type SwitchCase = {
 
 export type Expression =
   | Literal
+  | RegExpLiteral
   | Identifier
   | ThisExpression
   | ObjectExpression
@@ -198,6 +199,12 @@ export type Expression =
   | UpdateExpression
   | AssignmentExpression
   | ConditionalExpression;
+
+export type RegExpLiteral = {
+  type: "RegExpLiteral";
+  pattern: string;
+  flags: string;
+};
 
 export type ConditionalExpression = {
   type: "ConditionalExpression";
