@@ -1009,22 +1009,28 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
       builder.addGlobal(WASM_TYPE.i32, true, 0); // global 0 = heapPtr, mutable, init=0
     }
 
-    // パラメータ: 配列は ref $array、他は i32/f64、upvalue も追加
+    // パラメータ: 配列は ref $array、他は i32/f64、upvalue も追加。
+    // params はエンコード済みバイト列。ref 型は 2 バイトなので、Wasm の型
+    // セクションが要求する「値型の個数」は別途 paramValTypeCount で数える。
     const params: number[] = [];
+    let paramValTypeCount = 0;
     for (let i = 0; i < irFunc.paramCount; i++) {
       if (arrayParams.has(i)) {
         params.push(...refType(arrayTypeIdx));
       } else {
         params.push(wasmType);
       }
+      paramValTypeCount++;
     }
     // upvalue 追加パラメータ
     for (let i = 0; i < upvalueCount; i++) {
       params.push(wasmType);
+      paramValTypeCount++;
     }
     // this 追加パラメータ (i32: メモリ上のベースアドレス)
     if (hasThis) {
       params.push(WASM_TYPE.i32);
+      paramValTypeCount++;
     }
     const results = [wasmType];
 
@@ -1035,10 +1041,11 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
       const osrExtraParams = osrLocalCount - irFunc.paramCount;
       for (let i = 0; i < osrExtraParams; i++) {
         params.push(wasmType);
+        paramValTypeCount++;
       }
     }
 
-    const totalParamCount = params.length;
+    const totalParamCount = paramValTypeCount;
     const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
     // OSR: extra locals をパラメータで渡すので Wasm locals を減らす
     const wasmExtraLocals = (osrLocalCount !== undefined) ? Math.max(0, extraLocals - (osrLocalCount - irFunc.paramCount)) : extraLocals;
