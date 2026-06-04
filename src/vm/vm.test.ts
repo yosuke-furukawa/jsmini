@@ -385,3 +385,40 @@ describe("VM - Step 4-7: Phase 3 構文", () => {
     `), 10);
   });
 });
+
+describe("VM - prefix increment のオペランドスタックリーク回帰", () => {
+  // バグ: prefix ++i は `Load; Increment; Dup; StaLocal(peek)` で 2 値を残し、
+  // for-update の Pop が 1 値しか取り除かないため毎反復スタックが伸びる。
+  // 関数 return 後に残骸が残り、f()+f() の左オペランドを汚染していた。
+  // (SunSpider spectral-norm が VM で 49.27、期待 5.087 になっていた真因)
+
+  it("prefix ++i ループを含む関数を 2 回足しても汚染しない", () => {
+    const result = vmEvaluate(`
+      function g(){ for(var i=0;i<3;++i){ var x=9; } return 5; }
+      g()+g();
+    `);
+    assert.equal(result, 10);
+  });
+
+  it("prefix --i ループでも同様", () => {
+    const result = vmEvaluate(`
+      function g(){ for(var i=3;i>0;--i){ var x=9; } return 5; }
+      g()+g();
+    `);
+    assert.equal(result, 10);
+  });
+
+  it("prefix ++ の式としての値は維持される", () => {
+    assert.equal(vmEvaluate(`var x=5; var y=++x; x*100+y;`), 606);
+    assert.equal(vmEvaluate(`var a=[10,20,30]; var i=0; a[++i];`), 20);
+  });
+
+  it("配列を変更する関数を足し合わせても正しい (spectral-norm 最小形)", () => {
+    const result = vmEvaluate(`
+      function fill(u,v){ for(var i=0;i<u.length;++i){ v[i]=u[i]*2; } }
+      function g(){ var u=[1,1,1],v=[0,0,0]; fill(u,v); var s=0; for(var i=0;i<3;++i)s+=v[i]; return s; }
+      g()+g();
+    `);
+    assert.equal(result, 12); // (1+1+1)*2 = 6 each, 6+6=12
+  });
+});
