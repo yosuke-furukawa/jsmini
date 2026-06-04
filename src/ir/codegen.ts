@@ -169,6 +169,47 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     }
   }
 
+  // 計算値 (Const/Param 以外) を「スタックに残したまま」消費する最適化は、
+  // その値が消費側の *最初* に push されるオペランド (スタック最下位) のときだけ
+  // 正しい。非可換演算 (Sub/Div/Mod 等) で計算値が args[1] 以降に来て、かつ
+  // 先行する args が leaf (Const/Param: emitLoadValue が後から push する) だと、
+  // leaf が計算値の上に積まれてオペランド順序が反転する。
+  //   例: 1 / (n*2) → スタック [n*2] に const 1 を積んで (n*2)/1 になってしまう
+  // → 非先頭オペランドに使われる計算値は local に退避して順序を固定する。
+  {
+    const opByIdEarly = new Map<number, Op>();
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) opByIdEarly.set(phi.id, phi);
+      for (const op of block.ops) opByIdEarly.set(op.id, op);
+    }
+    const isRematerializable = (id: number): boolean => {
+      // local を持つ (Param 含む) か Const なら emitLoadValue が正しい位置で再生成できる
+      if (opToLocal.has(id)) return true;
+      const o = opByIdEarly.get(id);
+      return !o || o.opcode === "Const";
+    };
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        // Call の args[0] は callee 参照なので対象外。先頭オペランドの index。
+        const firstOperand = op.opcode === "Call" ? 1 : 0;
+        // インライン計算値はスタック最下位 = 先頭オペランド位置に置かれる前提。
+        // それより後ろのオペランドに計算値が来て、かつ手前に leaf (emitLoadValue が
+        // 消費時に push する Const/Param) があると、leaf が計算値の上に積まれて
+        // オペランド順が反転する。その計算値だけを local に退避する。
+        let sawLeafBefore = false;
+        for (let i = firstOperand; i < op.args.length; i++) {
+          const argId = op.args[i];
+          const rematerializable = isRematerializable(argId);
+          if (i > firstOperand && !rematerializable && sawLeafBefore && !opToLocal.has(argId)) {
+            needsLocal.add(argId);
+            opToLocal.set(argId, nextLocal++);
+          }
+          if (rematerializable) sawLeafBefore = true;
+        }
+      }
+    }
+  }
+
   // Phi の入力値も local に格納する必要がある (back edge の local.set で使うため)
   for (const block of irFunc.blocks) {
     for (const phi of block.phis) {
