@@ -60,6 +60,24 @@ describe("Phase 29: spectral-norm 風の f64 配列計算", () => {
     assert.equal(jit, vm);
   });
 
+  it("k3*sk*sk (インライン値が Math 呼び出しに埋もれない)", () => {
+    const src = `
+      function f(k){ var k3=k*k*k; var sk=Math.sin(k); return k3*sk*sk; }
+      var s=0; for(var r=0;r<50;r=r+1){ s=f(3); } s;
+    `;
+    const { vm, jit } = jitMatchesVM(src);
+    assert.equal(jit, vm);
+  });
+
+  it("1/(k3*sk*sk) 全体", () => {
+    const src = `
+      function f(n){ var a=0; for(var k=1;k<=n;k++){ var k3=k*k*k; var sk=Math.sin(k); a+=1/(k3*sk*sk); } return a; }
+      var s=0; for(var r=0;r<30;r=r+1){ s=f(10); } s;
+    `;
+    const { vm, jit } = jitMatchesVM(src);
+    assert.equal(jit, vm);
+  });
+
   it("配列に f64 を貯める Au パターンが JIT で正しい", () => {
     const src = `
       function A(i,j){ return 1/((i+j)*(i+j+1)/2+i+1); }
