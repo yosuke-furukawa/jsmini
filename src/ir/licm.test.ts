@@ -142,6 +142,46 @@ describe("LICM", () => {
     }
   });
 
+  it("does NOT hoist LoadGlobal when the loop stores the same global", () => {
+    // g += k は LoadGlobal(g) → Add → StoreGlobal(g)。LoadGlobal は引数ゼロで
+    // 自明に「全引数がループ外」を満たすが、ループ内に同名 StoreGlobal が
+    // あるので不変ではない。hoist すると累算が壊れて最後の 1 回分だけになる。
+    // (math-partial-sums の sloppy global a2..a9 で踏んだバグ)
+    const ir = getIR(`
+      var g;
+      function f(n) {
+        g = 0;
+        for (var k = 1; k <= n; k = k + 1) { g = g + k; }
+        return g;
+      }
+    `, "f");
+
+    licm(ir);
+
+    // LoadGlobal("g") が B0 (preheader) に hoist されていないこと
+    const b0 = ir.blocks.find(b => b.id === 0)!;
+    const hoistedLoadG = b0.ops.some(op => op.opcode === "LoadGlobal" && op.globalName === "g");
+    assert.equal(hoistedLoadG, false, "LoadGlobal(g) must stay in the loop");
+  });
+
+  it("still hoists LoadGlobal of a global NOT stored in the loop", () => {
+    // h はループ内で書き換えられない → hoist してよい
+    const ir = getIR(`
+      var g; var h;
+      function f(n) {
+        g = 0;
+        for (var k = 1; k <= n; k = k + 1) { g = g + h; }
+        return g;
+      }
+    `, "f");
+
+    licm(ir);
+
+    const b0 = ir.blocks.find(b => b.id === 0)!;
+    const hoistedLoadH = b0.ops.some(op => op.opcode === "LoadGlobal" && op.globalName === "h");
+    assert.equal(hoistedLoadH, true, "LoadGlobal(h) should be hoisted");
+  });
+
   it("integrates with optimize pipeline", () => {
     // optimize() が LICM を含むことを確認
     const ir = getIR(`

@@ -71,14 +71,47 @@ function hoistFromLoop(
   const preheader = blockMap.get(preheaterId);
   if (!preheader) return false;
 
-  // ループ内の全 Op を収集
+  // ループ内の全 Op を収集 + ループ内の副作用を記録
+  // (Load 系はメモリ/グローバルの読み取りなので、ループ内に対応する書き込みが
+  //  あると「不変」ではない。LoadGlobal は引数ゼロで isLoopInvariant を自明に
+  //  通ってしまうため、ここで書き込みを見て除外する)
   const loopOps = new Set<number>();
+  const storedGlobals = new Set<string>();   // StoreGlobal される名前
+  const storedUpvalues = new Set<number>();  // StoreUpvalue される index
+  let hasStoreProperty = false;
+  let hasArrayStore = false;
+  let hasCall = false;                        // Call は任意の副作用とみなす
   for (const bid of loop.body) {
     const block = blockMap.get(bid);
     if (!block) continue;
     for (const phi of block.phis) loopOps.add(phi.id);
-    for (const op of block.ops) loopOps.add(op.id);
+    for (const op of block.ops) {
+      loopOps.add(op.id);
+      if (op.opcode === "StoreGlobal" && op.globalName) storedGlobals.add(op.globalName);
+      if (op.opcode === "StoreUpvalue" && op.index !== undefined) storedUpvalues.add(op.index);
+      if (op.opcode === "StoreProperty") hasStoreProperty = true;
+      if (op.opcode === "ArraySet") hasArrayStore = true;
+      if (op.opcode === "Call") hasCall = true;
+    }
   }
+
+  // Load 系 op がループ内の書き込みと衝突するか
+  const conflictsWithLoopWrites = (op: Op): boolean => {
+    switch (op.opcode) {
+      case "LoadGlobal":
+        // 同名の StoreGlobal、または Call (callee がグローバルを書き換えうる)
+        return (op.globalName !== undefined && storedGlobals.has(op.globalName)) || hasCall;
+      case "LoadUpvalue":
+        return (op.index !== undefined && storedUpvalues.has(op.index)) || hasCall;
+      case "LoadProperty":
+        return hasStoreProperty || hasCall;
+      case "ArrayGet":
+      case "ArrayLength":
+        return hasArrayStore || hasCall;
+      default:
+        return false;
+    }
+  };
 
   // ループ不変な Op を判定 (fixpoint)
   const invariant = new Set<number>();
@@ -91,6 +124,7 @@ function hoistFromLoop(
       for (const op of block.ops) {
         if (invariant.has(op.id)) continue;
         if (UNMOVABLE.has(op.opcode)) continue;
+        if (conflictsWithLoopWrites(op)) continue;
         if (isLoopInvariant(op, loopOps, invariant)) {
           invariant.add(op.id);
           changed = true;
