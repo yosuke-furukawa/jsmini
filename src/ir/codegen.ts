@@ -592,8 +592,38 @@ function emitOp(
       break;
     }
     case "ArraySet": {
-      // growable への ArraySet は compileIRToWasm で弾いている (固定配列のみ来る)
-      if (arrayTypeIdx >= 0) {
+      if (isGrowable(op.args[0]) && growCtx && growCtx.growFnIndex >= 0) {
+        // a[i] = x (動的成長)。i >= cap なら grow、backing[i]=x、len=max(len,i+1)。
+        // index は複数回使うので emitLoadValue で都度ロード (local 化済み or const)。
+        const lenL = growCtx.growableLenLocal.get(op.args[0])!;
+        const backL = growCtx.growableBackingLocal.get(op.args[0])!;
+        const emitIdx = () => {
+          emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+          if (forceF64) body.push(0xab); // i32.trunc_f64_s
+        };
+        // if (array.len(backing) <= i) backing = __grow(backing, i+1)
+        body.push(WASM_OP.local_get, backL, 0xfb, WASM_GC_OP.array_len);
+        emitIdx();
+        body.push(0x4c); // i32.le_s
+        body.push(WASM_OP.if, 0x40);
+        body.push(WASM_OP.local_get, backL);
+        emitIdx(); body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add); // mincap = i+1
+        body.push(WASM_OP.call, growCtx.growFnIndex);
+        body.push(WASM_OP.local_set, backL);
+        body.push(WASM_OP.end);
+        // backing[i] = value
+        body.push(WASM_OP.local_get, backL);
+        emitIdx();
+        emitLoadValue(op.args[2], body, opToLocal, opById, forceF64);
+        body.push(0xfb, WASM_GC_OP.array_set, arrayTypeIdx);
+        // len = max(len, i+1)
+        emitIdx(); body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add); // i+1
+        body.push(WASM_OP.local_get, lenL);
+        body.push(0x4a); // i32.gt_s : (i+1) > len
+        body.push(WASM_OP.if, 0x40);
+        emitIdx(); body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add, WASM_OP.local_set, lenL);
+        body.push(WASM_OP.end);
+      } else if (arrayTypeIdx >= 0) {
         emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
         emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // index
         if (forceF64) body.push(0xab); // i32.trunc_f64_s
@@ -1206,16 +1236,6 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
         for (const phi of block.phis) {
           if (growableArrayValues.has(phi.id) && phi.inputs.length > 0) {
             if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: growable array carried by phi (reassigned)");
-            return null;
-          }
-        }
-      }
-      // growable への ArraySet (a[i]=x の成長) は未対応 (len の max 更新が要る)。
-      // push / get / length のみ対応。ArraySet 対象なら VM フォールバック。
-      for (const block of irFunc.blocks) {
-        for (const op of block.ops) {
-          if (op.opcode === "ArraySet" && growableArrayValues.has(op.args[0])) {
-            if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: ArraySet on growable array");
             return null;
           }
         }

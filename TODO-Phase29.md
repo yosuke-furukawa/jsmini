@@ -218,8 +218,15 @@ V8 の JSArray + backing store モデルで `[]` + `a.push(x)` を Wasm 化。
 効果: `[]` + push で fill→reduce する配列が JIT 化。VM の 44x / TW の
 176x (push+sum 200要素×2000回)。多数 grow (1000要素) も正しい。
 
+### 29-13: growable 配列への a[i]= 成長 — 完了
+
+`var a=[]; a[i]=x` (push でなく添字代入による成長) を Wasm 化。
+- ArraySet が growable 配列対象のとき: `i >= cap` なら __grow、
+  `backing[i]=x`、`len = max(len, i+1)`
+- index を複数回使うので emitLoadValue で都度ロード (計算値は local 化済み)
+- spectral-norm の spectralnorm 本体 (`u[i]=1; v[i]=w[i]=0`) も JIT 対象に
+
 範囲外 (今回もやらない):
-- growable 配列への `a[i]=` 成長 (len の max 更新が要る、push のみ対応)
 - growable 配列の再代入 (a = a2)、関数間受け渡し
 - pop / splice / shift 等の他の Array メソッド
 

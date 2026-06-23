@@ -200,6 +200,34 @@ describe("Phase 29: 動的成長配列 ([] + push)", () => {
     assert.equal(jit, plain);
     assert.equal(jit, 3);
   });
+
+  it("[] への a[i]=x 成長 (fill+sum) を JIT 化", () => {
+    const src = `
+      function f(n) {
+        var a = [];
+        for (var i = 0; i < n; i = i + 1) { a[i] = i * 2; }
+        var s = 0;
+        for (var j = 0; j < a.length; j = j + 1) { s = s + a[j]; }
+        return s;
+      }
+      var t = 0; for (var r = 0; r < 50; r = r + 1) { t = f(100); } t;
+    `;
+    const { plain, value, jitted } = jitVal(src);
+    assert.equal(value, plain);
+    assert.equal(value, 9900);
+    assert.ok(jitted, "a[i]= growth should JIT-compile");
+  });
+
+  it("[] への疎な a[i]=x (length は max(i+1) に更新)", () => {
+    const src = `
+      function f() { var a = []; a[0] = 10; a[5] = 50; return a.length * 1000 + a[5]; }
+      var t = 0; for (var r = 0; r < 10; r = r + 1) { t = f(); } t;
+    `;
+    const { plain, value, jitted } = jitVal(src);
+    assert.equal(value, plain);
+    assert.equal(value, 6 * 1000 + 50); // length=6 (max index 5 +1)
+    assert.ok(jitted, "sparse a[i]= should JIT-compile");
+  });
 });
 
 describe("Phase 29: 2ループ関数の SSA (param が phantom 値にならない)", () => {
