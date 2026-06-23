@@ -106,6 +106,27 @@ var jsmini = (() => {
     function pushToken(type, value, startColumn) {
       tokens.push({ type, value, line, column: startColumn });
     }
+    function previousTokenAllowsRegex() {
+      if (tokens.length === 0) return true;
+      const prev = tokens[tokens.length - 1].type;
+      const expressionEnding = [
+        "Identifier",
+        "Number",
+        "String",
+        "NoSubstitutionTemplate",
+        "TemplateTail",
+        "RightParen",
+        "RightBracket",
+        "PlusPlus",
+        "MinusMinus",
+        "True",
+        "False",
+        "Null",
+        "This",
+        "Super"
+      ];
+      return !expressionEnding.includes(prev);
+    }
     while (pos < source.length) {
       const ch = peek();
       if (ch === "/" && peek(1) === "/") {
@@ -126,6 +147,42 @@ var jsmini = (() => {
           advance();
           advance();
         }
+        continue;
+      }
+      if (ch === "/" && previousTokenAllowsRegex()) {
+        const startCol2 = column;
+        const startPos = pos;
+        advance();
+        let inClass = false;
+        while (pos < source.length) {
+          const c = peek();
+          if (c === "\n") {
+            throw new SyntaxError(`Unterminated regex literal at line ${line}, column ${startCol2}`);
+          }
+          if (c === "\\") {
+            advance();
+            if (pos < source.length) advance();
+            continue;
+          }
+          if (c === "[") {
+            inClass = true;
+            advance();
+            continue;
+          }
+          if (c === "]") {
+            inClass = false;
+            advance();
+            continue;
+          }
+          if (c === "/" && !inClass) break;
+          advance();
+        }
+        if (peek() !== "/") {
+          throw new SyntaxError(`Unterminated regex literal at line ${line}, column ${startCol2}`);
+        }
+        advance();
+        while (pos < source.length && /[gimsuyd]/.test(peek())) advance();
+        pushToken("RegExp", source.slice(startPos, pos), startCol2);
         continue;
       }
       if (ch === " " || ch === "	" || ch === "\r") {
@@ -159,6 +216,15 @@ var jsmini = (() => {
             advance();
             while (pos < source.length && isDigit(peek())) advance();
           }
+          if (peek() === "e" || peek() === "E") {
+            const next = peek(1);
+            const after = peek(2);
+            if (isDigit(next) || (next === "+" || next === "-") && isDigit(after)) {
+              advance();
+              if (peek() === "+" || peek() === "-") advance();
+              while (pos < source.length && isDigit(peek())) advance();
+            }
+          }
         }
         pushToken("Number", source.slice(start, pos), startCol2);
         continue;
@@ -171,6 +237,19 @@ var jsmini = (() => {
         while (pos < source.length && peek() !== quote) {
           if (peek() === "\\") {
             advance();
+            if (peek() === "\n") {
+              pos++;
+              line++;
+              column = 1;
+              continue;
+            }
+            if (peek() === "\r") {
+              pos++;
+              if (peek() === "\n") pos++;
+              line++;
+              column = 1;
+              continue;
+            }
             const esc = advance();
             switch (esc) {
               case "n":
@@ -1485,6 +1564,12 @@ var jsmini = (() => {
         case "Null":
           eat("Null");
           return { type: "Literal", value: null };
+        case "RegExp": {
+          eat("RegExp");
+          const raw = token.value;
+          const lastSlash = raw.lastIndexOf("/");
+          return { type: "RegExpLiteral", pattern: raw.slice(1, lastSlash), flags: raw.slice(lastSlash + 1) };
+        }
         case "Identifier":
           eat("Identifier");
           return { type: "Identifier", name: token.value };
@@ -1993,6 +2078,8 @@ var jsmini = (() => {
     let current = obj;
     while (current !== null && current !== void 0) {
       if (Object.prototype.hasOwnProperty.call(current, key)) {
+        const desc = Object.getOwnPropertyDescriptor(current, key);
+        if (desc && typeof desc.get === "function") return desc.get.call(obj);
         return current[key];
       }
       current = current[PROTO_KEY] ?? null;
@@ -2346,9 +2433,28 @@ var jsmini = (() => {
     return value instanceof JSPromise;
   }
 
+  // src/runtime/host-patches.ts
+  var PATCHED = /* @__PURE__ */ Symbol.for("jsmini.host-patches.applied");
+  if (!globalThis[PATCHED]) {
+    globalThis[PATCHED] = true;
+    const origTest = RegExp.prototype.test;
+    const origExec = RegExp.prototype.exec;
+    RegExp.prototype.test = function(s) {
+      return origTest.call(this, isJSString(s) ? jsStringToString(s) : String(s));
+    };
+    RegExp.prototype.exec = function(s) {
+      return origExec.call(this, isJSString(s) ? jsStringToString(s) : String(s));
+    };
+    const origHasOwn = Object.prototype.hasOwnProperty;
+    Object.prototype.hasOwnProperty = function(key) {
+      return origHasOwn.call(this, isJSString(key) ? jsStringToString(key) : key);
+    };
+  }
+
   // src/interpreter/evaluator.ts
   function callJSFunctionSync(fn, thisValue, args) {
     const callEnv = new Environment(fn.closure, true);
+    if (!fn.isArrow) callEnv.setThis(thisValue);
     const params = fn.params;
     for (let i = 0; i < params.length; i++) {
       if (params[i].type === "Identifier") {
@@ -2358,6 +2464,8 @@ var jsmini = (() => {
       }
     }
     if (fn.name) callEnv.define(fn.name, fn);
+    hoistVarDeclarations(fn.body.body, callEnv);
+    hoistFunctionDeclarations(fn.body.body, callEnv);
     if (fn.isAsync) {
       hoistVarDeclarations(fn.body.body, callEnv);
       hoistFunctionDeclarations(fn.body.body, callEnv);
@@ -2493,11 +2601,139 @@ var jsmini = (() => {
       pow: Math.pow,
       log: Math.log,
       random: Math.random,
+      sign: Math.sign,
+      trunc: Math.trunc,
+      sin: Math.sin,
+      cos: Math.cos,
+      tan: Math.tan,
+      asin: Math.asin,
+      acos: Math.acos,
+      atan: Math.atan,
+      atan2: Math.atan2,
+      sinh: Math.sinh,
+      cosh: Math.cosh,
+      tanh: Math.tanh,
+      asinh: Math.asinh,
+      acosh: Math.acosh,
+      atanh: Math.atanh,
+      exp: Math.exp,
+      log2: Math.log2,
+      log10: Math.log10,
+      log1p: Math.log1p,
+      expm1: Math.expm1,
+      hypot: Math.hypot,
+      cbrt: Math.cbrt,
+      fround: Math.fround,
+      clz32: Math.clz32,
+      imul: Math.imul,
       PI: Math.PI,
       E: Math.E,
-      sign: Math.sign,
-      trunc: Math.trunc
+      LN2: Math.LN2,
+      LN10: Math.LN10,
+      LOG2E: Math.LOG2E,
+      LOG10E: Math.LOG10E,
+      SQRT2: Math.SQRT2,
+      SQRT1_2: Math.SQRT1_2
     });
+    const twUnwrapStr = (v) => isJSString(v) ? jsStringToString(v) : v;
+    const twDateCtor = function(...args) {
+      const a = args.map(twUnwrapStr);
+      if (new.target) {
+        if (a.length === 0) return /* @__PURE__ */ new Date();
+        if (a.length === 1) return new Date(a[0]);
+        return new Date(...a);
+      }
+      return Date();
+    };
+    twDateCtor.now = () => Date.now();
+    twDateCtor.parse = (s) => Date.parse(String(twUnwrapStr(s)));
+    twDateCtor.UTC = (...args) => Date.UTC(...args.map(twUnwrapStr));
+    twDateCtor.prototype = Date.prototype;
+    env.defineReadOnly("Date", twDateCtor);
+    function* twToHostIterable(v) {
+      if (v === null || v === void 0) return;
+      if (typeof v[Symbol.iterator] === "function") {
+        for (const x of v) yield x;
+        return;
+      }
+      const iterFn = v?.["@@iterator"];
+      if (typeof iterFn !== "function") throw new TypeError("argument is not iterable");
+      const iter = iterFn.call(v);
+      while (true) {
+        const r = iter.next.call(iter);
+        if (r?.done) return;
+        yield r?.value;
+      }
+    }
+    function twUnwrapEntry(entry) {
+      if (Array.isArray(entry)) return [entry[0], entry[1]];
+      if (entry && typeof entry === "object") return [entry[0], entry[1]];
+      throw new TypeError("Map iterable entry must be an array");
+    }
+    const twMapCtor = function(iterable) {
+      if (!new.target) throw new TypeError("Map must be called with new");
+      const m = /* @__PURE__ */ new Map();
+      if (iterable !== void 0 && iterable !== null) {
+        for (const entry of twToHostIterable(iterable)) {
+          const [k, v] = twUnwrapEntry(entry);
+          m.set(k, v);
+        }
+      }
+      return m;
+    };
+    twMapCtor.prototype = Map.prototype;
+    env.defineReadOnly("Map", twMapCtor);
+    const twSetCtor = function(iterable) {
+      if (!new.target) throw new TypeError("Set must be called with new");
+      const s = /* @__PURE__ */ new Set();
+      if (iterable !== void 0 && iterable !== null) {
+        for (const v of twToHostIterable(iterable)) s.add(v);
+      }
+      return s;
+    };
+    twSetCtor.prototype = Set.prototype;
+    env.defineReadOnly("Set", twSetCtor);
+    const twWeakMapCtor = function(iterable) {
+      if (!new.target) throw new TypeError("WeakMap must be called with new");
+      const m = /* @__PURE__ */ new WeakMap();
+      if (iterable !== void 0 && iterable !== null) {
+        for (const entry of twToHostIterable(iterable)) {
+          const [k, v] = twUnwrapEntry(entry);
+          if (k === null || typeof k !== "object" && typeof k !== "function") {
+            throw new TypeError("Invalid value used as weak map key");
+          }
+          m.set(k, v);
+        }
+      }
+      return m;
+    };
+    twWeakMapCtor.prototype = WeakMap.prototype;
+    env.defineReadOnly("WeakMap", twWeakMapCtor);
+    const twWeakSetCtor = function(iterable) {
+      if (!new.target) throw new TypeError("WeakSet must be called with new");
+      const s = /* @__PURE__ */ new WeakSet();
+      if (iterable !== void 0 && iterable !== null) {
+        for (const v of twToHostIterable(iterable)) {
+          if (v === null || typeof v !== "object" && typeof v !== "function") {
+            throw new TypeError("Invalid value used in weak set");
+          }
+          s.add(v);
+        }
+      }
+      return s;
+    };
+    twWeakSetCtor.prototype = WeakSet.prototype;
+    env.defineReadOnly("WeakSet", twWeakSetCtor);
+    const twRegExpCtor = function(pattern, flags) {
+      const p = isJSString(pattern) ? jsStringToString(pattern) : pattern;
+      const f = isJSString(flags) ? jsStringToString(flags) : flags;
+      if (new.target) {
+        return f !== void 0 ? new RegExp(p, f) : new RegExp(p);
+      }
+      return f !== void 0 ? new RegExp(p, f) : new RegExp(p);
+    };
+    twRegExpCtor.prototype = RegExp.prototype;
+    env.defineReadOnly("RegExp", twRegExpCtor);
     const strArg = (v) => isJSString(v) ? jsStringToString(v) : String(v);
     const twObjectWrapper = function(...args) {
       return new Object(...args);
@@ -2523,6 +2759,60 @@ var jsmini = (() => {
     twObjectWrapper.assign = Object.assign;
     twObjectWrapper.create = Object.create;
     twObjectWrapper.freeze = (obj) => obj;
+    const twToKey = (key) => {
+      if (isJSString(key)) return jsStringToString(key);
+      return typeof key === "symbol" ? key : String(key);
+    };
+    twObjectWrapper.defineProperty = (obj, key, desc) => {
+      if (obj === null || typeof obj !== "object") {
+        throw new TypeError("Object.defineProperty called on non-object");
+      }
+      const k = twToKey(key);
+      if (desc && typeof desc === "object" && ("get" in desc || "set" in desc)) {
+        throw new TypeError("accessor descriptors not yet supported");
+      }
+      if (desc && typeof desc === "object" && "value" in desc) {
+        obj[k] = desc.value;
+      }
+      return obj;
+    };
+    twObjectWrapper.defineProperties = (obj, descs) => {
+      if (descs && typeof descs === "object") {
+        for (const k of Object.keys(descs)) {
+          twObjectWrapper.defineProperty(obj, k, descs[k]);
+        }
+      }
+      return obj;
+    };
+    twObjectWrapper.getOwnPropertyDescriptor = (obj, key) => {
+      if (obj === null || typeof obj !== "object") return void 0;
+      const k = twToKey(key);
+      if (!Object.prototype.hasOwnProperty.call(obj, k)) return void 0;
+      return {
+        value: obj[k],
+        writable: true,
+        enumerable: true,
+        configurable: true
+      };
+    };
+    twObjectWrapper.getPrototypeOf = (obj) => {
+      if (obj === null || typeof obj !== "object") return null;
+      return Object.getPrototypeOf(obj);
+    };
+    twObjectWrapper.setPrototypeOf = (obj, proto) => {
+      if (obj && typeof obj === "object") Object.setPrototypeOf(obj, proto);
+      return obj;
+    };
+    twObjectWrapper.getOwnPropertyNames = (obj) => {
+      if (obj === null || typeof obj !== "object") return [];
+      return Object.getOwnPropertyNames(obj).filter(
+        (k) => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(") && !k.startsWith("@@")
+      );
+    };
+    twObjectWrapper.getOwnPropertySymbols = (obj) => {
+      if (obj === null || typeof obj !== "object") return [];
+      return Object.getOwnPropertySymbols(obj);
+    };
     env.defineReadOnly("Object", twObjectWrapper);
     env.defineReadOnly("JSON", {
       stringify: (val) => {
@@ -2580,6 +2870,18 @@ var jsmini = (() => {
     PromiseConstructor.race = (promises) => JSPromise.race(promises);
     PromiseConstructor.allSettled = (promises) => JSPromise.allSettled(promises);
     PromiseConstructor.any = (promises) => JSPromise.any(promises);
+    PromiseConstructor.withResolvers = function() {
+      if (this !== PromiseConstructor) {
+        throw new TypeError("Promise.withResolvers called on non-Promise");
+      }
+      let resolve;
+      let reject;
+      const promise = new JSPromise((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    };
     env.defineReadOnly("Promise", PromiseConstructor);
     if (options.globals) {
       for (const [k, v] of Object.entries(options.globals)) {
@@ -3092,6 +3394,8 @@ var jsmini = (() => {
     switch (expr.type) {
       case "Literal":
         return typeof expr.value === "string" ? internString(expr.value) : expr.value;
+      case "RegExpLiteral":
+        return new RegExp(expr.pattern, expr.flags);
       case "Identifier":
         return env.get(expr.name);
       case "ThisExpression":
@@ -3597,6 +3901,9 @@ var jsmini = (() => {
             if (Array.isArray(result)) return result.map((s) => typeof s === "string" ? internString(s) : s);
             return result;
           };
+        } else if (isJSFunction(nativeFn)) {
+          const jsFn2 = nativeFn;
+          fn = (...a) => callJSFunctionSync(jsFn2, thisValue, a);
         }
       }
     } else {
@@ -4243,6 +4550,12 @@ var jsmini = (() => {
         this.declareLocal("arguments");
       }
       for (const stmt of body) {
+        if (stmt.type === "FunctionDeclaration" && stmt.id?.name) {
+          const name2 = stmt.id.name;
+          if (this.resolveLocal(name2) === null) this.declareLocal(name2);
+        }
+      }
+      for (const stmt of body) {
         this.compileStatement(stmt);
       }
       this.emit("LdaUndefined");
@@ -4612,54 +4925,56 @@ var jsmini = (() => {
           break;
         }
         case "ForInStatement": {
+          const useLocal = this.isFunction;
+          const ldaTmp = (slot, gIdx) => useLocal ? this.emit("LdaLocal", slot) : this.emit("LdaGlobal", gIdx);
+          const staTmp = (slot, gIdx) => useLocal ? this.emit("StaLocal", slot) : this.emit("StaGlobal", gIdx);
+          const offset = this.currentOffset();
+          const keysSlot = useLocal ? this.localCount++ : 0;
+          const counterSlot = useLocal ? this.localCount++ : 0;
+          const keysG = !useLocal ? this.addConstant(`__forin_keys_${offset}`) : 0;
+          const counterG = !useLocal ? this.addConstant(`__forin_idx_${offset}`) : 0;
           this.compileExpression(stmt.right);
-          const objName = `__forin_obj_${this.currentOffset()}`;
-          const objIdx = this.addConstant(objName);
-          this.emit("StaGlobal", objIdx);
-          this.emit("Pop");
-          this.emit("LdaGlobal", objIdx);
           this.emit("LdaGlobal", this.addConstant("Object"));
           this.emitWithIC("GetProperty", this.addConstant("keys"));
           this.emit("Call", 1);
-          const keysName = `__forin_keys_${this.currentOffset()}`;
-          const keysIdx = this.addConstant(keysName);
-          this.emit("StaGlobal", keysIdx);
+          staTmp(keysSlot, keysG);
           this.emit("Pop");
-          const counterName = `__forin_idx_${this.currentOffset()}`;
-          const counterIdx = this.addConstant(counterName);
           this.emit("LdaConst", this.addConstant(0));
-          this.emit("StaGlobal", counterIdx);
+          staTmp(counterSlot, counterG);
           this.emit("Pop");
           const loopStart = this.currentOffset();
-          this.emit("LdaGlobal", counterIdx);
-          this.emit("LdaGlobal", keysIdx);
+          ldaTmp(counterSlot, counterG);
+          ldaTmp(keysSlot, keysG);
           this.emitWithIC("GetProperty", this.addConstant("length"));
           this.emit("LessThan");
           const exitJump = this.emit("JumpIfFalse", 0);
-          this.emit("LdaGlobal", keysIdx);
-          this.emit("LdaGlobal", counterIdx);
+          ldaTmp(keysSlot, keysG);
+          ldaTmp(counterSlot, counterG);
           this.emit("GetPropertyComputed");
           this.compileBindingTarget(stmt.left.declarations[0].id);
           this.compileStatement(stmt.body);
-          this.emit("LdaGlobal", counterIdx);
+          ldaTmp(counterSlot, counterG);
           this.emit("LdaConst", this.addConstant(1));
           this.emit("Add");
-          this.emit("StaGlobal", counterIdx);
+          staTmp(counterSlot, counterG);
           this.emit("Pop");
           this.emit("Jump", loopStart);
           this.patch(exitJump, this.currentOffset());
           break;
         }
         case "ForOfStatement": {
+          const useLocal = this.isFunction;
+          const iterSlot = useLocal ? this.localCount++ : 0;
+          const iterG = !useLocal ? this.addConstant(`__iter_${this.currentOffset()}`) : 0;
           this.compileExpression(stmt.right);
           this.emit("GetIterator");
-          const iterName = `__iter_${this.currentOffset()}`;
-          const iterIdx = this.addConstant(iterName);
-          this.emit("StaGlobal", iterIdx);
+          if (useLocal) this.emit("StaLocal", iterSlot);
+          else this.emit("StaGlobal", iterG);
           this.emit("Pop");
           const loopStart = this.currentOffset();
           this.loopStack.push({ label: stmt.__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
-          this.emit("LdaGlobal", iterIdx);
+          if (useLocal) this.emit("LdaLocal", iterSlot);
+          else this.emit("LdaGlobal", iterG);
           this.emit("IteratorNext");
           this.emit("Dup");
           this.emit("IteratorComplete");
@@ -4696,6 +5011,12 @@ var jsmini = (() => {
             const index = this.addConstant(expr.value);
             this.emit("LdaConst", index);
           }
+          break;
+        }
+        case "RegExpLiteral": {
+          const re = new RegExp(expr.pattern, expr.flags);
+          const index = this.addConstant(re);
+          this.emit("LdaConst", index);
           break;
         }
         case "Identifier": {
@@ -5059,7 +5380,6 @@ var jsmini = (() => {
             this.emitLoad(expr.argument.name);
             if (expr.prefix) {
               this.emit(expr.operator === "++" ? "Increment" : "Decrement");
-              this.emit("Dup");
               this.emitStore(expr.argument.name);
             } else {
               this.emit("Dup");
@@ -5459,6 +5779,16 @@ var jsmini = (() => {
     f64_le: 101,
     f64_ge: 102,
     f64_neg: 154,
+    // Math 系 native ops (Wasm core)
+    f64_abs: 153,
+    f64_ceil: 155,
+    f64_floor: 156,
+    f64_trunc: 157,
+    f64_nearest: 158,
+    f64_sqrt: 159,
+    f64_min: 164,
+    f64_max: 165,
+    f64_copysign: 166,
     i32_trunc_f64_s: 170,
     f64_convert_i32_s: 183,
     end: 11,
@@ -5493,7 +5823,9 @@ var jsmini = (() => {
     array_get_s: 12,
     array_get_u: 13,
     array_set: 14,
-    array_len: 15
+    array_len: 15,
+    array_copy: 17
+    // 0xfb 0x11 <dst_type_idx> <src_type_idx>
   };
   function refType(typeIdx, nullable = false) {
     return [nullable ? 99 : 100, typeIdx];
@@ -7127,7 +7459,16 @@ var jsmini = (() => {
       const prevBase = this._runBaseFrameCount;
       this._runBaseFrameCount = baseFrameCount;
       try {
-        return this._runLoop(baseFrameCount);
+        while (true) {
+          try {
+            return this._runLoop(baseFrameCount);
+          } catch (e) {
+            if (e instanceof YieldSignal) throw e;
+            if (e?.__thrown) throw e;
+            if (this.unwindToHandler(e, baseFrameCount)) continue;
+            throw e;
+          }
+        }
       } finally {
         this._runBaseFrameCount = prevBase;
       }
@@ -7357,7 +7698,8 @@ var jsmini = (() => {
             if (r === THROWN_SENTINEL) continue;
             const l = this.toPrimitive(this.pop());
             if (l === THROWN_SENTINEL) continue;
-            this.push(l < r);
+            if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) < jsStringToString(r));
+            else this.push(l < r);
             break;
           }
           case "GreaterThan": {
@@ -7365,7 +7707,8 @@ var jsmini = (() => {
             if (r === THROWN_SENTINEL) continue;
             const l = this.toPrimitive(this.pop());
             if (l === THROWN_SENTINEL) continue;
-            this.push(l > r);
+            if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) > jsStringToString(r));
+            else this.push(l > r);
             break;
           }
           case "LessEqual": {
@@ -7373,7 +7716,8 @@ var jsmini = (() => {
             if (r === THROWN_SENTINEL) continue;
             const l = this.toPrimitive(this.pop());
             if (l === THROWN_SENTINEL) continue;
-            this.push(l <= r);
+            if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) <= jsStringToString(r));
+            else this.push(l <= r);
             break;
           }
           case "GreaterEqual": {
@@ -7381,7 +7725,8 @@ var jsmini = (() => {
             if (r === THROWN_SENTINEL) continue;
             const l = this.toPrimitive(this.pop());
             if (l === THROWN_SENTINEL) continue;
-            this.push(l >= r);
+            if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) >= jsStringToString(r));
+            else this.push(l >= r);
             break;
           }
           // 論理
@@ -7602,6 +7947,20 @@ var jsmini = (() => {
                   this.push(this.arrayPrototype[name2]);
                 } else if (isJSString(obj) && name2 in this.stringPrototype) {
                   this.push(this.stringPrototype[name2]);
+                } else if (isJSString(obj)) {
+                  const str = jsStringToString(obj);
+                  const nativeFn = str[name2];
+                  if (typeof nativeFn === "function") {
+                    this.push((...a) => {
+                      const nativeArgs = a.map((x) => isJSString(x) ? jsStringToString(x) : x);
+                      const result = nativeFn.apply(str, nativeArgs);
+                      if (typeof result === "string") return internString(result);
+                      if (Array.isArray(result)) return result.map((s) => typeof s === "string" ? internString(s) : s);
+                      return result;
+                    });
+                  } else {
+                    this.push(nativeFn);
+                  }
                 } else if (this.isBytecodeCallable(obj) && (name2 === "call" || name2 === "apply" || name2 === "bind")) {
                   const self = this;
                   const callable = obj;
@@ -7679,7 +8038,10 @@ var jsmini = (() => {
               const chars = [...str].map((c) => internString(c));
               this.push({ __arrayIter__: true, arr: chars, idx: 0 });
             } else {
-              const iterFn = isJSObject(obj) ? getProperty2(obj, "@@iterator") : obj?.["@@iterator"];
+              let iterFn = isJSObject(obj) ? getProperty2(obj, "@@iterator") : obj?.["@@iterator"];
+              if (!iterFn && obj !== null && typeof obj === "object" && typeof obj[Symbol.iterator] === "function") {
+                iterFn = obj[Symbol.iterator].bind(obj);
+              }
               if (!iterFn) throw new TypeError("obj is not iterable");
               const iterator = this.callAny(iterFn, obj, []);
               if (iterator === THROWN_SENTINEL) break;
@@ -8623,6 +8985,10 @@ var jsmini = (() => {
             } else {
               const op = registerOp(createOp(irFunc, "LoadProperty", [obj], "i32"));
               op.globalName = name2;
+              const objOp = opById.get(obj);
+              if (objOp?.opcode === "LoadGlobal" && objOp.globalName === "Math") {
+                op.calleeName = "Math." + name2;
+              }
               block.ops.push(op);
               stack.push(op.id);
             }
@@ -8645,8 +9011,18 @@ var jsmini = (() => {
             const args = [];
             for (let j = 0; j < argc; j++) args.unshift(stack.pop());
             const methodOp = opById.get(methodRef);
-            const methodName = methodOp?.globalName;
-            const op = registerOp(createOp(irFunc, "Call", [methodRef, ...args, thisObj], "any"));
+            if (methodOp?.globalName === "push" && !methodOp?.calleeName && argc === 1) {
+              const op2 = registerOp(createOp(irFunc, "ArrayPush", [thisObj, args[0]], "any"));
+              block.ops.push(op2);
+              const lenOp = registerOp(createOp(irFunc, "ArrayLength", [thisObj], "i32"));
+              block.ops.push(lenOp);
+              stack.push(lenOp.id);
+              break;
+            }
+            const isMathCall = methodOp?.calleeName?.startsWith("Math.");
+            const methodName = methodOp?.calleeName ?? methodOp?.globalName;
+            const callArgs = isMathCall ? [methodRef, ...args] : [methodRef, ...args, thisObj];
+            const op = registerOp(createOp(irFunc, "Call", callArgs, "any"));
             if (methodName) op.calleeName = methodName;
             block.ops.push(op);
             stack.push(op.id);
@@ -8657,6 +9033,13 @@ var jsmini = (() => {
             const ctorRef = stack.pop();
             const args = [];
             for (let j = 0; j < argc; j++) args.unshift(stack.pop());
+            const ctorOpEarly = opById.get(ctorRef);
+            if (ctorOpEarly?.opcode === "LoadGlobal" && ctorOpEarly.globalName === "Array" && argc === 1) {
+              const allocArr = registerOp(createOp(irFunc, "AllocArray", [args[0]], "any"));
+              block.ops.push(allocArr);
+              stack.push(allocArr.id);
+              break;
+            }
             const alloc = registerOp(createOp(irFunc, "Alloc", [], "i32"));
             block.ops.push(alloc);
             const ctorOp = opById.get(ctorRef);
@@ -8664,6 +9047,19 @@ var jsmini = (() => {
             if (ctorOp?.calleeName) call.calleeName = ctorOp.calleeName;
             block.ops.push(call);
             stack.push(alloc.id);
+            break;
+          }
+          case "CreateArray": {
+            const n = instr.operand;
+            const elems = [];
+            for (let j = 0; j < n; j++) elems.unshift(stack.pop());
+            const arr = registerOp(createOp(irFunc, "AllocGrowableArray", [], "any"));
+            block.ops.push(arr);
+            for (const e of elems) {
+              const p = registerOp(createOp(irFunc, "ArrayPush", [arr.id, e], "any"));
+              block.ops.push(p);
+            }
+            stack.push(arr.id);
             break;
           }
           case "LoadThis": {
@@ -8705,21 +9101,31 @@ var jsmini = (() => {
             phi.inputs.push([predId, val]);
           }
         }
-        const nonSelfInputs = phi.inputs.filter(([, vid]) => vid !== phi.id);
-        const allSame = nonSelfInputs.length > 0 && nonSelfInputs.every(([, vid]) => vid === nonSelfInputs[0][1]);
-        if (allSame || phi.inputs.length < 2) {
-          const replacement = nonSelfInputs.length > 0 ? nonSelfInputs[0][1] : void 0;
-          if (replacement !== void 0) {
-            for (const b of irFunc.blocks) {
-              for (const op of b.ops) {
-                op.args = op.args.map((a) => a === phi.id ? replacement : a);
-              }
-              for (const p of b.phis) {
-                p.inputs = p.inputs.map(([bid, vid]) => [bid, vid === phi.id ? replacement : vid]);
+      }
+    }
+    let collapsed = true;
+    while (collapsed) {
+      collapsed = false;
+      for (const [, phis] of phiMap) {
+        for (const [, phi] of phis) {
+          if (phi.inputs.length === 0) continue;
+          const nonSelfInputs = phi.inputs.filter(([, vid]) => vid !== phi.id);
+          const allSame = nonSelfInputs.length > 0 && nonSelfInputs.every(([, vid]) => vid === nonSelfInputs[0][1]);
+          if (allSame || phi.inputs.length < 2) {
+            const replacement = nonSelfInputs.length > 0 ? nonSelfInputs[0][1] : void 0;
+            if (replacement !== void 0) {
+              for (const b of irFunc.blocks) {
+                for (const op of b.ops) {
+                  op.args = op.args.map((a) => a === phi.id ? replacement : a);
+                }
+                for (const p of b.phis) {
+                  p.inputs = p.inputs.map(([bid, vid]) => [bid, vid === phi.id ? replacement : vid]);
+                }
               }
             }
+            phi.inputs = [];
+            collapsed = true;
           }
-          phi.inputs = [];
         }
       }
     }
@@ -8960,12 +9366,39 @@ var jsmini = (() => {
     const preheader = blockMap.get(preheaterId);
     if (!preheader) return false;
     const loopOps = /* @__PURE__ */ new Set();
+    const storedGlobals = /* @__PURE__ */ new Set();
+    const storedUpvalues = /* @__PURE__ */ new Set();
+    let hasStoreProperty = false;
+    let hasArrayStore = false;
+    let hasCall = false;
     for (const bid of loop.body) {
       const block = blockMap.get(bid);
       if (!block) continue;
       for (const phi of block.phis) loopOps.add(phi.id);
-      for (const op of block.ops) loopOps.add(op.id);
+      for (const op of block.ops) {
+        loopOps.add(op.id);
+        if (op.opcode === "StoreGlobal" && op.globalName) storedGlobals.add(op.globalName);
+        if (op.opcode === "StoreUpvalue" && op.index !== void 0) storedUpvalues.add(op.index);
+        if (op.opcode === "StoreProperty") hasStoreProperty = true;
+        if (op.opcode === "ArraySet") hasArrayStore = true;
+        if (op.opcode === "Call") hasCall = true;
+      }
     }
+    const conflictsWithLoopWrites = (op) => {
+      switch (op.opcode) {
+        case "LoadGlobal":
+          return op.globalName !== void 0 && storedGlobals.has(op.globalName) || hasCall;
+        case "LoadUpvalue":
+          return op.index !== void 0 && storedUpvalues.has(op.index) || hasCall;
+        case "LoadProperty":
+          return hasStoreProperty || hasCall;
+        case "ArrayGet":
+        case "ArrayLength":
+          return hasArrayStore || hasCall;
+        default:
+          return false;
+      }
+    };
     const invariant = /* @__PURE__ */ new Set();
     let changed = true;
     while (changed) {
@@ -8976,6 +9409,7 @@ var jsmini = (() => {
         for (const op of block.ops) {
           if (invariant.has(op.id)) continue;
           if (UNMOVABLE.has(op.opcode)) continue;
+          if (conflictsWithLoopWrites(op)) continue;
           if (isLoopInvariant(op, loopOps, invariant)) {
             invariant.add(op.id);
             changed = true;
@@ -9044,8 +9478,12 @@ var jsmini = (() => {
     // グローバル読み込み (副作用の間で値が変わりうる)
     "ArrayGet",
     // 配列読み込み (ArraySet で値が変わりうる)
-    "ArrayLength"
+    "ArrayLength",
     // 配列長 (変わりうる)
+    "Alloc",
+    // オブジェクト確保 (identity を持つ)
+    "AllocArray"
+    // 配列確保 (new Array(n) 2つは別オブジェクト)
   ]);
   function opKey(op) {
     return `${op.opcode}:${op.args.join(",")}`;
@@ -9370,7 +9808,7 @@ var jsmini = (() => {
         }
       }
     }
-    const controlOps = /* @__PURE__ */ new Set(["Return", "Branch", "Jump", "StoreGlobal", "ArraySet", "StoreUpvalue", "StoreProperty", "Call"]);
+    const controlOps = /* @__PURE__ */ new Set(["Return", "Branch", "Jump", "StoreGlobal", "ArraySet", "StoreUpvalue", "StoreProperty", "Call", "ArrayPush", "AllocGrowableArray", "AllocArray"]);
     for (const block of func.blocks) {
       const newOps = [];
       for (const op of block.ops) {
@@ -9541,6 +9979,12 @@ var jsmini = (() => {
     return { min, max };
   }
   function functionNeedsF64(irFunc) {
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "Call" && op.calleeName?.startsWith("Math.")) return true;
+        if (op.opcode === "Div") return true;
+      }
+    }
     const ranges = analyzeRanges(irFunc);
     for (const [, range] of ranges) {
       if (!canFitI32(range)) return true;
@@ -9550,7 +9994,52 @@ var jsmini = (() => {
 
   // src/ir/codegen.ts
   var WASM_VOID = 64;
-  function codegenIR(irFunc, forceF64 = false, arrayTypeIdx = -1) {
+  var MATH_NATIVE_UNARY = {
+    "Math.sqrt": WASM_OP.f64_sqrt,
+    "Math.abs": WASM_OP.f64_abs,
+    "Math.floor": WASM_OP.f64_floor,
+    "Math.ceil": WASM_OP.f64_ceil,
+    "Math.trunc": WASM_OP.f64_trunc
+    // 注: Math.round は half-up、f64.nearest は half-to-even (≠ JS spec)。host import に回す
+  };
+  var MATH_NATIVE_BINARY = {
+    // 注: 2 引数の Math.min / max のみネイティブで対応。可変長引数は host へ回す
+    "Math.min": WASM_OP.f64_min,
+    "Math.max": WASM_OP.f64_max
+  };
+  var MATH_HOST_IMPORTS = {
+    "Math.sin": 1,
+    "Math.cos": 1,
+    "Math.tan": 1,
+    "Math.asin": 1,
+    "Math.acos": 1,
+    "Math.atan": 1,
+    "Math.sinh": 1,
+    "Math.cosh": 1,
+    "Math.tanh": 1,
+    "Math.asinh": 1,
+    "Math.acosh": 1,
+    "Math.atanh": 1,
+    "Math.exp": 1,
+    "Math.log": 1,
+    "Math.log2": 1,
+    "Math.log10": 1,
+    "Math.log1p": 1,
+    "Math.expm1": 1,
+    "Math.cbrt": 1,
+    "Math.round": 1,
+    "Math.sign": 1,
+    "Math.atan2": 2,
+    "Math.pow": 2,
+    "Math.hypot": 2
+  };
+  function classifyMathCall(name2, argc) {
+    if (MATH_NATIVE_UNARY[name2] !== void 0 && argc === 1) return "native_unary";
+    if (MATH_NATIVE_BINARY[name2] !== void 0 && argc === 2) return "native_binary";
+    if (MATH_HOST_IMPORTS[name2] !== void 0 && MATH_HOST_IMPORTS[name2] === argc) return "host";
+    return "unsupported";
+  }
+  function codegenIR(irFunc, forceF64 = false, arrayTypeIdx = -1, importIndices, importCount = 0, arrayRefValues = /* @__PURE__ */ new Set(), growableArrayValues = /* @__PURE__ */ new Set(), growFnIndex = -1) {
     const body = [];
     const watLines = [];
     let watIndent = 1;
@@ -9631,6 +10120,7 @@ var jsmini = (() => {
     }
     for (const block of irFunc.blocks) {
       for (const phi of block.phis) {
+        if (arrayRefValues.has(phi.id)) continue;
         opToLocal.set(phi.id, nextLocal++);
       }
     }
@@ -9639,6 +10129,7 @@ var jsmini = (() => {
       for (const op of block.ops) {
         if ((op.opcode === "LoadGlobal" || op.opcode === "StoreGlobal") && op.globalName) {
           if (op.globalName === irFunc.name) continue;
+          if (op.globalName === "Math" || op.globalName === "Array") continue;
           if (!globalToLocal.has(op.globalName)) {
             globalToLocal.set(op.globalName, nextLocal++);
           }
@@ -9662,6 +10153,7 @@ var jsmini = (() => {
     const needsLocal = /* @__PURE__ */ new Set();
     for (const [id2, count] of useCount) {
       if (opToLocal.has(id2)) continue;
+      if (arrayRefValues.has(id2)) continue;
       const defBlock = opDefBlock.get(id2);
       const useBlocks = opUseBlocks.get(id2);
       if (count > 1 || defBlock !== void 0 && useBlocks && [...useBlocks].some((b) => b !== defBlock)) {
@@ -9669,9 +10161,65 @@ var jsmini = (() => {
         opToLocal.set(id2, nextLocal++);
       }
     }
+    {
+      const opByIdEarly = /* @__PURE__ */ new Map();
+      for (const block of irFunc.blocks) {
+        for (const phi of block.phis) opByIdEarly.set(phi.id, phi);
+        for (const op of block.ops) opByIdEarly.set(op.id, op);
+      }
+      const isRematerializable = (id2) => {
+        if (opToLocal.has(id2)) return true;
+        const o = opByIdEarly.get(id2);
+        return !o || o.opcode === "Const";
+      };
+      for (const block of irFunc.blocks) {
+        for (let pos = 0; pos < block.ops.length; pos++) {
+          const op = block.ops[pos];
+          const firstOperand = op.opcode === "Call" ? 1 : 0;
+          let sawLeafBefore = false;
+          for (let i = firstOperand; i < op.args.length; i++) {
+            const argId = op.args[i];
+            if (arrayRefValues.has(argId)) continue;
+            const rematerializable = isRematerializable(argId);
+            if (!rematerializable && !opToLocal.has(argId)) {
+              const defImmediatelyBefore = pos > 0 && block.ops[pos - 1].id === argId;
+              const orderBroken = i > firstOperand && sawLeafBefore;
+              if (!defImmediatelyBefore || orderBroken) {
+                needsLocal.add(argId);
+                opToLocal.set(argId, nextLocal++);
+              }
+            }
+            if (rematerializable) sawLeafBefore = true;
+          }
+        }
+      }
+    }
+    if (growableArrayValues.size > 0) {
+      const opLookup = /* @__PURE__ */ new Map();
+      for (const block of irFunc.blocks) {
+        for (const phi of block.phis) opLookup.set(phi.id, phi);
+        for (const op of block.ops) opLookup.set(op.id, op);
+      }
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          const isGrowableOp = op.opcode === "ArrayPush" || (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") && growableArrayValues.has(op.args[0]);
+          if (!isGrowableOp) continue;
+          for (let i = 1; i < op.args.length; i++) {
+            const argId = op.args[i];
+            if (opToLocal.has(argId) || arrayRefValues.has(argId)) continue;
+            const o = opLookup.get(argId);
+            if (o && o.opcode !== "Const") {
+              needsLocal.add(argId);
+              opToLocal.set(argId, nextLocal++);
+            }
+          }
+        }
+      }
+    }
     for (const block of irFunc.blocks) {
       for (const phi of block.phis) {
         for (const [, valueId] of phi.inputs) {
+          if (arrayRefValues.has(valueId)) continue;
           if (!opToLocal.has(valueId)) {
             needsLocal.add(valueId);
             opToLocal.set(valueId, nextLocal++);
@@ -9680,6 +10228,37 @@ var jsmini = (() => {
       }
     }
     const extraLocals = nextLocal - irFunc.paramCount;
+    const growableLenLocal = /* @__PURE__ */ new Map();
+    const growableBackingLocal = /* @__PURE__ */ new Map();
+    const scalarLocalEnd = nextLocal;
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "AllocGrowableArray" && !growableLenLocal.has(op.id)) {
+          growableLenLocal.set(op.id, nextLocal++);
+        }
+      }
+    }
+    const lenLocals = nextLocal - scalarLocalEnd;
+    const refLocalStart = nextLocal;
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) {
+        if (arrayRefValues.has(phi.id) && !opToLocal.has(phi.id)) opToLocal.set(phi.id, nextLocal++);
+      }
+      for (const op of block.ops) {
+        if (op.opcode === "AllocArray" && !opToLocal.has(op.id)) opToLocal.set(op.id, nextLocal++);
+        if (op.opcode === "AllocGrowableArray" && !growableBackingLocal.has(op.id)) {
+          growableBackingLocal.set(op.id, nextLocal++);
+        }
+      }
+    }
+    const refLocals = nextLocal - refLocalStart;
+    const growCtx = {
+      growableArrayValues,
+      growableLenLocal,
+      growableBackingLocal,
+      growFnIndex,
+      arrayTypeIdx
+    };
     const opById = /* @__PURE__ */ new Map();
     for (const block of irFunc.blocks) {
       for (const phi of block.phis) opById.set(phi.id, phi);
@@ -9778,7 +10357,7 @@ var jsmini = (() => {
           wat("return");
         } else {
           const beforeLen = body.length;
-          emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], /* @__PURE__ */ new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets);
+          emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], /* @__PURE__ */ new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets, importIndices, importCount, growCtx);
           watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
         }
       }
@@ -9814,10 +10393,11 @@ var jsmini = (() => {
     const header = `(func $${irFunc.name} ${paramStr} (result i32)`;
     const localDecls = nextLocal > irFunc.paramCount ? `  (local ${Array(nextLocal - irFunc.paramCount).fill("i32").join(" ")})` : "";
     const fullWat = [header, localDecls, ";; phi init", ...watLines, ")"].filter(Boolean).join("\n");
-    return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount, wat: fullWat };
+    return { body: [...initCode, ...body], extraLocals, lenLocals, refLocals, wat: fullWat };
   }
-  function emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById, globalToLocal = /* @__PURE__ */ new Map(), forceF64 = false, arrayTypeIdx = -1, upvalueCount = 0, propOffsets = /* @__PURE__ */ new Map()) {
+  function emitOp(op, body, opToLocal, irFunc, needsLocal, activeLoops, activeBlocks, loopHeaders, opById, globalToLocal = /* @__PURE__ */ new Map(), forceF64 = false, arrayTypeIdx = -1, upvalueCount = 0, propOffsets = /* @__PURE__ */ new Map(), importIndices = /* @__PURE__ */ new Map(), importCount = 0, growCtx) {
     const effectiveType = forceF64 ? "f64" : op.type;
+    const isGrowable = (id2) => growCtx?.growableArrayValues.has(id2) ?? false;
     switch (op.opcode) {
       case "Const": {
         if (needsLocal.has(op.id)) {
@@ -9842,6 +10422,7 @@ var jsmini = (() => {
       }
       case "LoadGlobal": {
         if (op.globalName === irFunc.name) break;
+        if (op.globalName === "Math" || op.globalName === "Array") break;
         const gLocal = globalToLocal.get(op.globalName);
         if (gLocal !== void 0) {
           body.push(WASM_OP.local_get, gLocal);
@@ -9852,7 +10433,11 @@ var jsmini = (() => {
       // 配列操作 (WasmGC array)
       case "ArrayGet": {
         if (arrayTypeIdx >= 0) {
-          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          if (isGrowable(op.args[0])) {
+            body.push(WASM_OP.local_get, growCtx.growableBackingLocal.get(op.args[0]));
+          } else {
+            emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          }
           emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
           if (forceF64) body.push(171);
           body.push(251, WASM_GC_OP.array_get, arrayTypeIdx);
@@ -9861,7 +10446,36 @@ var jsmini = (() => {
         break;
       }
       case "ArraySet": {
-        if (arrayTypeIdx >= 0) {
+        if (isGrowable(op.args[0]) && growCtx && growCtx.growFnIndex >= 0) {
+          const lenL = growCtx.growableLenLocal.get(op.args[0]);
+          const backL = growCtx.growableBackingLocal.get(op.args[0]);
+          const emitIdx = () => {
+            emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+            if (forceF64) body.push(171);
+          };
+          body.push(WASM_OP.local_get, backL, 251, WASM_GC_OP.array_len);
+          emitIdx();
+          body.push(76);
+          body.push(WASM_OP.if, 64);
+          body.push(WASM_OP.local_get, backL);
+          emitIdx();
+          body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add);
+          body.push(WASM_OP.call, growCtx.growFnIndex);
+          body.push(WASM_OP.local_set, backL);
+          body.push(WASM_OP.end);
+          body.push(WASM_OP.local_get, backL);
+          emitIdx();
+          emitLoadValue(op.args[2], body, opToLocal, opById, forceF64);
+          body.push(251, WASM_GC_OP.array_set, arrayTypeIdx);
+          emitIdx();
+          body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add);
+          body.push(WASM_OP.local_get, lenL);
+          body.push(74);
+          body.push(WASM_OP.if, 64);
+          emitIdx();
+          body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add, WASM_OP.local_set, lenL);
+          body.push(WASM_OP.end);
+        } else if (arrayTypeIdx >= 0) {
           emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
           emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
           if (forceF64) body.push(171);
@@ -9871,12 +10485,55 @@ var jsmini = (() => {
         break;
       }
       case "ArrayLength": {
-        if (arrayTypeIdx >= 0) {
+        if (isGrowable(op.args[0])) {
+          body.push(WASM_OP.local_get, growCtx.growableLenLocal.get(op.args[0]));
+          if (forceF64) body.push(183);
+        } else if (arrayTypeIdx >= 0) {
           emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
           body.push(251, WASM_GC_OP.array_len);
           if (forceF64) body.push(183);
         }
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
+      case "AllocGrowableArray": {
+        if (growCtx && arrayTypeIdx >= 0) {
+          const lenL = growCtx.growableLenLocal.get(op.id);
+          const backL = growCtx.growableBackingLocal.get(op.id);
+          body.push(WASM_OP.i32_const, 0, WASM_OP.local_set, lenL);
+          body.push(WASM_OP.i32_const, 4, 251, WASM_GC_OP.array_new_default, arrayTypeIdx, WASM_OP.local_set, backL);
+        }
+        break;
+      }
+      case "ArrayPush": {
+        if (growCtx && arrayTypeIdx >= 0 && growCtx.growFnIndex >= 0) {
+          const lenL = growCtx.growableLenLocal.get(op.args[0]);
+          const backL = growCtx.growableBackingLocal.get(op.args[0]);
+          body.push(WASM_OP.local_get, backL, 251, WASM_GC_OP.array_len);
+          body.push(WASM_OP.local_get, lenL);
+          body.push(76);
+          body.push(WASM_OP.if, 64);
+          body.push(WASM_OP.local_get, backL);
+          body.push(WASM_OP.local_get, lenL, WASM_OP.i32_const, 1, WASM_OP.i32_add);
+          body.push(WASM_OP.call, growCtx.growFnIndex);
+          body.push(WASM_OP.local_set, backL);
+          body.push(WASM_OP.end);
+          body.push(WASM_OP.local_get, backL);
+          body.push(WASM_OP.local_get, lenL);
+          emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+          body.push(251, WASM_GC_OP.array_set, arrayTypeIdx);
+          body.push(WASM_OP.local_get, lenL, WASM_OP.i32_const, 1, WASM_OP.i32_add, WASM_OP.local_set, lenL);
+        }
+        break;
+      }
+      case "AllocArray": {
+        if (arrayTypeIdx >= 0) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+          if (forceF64) body.push(171);
+          body.push(251, WASM_GC_OP.array_new_default, arrayTypeIdx);
+          const refLocal = opToLocal.get(op.id);
+          if (refLocal !== void 0) body.push(WASM_OP.local_set, refLocal);
+        }
         break;
       }
       case "StoreGlobal": {
@@ -9906,6 +10563,7 @@ var jsmini = (() => {
         break;
       }
       case "LoadProperty": {
+        if (op.calleeName?.startsWith("Math.")) break;
         const offset = propOffsets.get(op.globalName);
         if (offset !== void 0) {
           emitLoadValue(op.args[0], body, opToLocal, opById, false);
@@ -9937,17 +10595,42 @@ var jsmini = (() => {
         break;
       }
       case "Call": {
-        if (op.calleeName === "__await") {
+        const cname = op.calleeName;
+        if (cname === "__await") {
           for (const argId of op.args) {
             emitLoadValue(argId, body, opToLocal, opById, forceF64);
           }
-          body.push(WASM_OP.call, 0);
+          const idx = importIndices?.get("__await") ?? 0;
+          body.push(WASM_OP.call, idx);
+        } else if (cname && cname.startsWith("Math.")) {
+          const argc = op.args.length - 1;
+          const cls = classifyMathCall(cname, argc);
+          for (let i = 1; i < op.args.length; i++) {
+            emitLoadValue(
+              op.args[i],
+              body,
+              opToLocal,
+              opById,
+              /* forceF64 */
+              true
+            );
+          }
+          if (cls === "native_unary") {
+            body.push(MATH_NATIVE_UNARY[cname]);
+          } else if (cls === "native_binary") {
+            body.push(MATH_NATIVE_BINARY[cname]);
+          } else if (cls === "host") {
+            const idx = importIndices?.get(cname);
+            if (idx === void 0) throw new Error(`Math import not registered: ${cname}`);
+            body.push(WASM_OP.call, idx);
+          } else {
+            throw new Error(`Unsupported Math call: ${cname}/${argc}`);
+          }
         } else {
           for (let i = 1; i < op.args.length; i++) {
             emitLoadValue(op.args[i], body, opToLocal, opById, forceF64);
           }
-          const hasAwaitImport = irFunc.blocks.some((b) => b.ops.some((o) => o.opcode === "Call" && o.calleeName === "__await"));
-          body.push(WASM_OP.call, hasAwaitImport ? 1 : 0);
+          body.push(WASM_OP.call, importCount);
         }
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
@@ -10140,7 +10823,7 @@ var jsmini = (() => {
   function maybeStoreLocal(opId, body, opToLocal, needsLocal) {
     if (needsLocal.has(opId)) {
       const local = opToLocal.get(opId);
-      body.push(WASM_OP.local_tee, local);
+      body.push(WASM_OP.local_set, local);
     }
   }
   function computeUseCount(irFunc) {
@@ -10219,6 +10902,7 @@ var jsmini = (() => {
       let hasArrayOps = false;
       let hasSelfRecursion = false;
       let hasAwait = false;
+      const mathHostImports = /* @__PURE__ */ new Set();
       for (const block of irFunc.blocks) {
         for (const op of block.ops) {
           if (op.opcode === "Call") {
@@ -10226,20 +10910,37 @@ var jsmini = (() => {
               hasAwait = true;
             } else if (op.calleeName === irFunc.name && !hasArrayOps) {
               hasSelfRecursion = true;
+            } else if (op.calleeName?.startsWith("Math.")) {
+              const argc = op.args.length - 1;
+              const cls = classifyMathCall(op.calleeName, argc);
+              if (cls === "unsupported") {
+                if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: unsupported Math call", op.calleeName, "argc=", argc);
+                return null;
+              }
+              if (cls === "host") mathHostImports.add(op.calleeName);
             } else {
+              if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: unknown call", op.calleeName, "args=", op.args.length);
               return null;
             }
           }
-          if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") {
+          if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "AllocArray" || op.opcode === "AllocGrowableArray" || op.opcode === "ArrayPush") {
             hasArrayOps = true;
           }
           if (op.opcode === "Const" && op.value !== void 0 && typeof op.value !== "number" && typeof op.value !== "boolean" && op.value !== null) return null;
         }
       }
       const builder = new WasmBuilder();
+      const importIndices = /* @__PURE__ */ new Map();
       if (hasAwait) {
         const awaitType = functionNeedsF64(irFunc) ? WASM_TYPE.f64 : WASM_TYPE.i32;
-        builder.addImport("env", "__await", [awaitType], [awaitType]);
+        const idx = builder.addImport("env", "__await", [awaitType], [awaitType]);
+        importIndices.set("__await", idx);
+      }
+      for (const name2 of mathHostImports) {
+        const arity = MATH_HOST_IMPORTS[name2];
+        const params2 = arity === 2 ? [WASM_TYPE.f64, WASM_TYPE.f64] : [WASM_TYPE.f64];
+        const idx = builder.addImport("env", name2, params2, [WASM_TYPE.f64]);
+        importIndices.set(name2, idx);
       }
       const useF64 = functionNeedsF64(irFunc);
       const wasmType = useF64 ? WASM_TYPE.f64 : WASM_TYPE.i32;
@@ -10263,6 +10964,63 @@ var jsmini = (() => {
           }
         }
       }
+      const arrayRefValues = /* @__PURE__ */ new Set();
+      const growableArrayValues = /* @__PURE__ */ new Set();
+      if (hasArrayOps) {
+        for (const block of irFunc.blocks) {
+          for (const op of block.ops) {
+            if (op.opcode === "AllocArray") arrayRefValues.add(op.id);
+            if (op.opcode === "AllocGrowableArray") {
+              arrayRefValues.add(op.id);
+              growableArrayValues.add(op.id);
+            }
+            if ((op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "ArrayPush") && op.args[0] !== void 0) {
+              arrayRefValues.add(op.args[0]);
+            }
+          }
+        }
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (const block of irFunc.blocks) {
+            for (const phi of block.phis) {
+              if (arrayRefValues.has(phi.id)) {
+                for (const [, vid] of phi.inputs) {
+                  if (!arrayRefValues.has(vid)) {
+                    arrayRefValues.add(vid);
+                    changed = true;
+                  }
+                  if (growableArrayValues.has(phi.id) && !growableArrayValues.has(vid)) {
+                    growableArrayValues.add(vid);
+                    changed = true;
+                  }
+                }
+              }
+            }
+          }
+        }
+        for (const block of irFunc.blocks) {
+          for (const phi of block.phis) {
+            if (growableArrayValues.has(phi.id) && phi.inputs.length > 0) {
+              if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: growable array carried by phi (reassigned)");
+              return null;
+            }
+          }
+        }
+        for (const block of irFunc.blocks) {
+          for (const op of block.ops) {
+            for (let i = 0; i < op.args.length; i++) {
+              const argId = op.args[i];
+              if (!arrayRefValues.has(argId)) continue;
+              const isArrayOperand = (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "ArrayPush") && i === 0;
+              if (!isArrayOperand) {
+                if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: array ref escapes via", op.opcode, "arg", i);
+                return null;
+              }
+            }
+          }
+        }
+      }
       let upvalueCount = 0;
       for (const block of irFunc.blocks) {
         for (const op of block.ops) {
@@ -10276,7 +11034,8 @@ var jsmini = (() => {
       for (const block of irFunc.blocks) {
         for (const op of block.ops) {
           if (op.opcode === "LoadThis") hasThis = true;
-          if (op.opcode === "LoadProperty" || op.opcode === "StoreProperty") hasPropertyOps = true;
+          if (op.opcode === "StoreProperty") hasPropertyOps = true;
+          if (op.opcode === "LoadProperty" && !op.calleeName?.startsWith("Math.")) hasPropertyOps = true;
         }
       }
       let hasAlloc = false;
@@ -10292,41 +11051,120 @@ var jsmini = (() => {
         builder.addGlobal(WASM_TYPE.i32, true, 0);
       }
       const params = [];
+      let paramValTypeCount = 0;
       for (let i = 0; i < irFunc.paramCount; i++) {
         if (arrayParams.has(i)) {
           params.push(...refType(arrayTypeIdx));
         } else {
           params.push(wasmType);
         }
+        paramValTypeCount++;
       }
       for (let i = 0; i < upvalueCount; i++) {
         params.push(wasmType);
+        paramValTypeCount++;
       }
       if (hasThis) {
         params.push(WASM_TYPE.i32);
+        paramValTypeCount++;
       }
       const results = [wasmType];
-      const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx);
+      const hasGrowable = growableArrayValues.size > 0;
+      const growFnIndex = hasGrowable ? builder.importCount + 1 : -1;
+      const { body: bodyCode, extraLocals, lenLocals, refLocals } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues, growableArrayValues, growFnIndex);
       if (osrLocalCount !== void 0 && osrLocalCount > irFunc.paramCount) {
         const osrExtraParams = osrLocalCount - irFunc.paramCount;
         for (let i = 0; i < osrExtraParams; i++) {
           params.push(wasmType);
+          paramValTypeCount++;
         }
       }
-      const totalParamCount = params.length;
+      const totalParamCount = paramValTypeCount;
       const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
       const wasmExtraLocals = osrLocalCount !== void 0 ? Math.max(0, extraLocals - (osrLocalCount - irFunc.paramCount)) : extraLocals;
-      const extraLocalGroups = wasmExtraLocals > 0 ? [{ count: wasmExtraLocals, type: localType }] : void 0;
+      const groups = [];
+      if (wasmExtraLocals > 0) groups.push({ count: wasmExtraLocals, type: localType });
+      if (lenLocals > 0) groups.push({ count: lenLocals, type: [WASM_TYPE.i32] });
+      if (refLocals > 0 && arrayTypeIdx >= 0) groups.push({ count: refLocals, type: refType(arrayTypeIdx) });
+      const extraLocalGroups = groups.length > 0 ? groups : void 0;
       builder.addFunction(
         irFunc.name,
         params,
         results,
         bodyCode,
-        wasmExtraLocals > 0 ? wasmExtraLocals : 0,
+        wasmExtraLocals + lenLocals + refLocals > 0 ? wasmExtraLocals + lenLocals + refLocals : 0,
         totalParamCount,
         1,
         extraLocalGroups
       );
+      if (hasGrowable && arrayTypeIdx >= 0) {
+        const growBody = [
+          WASM_OP.local_get,
+          0,
+          251,
+          WASM_GC_OP.array_len,
+          // oldcap
+          WASM_OP.i32_const,
+          1,
+          116,
+          // << 1 → oldcap*2
+          WASM_OP.local_set,
+          2,
+          // newcap = oldcap*2
+          WASM_OP.local_get,
+          2,
+          WASM_OP.local_get,
+          1,
+          72,
+          // newcap < mincap (i32.lt_s)
+          WASM_OP.if,
+          64,
+          WASM_OP.local_get,
+          1,
+          WASM_OP.local_set,
+          2,
+          // newcap = mincap
+          WASM_OP.end,
+          WASM_OP.local_get,
+          2,
+          251,
+          WASM_GC_OP.array_new_default,
+          arrayTypeIdx,
+          WASM_OP.local_set,
+          3,
+          // new
+          // array.copy(new, 0, old, 0, array.len(old))
+          WASM_OP.local_get,
+          3,
+          WASM_OP.i32_const,
+          0,
+          WASM_OP.local_get,
+          0,
+          WASM_OP.i32_const,
+          0,
+          WASM_OP.local_get,
+          0,
+          251,
+          WASM_GC_OP.array_len,
+          251,
+          WASM_GC_OP.array_copy,
+          arrayTypeIdx,
+          arrayTypeIdx,
+          WASM_OP.local_get,
+          3,
+          WASM_OP.end
+        ];
+        builder.addFunction(
+          "__grow",
+          [...refType(arrayTypeIdx), WASM_TYPE.i32],
+          refType(arrayTypeIdx),
+          growBody,
+          0,
+          2,
+          1,
+          [{ count: 1, type: [WASM_TYPE.i32] }, { count: 1, type: refType(arrayTypeIdx) }]
+        );
+      }
       if (hasArrayOps && arrayTypeIdx >= 0) {
         const initValue = useF64 ? [WASM_OP.f64_const, ...f64ToBytes(0)] : [WASM_OP.i32_const, ...i32ToLEB128(0)];
         const createBody = [
@@ -10367,15 +11205,21 @@ var jsmini = (() => {
       const wasmBytes = builder.build();
       const module = new WebAssembly.Module(wasmBytes);
       const importObject = {};
+      const env = {};
       if (hasAwait && typeof WebAssembly.Suspending === "function") {
-        importObject.env = {
-          __await: new WebAssembly.Suspending(async (v) => {
-            const resolved = await Promise.resolve(v);
-            return resolved;
-          })
-        };
+        env.__await = new WebAssembly.Suspending(async (v) => {
+          const resolved = await Promise.resolve(v);
+          return resolved;
+        });
       }
-      const instance = new WebAssembly.Instance(module, hasAwait ? importObject : void 0);
+      for (const name2 of mathHostImports) {
+        const methodName = name2.slice(5);
+        env[name2] = Math[methodName];
+      }
+      if (hasAwait || mathHostImports.size > 0) {
+        importObject.env = env;
+      }
+      const instance = new WebAssembly.Instance(module, hasAwait || mathHostImports.size > 0 ? importObject : void 0);
       const memory = hasPropertyOps ? instance.exports.memory : void 0;
       let jspiWrapped;
       if (hasAwait && typeof WebAssembly.promising === "function") {
@@ -10393,7 +11237,7 @@ var jsmini = (() => {
         jspiWrapped
       };
     } catch (e) {
-      if (typeof process !== "undefined" && process.env?.DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e);
+      if (typeof process !== "undefined" && process.env?.DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e, e.stack);
       return null;
     }
   }
@@ -10496,7 +11340,10 @@ var jsmini = (() => {
           buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs }
         });
         const result = compileIRToWasm(ir);
-        if (!result) return null;
+        if (!result) {
+          if (process.env?.DEBUG_WASM) console.error("[compileViaIR] compileIRToWasm returned null for", ir.name);
+          return null;
+        }
         const wasmFn = result.instance.exports[ir.name];
         if (!wasmFn) return null;
         const arrayArgIndices = result.arrayParams ?? [];
@@ -10506,7 +11353,8 @@ var jsmini = (() => {
         const cached = { fn: wasmFn, memory: result.memory ?? null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
         if (result.jspiWrapped) cached.jspiWrapped = result.jspiWrapped;
         return cached;
-      } catch {
+      } catch (e) {
+        if (process.env?.DEBUG_WASM) console.error("[compileViaIR] threw", e.message || e, e.stack);
         return null;
       }
     }
@@ -10661,7 +11509,16 @@ var jsmini = (() => {
         return { result: cached.jspiWrapped(...wasmArgs) };
       }
       this.logTier(func, "Wasm", callCount);
-      return { result: fn(...wasmArgs) };
+      try {
+        return { result: fn(...wasmArgs) };
+      } catch (e) {
+        if (e instanceof RangeError) {
+          this.deoptimize(func, args);
+          this.logTier(func, "Bytecode VM (after deopt: wasm stack overflow)", callCount);
+          return null;
+        }
+        throw e;
+      }
     }
     executeWithArrayArgs(func, cached, args, arrayArgIndices, callCount) {
       const { fn, createArray, getArray, setArray } = cached;
@@ -10694,7 +11551,17 @@ var jsmini = (() => {
         }
       }
       this.logTier(func, "Wasm (array)", callCount);
-      const result = fn(...wasmArgs);
+      let result;
+      try {
+        result = fn(...wasmArgs);
+      } catch (e) {
+        if (e instanceof RangeError) {
+          this.deoptimize(func, args);
+          this.logTier(func, "Bytecode VM (after deopt: wasm stack overflow)", callCount);
+          return null;
+        }
+        throw e;
+      }
       for (const { jsArr, gcArr, length } of arrayRefs) {
         for (let j = 0; j < length; j++) {
           jsArr[j] = getArray(gcArr, j);
@@ -10886,15 +11753,24 @@ var jsmini = (() => {
           const sb = isJSString(b) ? jsStringToString(b) : String(b);
           return sa < sb ? -1 : sa > sb ? 1 : 0;
         };
-        for (let i = 1; i < this.length; i++) {
-          const key = this[i];
-          let j = i - 1;
-          while (j >= 0 && cmp(this[j], key) > 0) {
-            this[j + 1] = this[j];
-            j--;
+        const merge = (left, right) => {
+          const out = [];
+          let i = 0, j = 0;
+          while (i < left.length && j < right.length) {
+            if (cmp(left[i], right[j]) <= 0) out.push(left[i++]);
+            else out.push(right[j++]);
           }
-          this[j + 1] = key;
-        }
+          while (i < left.length) out.push(left[i++]);
+          while (j < right.length) out.push(right[j++]);
+          return out;
+        };
+        const mergeSort = (arr) => {
+          if (arr.length <= 1) return arr;
+          const mid = arr.length >> 1;
+          return merge(mergeSort(arr.slice(0, mid)), mergeSort(arr.slice(mid)));
+        };
+        const sorted = mergeSort(this.slice());
+        for (let i = 0; i < sorted.length; i++) this[i] = sorted[i];
         return this;
       },
       map: function(fn) {
@@ -11022,6 +11898,9 @@ var jsmini = (() => {
       repeat: function(n) {
         return strRet(strArg(this).repeat(n));
       },
+      concat: function(...args) {
+        return strRet(strArg(this) + args.map(strArg).join(""));
+      },
       padStart: function(len, fill) {
         return strRet(strArg(this).padStart(len, fill !== void 0 ? strArg(fill) : void 0));
       },
@@ -11066,6 +11945,7 @@ var jsmini = (() => {
       return [];
     };
     ArrayCtor.of = (...items) => [...items];
+    ArrayCtor.prototype = Array.prototype;
     vm.setGlobal("Array", ArrayCtor);
     function BooleanCtor(v) {
       if (new.target) {
@@ -11103,7 +11983,7 @@ var jsmini = (() => {
       return s;
     }
     StringCtor.fromCharCode = (...codes) => internString(String.fromCharCode(...codes));
-    StringCtor.prototype = {};
+    StringCtor.prototype = String.prototype;
     vm.setGlobal("String", StringCtor);
     vm.setGlobal("Function", function() {
     });
@@ -11132,6 +12012,76 @@ var jsmini = (() => {
     };
     ObjectWrapper.freeze = (obj) => obj;
     ObjectWrapper.prototype = vm.objectPrototype;
+    const descField = (desc, name2) => {
+      if (isJSObject(desc)) return getProperty2(desc, name2);
+      if (desc && typeof desc === "object") return desc[name2];
+      return void 0;
+    };
+    const descHas = (desc, name2) => {
+      if (isJSObject(desc)) return getHiddenClass(desc).properties.has(name2);
+      if (desc && typeof desc === "object") return name2 in desc;
+      return false;
+    };
+    const toKey = (key) => {
+      if (isJSSymbol(key)) return key.key;
+      return isJSString(key) ? jsStringToString(key) : String(key);
+    };
+    ObjectWrapper.defineProperty = (obj, key, desc) => {
+      const k = toKey(key);
+      if (descHas(desc, "get") || descHas(desc, "set")) {
+        throw new TypeError("accessor descriptors not yet supported");
+      }
+      if (descHas(desc, "value")) {
+        setProperty(obj, k, descField(desc, "value"));
+      }
+      return obj;
+    };
+    ObjectWrapper.defineProperties = (obj, descs) => {
+      const keys2 = isJSObject(descs) ? [...getHiddenClass(descs).properties.keys()].filter((k) => k !== "__proto__") : descs && typeof descs === "object" ? Object.keys(descs) : [];
+      for (const k of keys2) {
+        const d = descField(descs, k);
+        ObjectWrapper.defineProperty(obj, k, d);
+      }
+      return obj;
+    };
+    ObjectWrapper.getOwnPropertyDescriptor = (obj, key) => {
+      const k = toKey(key);
+      if (isJSObject(obj)) {
+        const props = getHiddenClass(obj).properties;
+        if (!props.has(k)) return void 0;
+        const d = vm.heap.allocate(createJSObject());
+        setProperty(d, "value", getProperty2(obj, k));
+        setProperty(d, "writable", true);
+        setProperty(d, "enumerable", true);
+        setProperty(d, "configurable", true);
+        return d;
+      }
+      if (obj && typeof obj === "object") {
+        return Object.getOwnPropertyDescriptor(obj, k);
+      }
+      return void 0;
+    };
+    ObjectWrapper.getPrototypeOf = (obj) => {
+      if (isJSObject(obj)) {
+        const props = getHiddenClass(obj).properties;
+        if (!props.has("__proto__")) return vm.objectPrototype;
+        return getProperty2(obj, "__proto__");
+      }
+      if (obj && typeof obj === "object") return Object.getPrototypeOf(obj);
+      return null;
+    };
+    ObjectWrapper.setPrototypeOf = (obj, proto) => {
+      if (isJSObject(obj)) setProperty(obj, "__proto__", proto);
+      else if (obj && typeof obj === "object") Object.setPrototypeOf(obj, proto);
+      return obj;
+    };
+    ObjectWrapper.getOwnPropertyNames = (obj) => {
+      const keys2 = jsObjKeys(obj);
+      return keys2.filter((k) => !k.startsWith("@@")).map((k) => internString(k));
+    };
+    ObjectWrapper.getOwnPropertySymbols = (_obj) => {
+      return [];
+    };
     vm.setGlobal("Object", ObjectWrapper);
     vm.setGlobal("Math", {
       floor: Math.floor,
@@ -11144,11 +12094,220 @@ var jsmini = (() => {
       pow: Math.pow,
       log: Math.log,
       random: Math.random,
+      sign: Math.sign,
+      trunc: Math.trunc,
+      sin: Math.sin,
+      cos: Math.cos,
+      tan: Math.tan,
+      asin: Math.asin,
+      acos: Math.acos,
+      atan: Math.atan,
+      atan2: Math.atan2,
+      sinh: Math.sinh,
+      cosh: Math.cosh,
+      tanh: Math.tanh,
+      asinh: Math.asinh,
+      acosh: Math.acosh,
+      atanh: Math.atanh,
+      exp: Math.exp,
+      log2: Math.log2,
+      log10: Math.log10,
+      log1p: Math.log1p,
+      expm1: Math.expm1,
+      hypot: Math.hypot,
+      cbrt: Math.cbrt,
+      fround: Math.fround,
+      clz32: Math.clz32,
+      imul: Math.imul,
       PI: Math.PI,
       E: Math.E,
-      sign: Math.sign,
-      trunc: Math.trunc
+      LN2: Math.LN2,
+      LN10: Math.LN10,
+      LOG2E: Math.LOG2E,
+      LOG10E: Math.LOG10E,
+      SQRT2: Math.SQRT2,
+      SQRT1_2: Math.SQRT1_2
     });
+    const unwrapStr = (v) => isJSString(v) ? jsStringToString(v) : v;
+    const DateCtor = function(...args) {
+      const a = args.map(unwrapStr);
+      if (new.target) {
+        if (a.length === 0) return /* @__PURE__ */ new Date();
+        if (a.length === 1) return new Date(a[0]);
+        return new Date(...a);
+      }
+      return internString(Date());
+    };
+    DateCtor.now = () => Date.now();
+    DateCtor.parse = (s) => Date.parse(String(unwrapStr(s)));
+    DateCtor.UTC = (...args) => Date.UTC(...args.map(unwrapStr));
+    DateCtor.prototype = Date.prototype;
+    vm.setGlobal("Date", DateCtor);
+    function* toHostIterable(v) {
+      if (v === null || v === void 0) return;
+      if (typeof v[Symbol.iterator] === "function") {
+        for (const x of v) yield x;
+        return;
+      }
+      const iterFn = isJSObject(v) ? getProperty2(v, "@@iterator") : v?.["@@iterator"];
+      if (typeof iterFn !== "function") throw new TypeError("argument is not iterable");
+      const iter = iterFn.call(v);
+      while (true) {
+        const nextFn = isJSObject(iter) ? getProperty2(iter, "next") : iter?.next;
+        const r = nextFn.call(iter);
+        const done = isJSObject(r) ? getProperty2(r, "done") : r?.done;
+        if (done) return;
+        const val = isJSObject(r) ? getProperty2(r, "value") : r?.value;
+        yield val;
+      }
+    }
+    function unwrapEntry(entry) {
+      if (Array.isArray(entry)) return [entry[0], entry[1]];
+      if (isJSObject(entry)) return [getProperty2(entry, "0"), getProperty2(entry, "1")];
+      throw new TypeError("Map iterable entry must be an array");
+    }
+    const wrapVMCallback = (cb) => {
+      if (typeof cb === "function") return cb;
+      return (...args) => vm.callFunction(cb, void 0, args);
+    };
+    const MapCtor = function MapCtorFn(iterable) {
+      if (!new.target) throw new TypeError("Map must be called with new");
+      const m = /* @__PURE__ */ new Map();
+      if (iterable !== void 0 && iterable !== null) {
+        for (const entry of toHostIterable(iterable)) {
+          const [k, v] = unwrapEntry(entry);
+          m.set(k, v);
+        }
+      }
+      return m;
+    };
+    MapCtor.prototype = Map.prototype;
+    vm.setGlobal("Map", MapCtor);
+    const SetCtor = function SetCtorFn(iterable) {
+      if (!new.target) throw new TypeError("Set must be called with new");
+      const s = /* @__PURE__ */ new Set();
+      if (iterable !== void 0 && iterable !== null) {
+        for (const v of toHostIterable(iterable)) s.add(v);
+      }
+      return s;
+    };
+    SetCtor.prototype = Set.prototype;
+    vm.setGlobal("Set", SetCtor);
+    const WeakMapCtor = function WeakMapCtorFn(iterable) {
+      if (!new.target) throw new TypeError("WeakMap must be called with new");
+      const m = /* @__PURE__ */ new WeakMap();
+      if (iterable !== void 0 && iterable !== null) {
+        for (const entry of toHostIterable(iterable)) {
+          const [k, v] = unwrapEntry(entry);
+          if (k === null || typeof k !== "object" && typeof k !== "function") {
+            throw new TypeError("Invalid value used as weak map key");
+          }
+          m.set(k, v);
+        }
+      }
+      return m;
+    };
+    WeakMapCtor.prototype = WeakMap.prototype;
+    vm.setGlobal("WeakMap", WeakMapCtor);
+    const WeakSetCtor = function WeakSetCtorFn(iterable) {
+      if (!new.target) throw new TypeError("WeakSet must be called with new");
+      const s = /* @__PURE__ */ new WeakSet();
+      if (iterable !== void 0 && iterable !== null) {
+        for (const v of toHostIterable(iterable)) {
+          if (v === null || typeof v !== "object" && typeof v !== "function") {
+            throw new TypeError("Invalid value used in weak set");
+          }
+          s.add(v);
+        }
+      }
+      return s;
+    };
+    WeakSetCtor.prototype = WeakSet.prototype;
+    vm.setGlobal("WeakSet", WeakSetCtor);
+    const RegExpCtor = function(pattern, flags) {
+      const p = isJSString(pattern) ? jsStringToString(pattern) : pattern;
+      const f = isJSString(flags) ? jsStringToString(flags) : flags;
+      if (new.target) {
+        return f !== void 0 ? new RegExp(p, f) : new RegExp(p);
+      }
+      return f !== void 0 ? new RegExp(p, f) : new RegExp(p);
+    };
+    RegExpCtor.prototype = RegExp.prototype;
+    vm.setGlobal("RegExp", RegExpCtor);
+    const origReplace = vm.stringPrototype.replace;
+    vm.stringPrototype.match = function(re) {
+      const s = isJSString(this) ? jsStringToString(this) : String(this);
+      const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re));
+      const m = s.match(r);
+      if (!m) return null;
+      for (let i = 0; i < m.length; i++) if (typeof m[i] === "string") m[i] = internString(m[i]);
+      return m;
+    };
+    vm.stringPrototype.search = function(re) {
+      const s = isJSString(this) ? jsStringToString(this) : String(this);
+      const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re));
+      return s.search(r);
+    };
+    vm.stringPrototype.matchAll = function(re) {
+      const s = isJSString(this) ? jsStringToString(this) : String(this);
+      const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re), "g");
+      const arr = [];
+      for (const m of s.matchAll(r)) {
+        const row = [];
+        for (let i = 0; i < m.length; i++) row.push(typeof m[i] === "string" ? internString(m[i]) : m[i]);
+        arr.push(row);
+      }
+      return arr;
+    };
+    vm.stringPrototype.replace = function(search, replacement) {
+      const s = isJSString(this) ? jsStringToString(this) : String(this);
+      if (search instanceof RegExp) {
+        if (typeof replacement === "function") {
+          return internString(s.replace(search, (...args) => {
+            const r = replacement.apply(void 0, args.map((a) => typeof a === "string" ? internString(a) : a));
+            return isJSString(r) ? jsStringToString(r) : String(r);
+          }));
+        } else if (typeof replacement === "object" && replacement !== null && "bytecode" in replacement) {
+          return internString(s.replace(search, (...args) => {
+            const r = vm.callFunction(replacement, void 0, args.map((a) => typeof a === "string" ? internString(a) : a));
+            return isJSString(r) ? jsStringToString(r) : String(r);
+          }));
+        } else if (typeof replacement === "object" && replacement !== null && "__closure" in replacement) {
+          return internString(s.replace(search, (...args) => {
+            const r = vm.callFunction(replacement, void 0, args.map((a) => typeof a === "string" ? internString(a) : a));
+            return isJSString(r) ? jsStringToString(r) : String(r);
+          }));
+        }
+        const rep = isJSString(replacement) ? jsStringToString(replacement) : String(replacement);
+        return internString(s.replace(search, rep));
+      }
+      return origReplace.call(this, search, replacement);
+    };
+    const origSplit = vm.stringPrototype.split;
+    vm.stringPrototype.split = function(sep, limit) {
+      if (sep instanceof RegExp) {
+        const s = isJSString(this) ? jsStringToString(this) : String(this);
+        return s.split(sep, limit).map((x) => internString(x));
+      }
+      return origSplit.call(this, sep, limit);
+    };
+    const origMapForEach = Map.prototype.forEach;
+    if (!Map.prototype.__jsminiPatched) {
+      Map.prototype.__jsminiPatched = true;
+      Map.prototype.forEach = function(cb, thisArg) {
+        const wrapped = wrapVMCallback(cb);
+        origMapForEach.call(this, function(v, k, m) {
+          wrapped.call(thisArg, v, k, m);
+        }, thisArg);
+      };
+      const origSetForEach = Set.prototype.forEach;
+      Set.prototype.forEach = function(cb, thisArg) {
+        const wrapped = wrapVMCallback(cb);
+        origSetForEach.call(this, function(v, _v2, s) {
+          wrapped.call(thisArg, v, v, s);
+        }, thisArg);
+      };
+    }
     vm.setGlobal("JSON", {
       stringify: (val) => {
         const toNative = (v) => {
@@ -11208,6 +12367,22 @@ var jsmini = (() => {
     PromiseConstructor.race = (promises) => JSPromise.race(promises);
     PromiseConstructor.allSettled = (promises) => JSPromise.allSettled(promises);
     PromiseConstructor.any = (promises) => JSPromise.any(promises);
+    PromiseConstructor.withResolvers = function() {
+      if (this !== PromiseConstructor) {
+        throw new TypeError("Promise.withResolvers called on non-Promise");
+      }
+      let resolve;
+      let reject;
+      const promise = new JSPromise((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      const result = vm.heap.allocate(createJSObject());
+      setProperty(result, "promise", promise);
+      setProperty(result, "resolve", resolve);
+      setProperty(result, "reject", reject);
+      return result;
+    };
     vm.setGlobal("Promise", PromiseConstructor);
     setHandlerCaller((handler, value2) => {
       if (typeof handler === "function") return handler(value2);
