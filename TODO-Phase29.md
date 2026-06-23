@@ -190,11 +190,38 @@ param 参照が消えた phi (v1) を指し、`f64.lt` のオペランドが欠�
 2 つの `new Array(n)` が同じ `AllocArray(v0)` として CSE され aliasing。
 NOT_CSE_TARGET に AllocArray / Alloc を追加。
 
+### 29-12: 動的成長配列 ([] + push) — 完了
+
+V8 の JSArray + backing store モデルで `[]` + `a.push(x)` を Wasm 化。
+
+- IR types に `AllocGrowableArray` / `ArrayPush` opcode
+- builder: `CreateArray 0` (= `[]`) → AllocGrowableArray、`CreateArray N`
+  (= `[a,b,c]`) → AllocGrowableArray + N×ArrayPush、`a.push(x)` → ArrayPush
+- 表現: **length (i32 local) + backing (ref local)** の 2 本。struct を使わず
+  Wasm local 2 本で持つ (struct のref フィールドは型セクション前方参照で
+  rec group が要るため回避)。SSA collapse 後は単一代入配列が Phi に
+  ならないので backing は mutable local の上書きで成長を吸収
+- 成長: `__grow(old, mincap)` ヘルパ。容量を `max(mincap, oldcap*2)` に
+  拡張し `array.copy` で旧要素をコピー (wasm-builder に array.copy 0x11 追加)
+- local 群を [scalar, len(i32), backing(ref)] の 3 群に
+- ArrayPush emit: 容量超過チェック → grow → `array.set` → len++
+- ArrayGet/Length は growable なら backing/len local 経由
+- escape 解析 + 再代入 (Phi) + growable への ArraySet (a[i]= 成長) は VM
+  フォールバック
+
+過程で見つけた修正:
+- DCE: ArrayPush / AllocGrowableArray / AllocArray を副作用ありとして
+  controlOps に追加 (使われない push が消されていた)
+- growable op の value/index 計算値を local 退避 (args[0] を emit しない
+  ため inline 値がスタック底に埋もれる順序バグ)
+
+効果: `[]` + push で fill→reduce する配列が JIT 化。VM の 44x / TW の
+176x (push+sum 200要素×2000回)。多数 grow (1000要素) も正しい。
+
 範囲外 (今回もやらない):
-- `[]` + `a[i]=` / `a.push()` の動的成長配列 (length+capacity の struct
-  ラッパ + realloc が要る = V8 の JSArray+backing store 相当、別フェーズ)
-- 配列を関数間で受け渡す local array (compileMulti で複数関数を一緒に
-  コンパイルする必要)
+- growable 配列への `a[i]=` 成長 (len の max 更新が要る、push のみ対応)
+- growable 配列の再代入 (a = a2)、関数間受け渡し
+- pop / splice / shift 等の他の Array メソッド
 
 設計メモ (V8 との対比): WasmGC `(array (mut T))` は固定長で、V8 の
 **backing store** プリミティブに相当。JS の growable な push/`[]`+grow を

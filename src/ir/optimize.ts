@@ -115,8 +115,8 @@ export function deadCodeElimination(func: IRFunction): boolean {
     }
   }
 
-  // use count == 0 の Op を除去 (制御フロー命令は除外)
-  const controlOps = new Set(["Return", "Branch", "Jump", "StoreGlobal", "ArraySet", "StoreUpvalue", "StoreProperty", "Call"]);
+  // use count == 0 の Op を除去 (制御フロー命令・副作用ある命令は除外)
+  const controlOps = new Set(["Return", "Branch", "Jump", "StoreGlobal", "ArraySet", "StoreUpvalue", "StoreProperty", "Call", "ArrayPush", "AllocGrowableArray", "AllocArray"]);
 
   for (const block of func.blocks) {
     const newOps: Op[] = [];

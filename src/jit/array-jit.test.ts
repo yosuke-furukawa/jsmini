@@ -134,6 +134,74 @@ describe("Phase 29: array param JIT (WasmGC array)", () => {
   });
 });
 
+describe("Phase 29: 動的成長配列 ([] + push)", () => {
+  function jitVal(src: string) {
+    const plain = vmEvaluate(src);
+    const r = vmEvaluate(src, { jit: true, jitThreshold: 3, useIR: true, traceTier: true }) as { value: unknown; tierLog?: string[] };
+    return { plain, value: r.value, jitted: (r.tierLog ?? []).some(l => /Wasm compiled/.test(l)) };
+  }
+
+  it("[] + push を loop で fill+sum して JIT 化", () => {
+    const src = `
+      function f(n) {
+        var a = [];
+        for (var i = 0; i < n; i = i + 1) { a.push(i * 2); }
+        var s = 0;
+        for (var j = 0; j < a.length; j = j + 1) { s = s + a[j]; }
+        return s;
+      }
+      var t = 0; for (var r = 0; r < 50; r = r + 1) { t = f(100); } t;
+    `;
+    const { plain, value, jitted } = jitVal(src);
+    assert.equal(value, plain);
+    assert.equal(value, 9900);
+    assert.ok(jitted, "growable push should JIT-compile");
+  });
+
+  it("初期容量を超える push (再確保コピー) が正しい", () => {
+    // 初期容量 4。1000 要素は何度も grow する。
+    const src = `
+      function f(n) { var a = []; for (var i = 0; i < n; i = i + 1) { a.push(i); } return a[n-1] + a[0] + a.length; }
+      var t = 0; for (var r = 0; r < 20; r = r + 1) { t = f(1000); } t;
+    `;
+    const { plain, value, jitted } = jitVal(src);
+    assert.equal(value, plain);
+    assert.equal(value, 999 + 0 + 1000);
+    assert.ok(jitted, "growable with many grows should JIT-compile");
+  });
+
+  it("f64 値の push", () => {
+    const src = `
+      function f(n) { var a = []; for (var i = 0; i < n; i = i + 1) { a.push(1.0/(i+1)); } var s = 0; for (var j = 0; j < a.length; j = j + 1) { s = s + a[j]; } return s; }
+      var t = 0; for (var r = 0; r < 50; r = r + 1) { t = f(50); } t;
+    `;
+    const { plain, value, jitted } = jitVal(src);
+    assert.equal(value, plain);
+    assert.ok(jitted, "f64 growable push should JIT-compile");
+  });
+
+  it("配列リテラル [1,2,3,4,5] も growable として動く", () => {
+    const src = `
+      function f() { var a = [1,2,3,4,5]; var s = 0; for (var j = 0; j < a.length; j = j + 1) { s = s + a[j]; } return s; }
+      var t = 0; for (var r = 0; r < 50; r = r + 1) { t = f(); } t;
+    `;
+    const { plain, value } = jitVal(src);
+    assert.equal(value, plain);
+    assert.equal(value, 15);
+  });
+
+  it("配列を Return すると VM フォールバック (escape)", () => {
+    const src = `
+      function f(n) { var a = []; for (var i = 0; i < n; i = i + 1) { a.push(i); } return a; }
+      f(5)[3];
+    `;
+    const plain = vmEvaluate(src);
+    const jit = vmEvaluate(src, { jit: true, jitThreshold: 2, useIR: true });
+    assert.equal(jit, plain);
+    assert.equal(jit, 3);
+  });
+});
+
 describe("Phase 29: 2ループ関数の SSA (param が phantom 値にならない)", () => {
   it("2ループで param を参照しても正しく JIT 化", () => {
     // SSA の Phi collapse バグで、2 つ目のループの param 参照が dangling
