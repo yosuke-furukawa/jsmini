@@ -230,6 +230,44 @@ describe("Phase 29: 動的成長配列 ([] + push)", () => {
   });
 });
 
+describe("Phase 29: 非数値要素の配列は VM フォールバック", () => {
+  // WasmGC array は i32/f64 のみ。object/string/undefined を要素にすると
+  // 数値配列として誤コンパイルされるので VM フォールバックすること。
+  function check(src: string) {
+    const plain = vmEvaluate(src);
+    const jit = vmEvaluate(src, { jit: true, jitThreshold: 3, useIR: true });
+    assert.deepEqual(jit, plain);
+  }
+
+  it("object を push して数値演算しても誤コンパイルしない", () => {
+    // a[0]+a[1] は VM では文字列連結。JIT が i32 加算してはいけない。
+    check(`function f(){var a=[];a.push({});a.push({});return a[0]+a[1];} var t="";for(var r=0;r<50;r++){t=f();} t;`);
+  });
+
+  it("object を要素にして .prop アクセス", () => {
+    check(`function f(n){var a=[];for(var i=0;i<n;i=i+1){a.push({x:i});}var s=0;for(var j=0;j<a.length;j=j+1){s=s+a[j].x;}return s;} var t=0;for(var r=0;r<50;r++){t=f(10);} t;`);
+  });
+
+  it("undefined 要素を読んでも誤らない (NaN になるべき)", () => {
+    check(`function f(){var a=[];a.push(1);a.push(undefined);return a[0]+a[1];} var t=0;for(var r=0;r<50;r++){t=f();} t;`);
+  });
+
+  it("string を push", () => {
+    check(`function f(n){var a=[];for(var i=0;i<n;i=i+1){a.push("x");}return a.length;} var t=0;for(var r=0;r<50;r++){t=f(5);} t;`);
+  });
+
+  it("array of arrays", () => {
+    check(`function f(){var a=[];a.push([1,2]);a.push([3,4]);return a[0][0]+a[1][1];} var t=0;for(var r=0;r<50;r++){t=f();} t;`);
+  });
+
+  it("数値配列は引き続き JIT 化される (回帰防止)", () => {
+    const src = `function f(n){var a=[];for(var i=0;i<n;i=i+1){a.push(i*2);}var s=0;for(var j=0;j<a.length;j=j+1){s=s+a[j];}return s;} var t=0;for(var r=0;r<50;r++){t=f(10);} t;`;
+    const r = vmEvaluate(src, { jit: true, jitThreshold: 3, useIR: true, traceTier: true }) as { value: unknown; tierLog?: string[] };
+    assert.equal(r.value, vmEvaluate(src));
+    assert.ok((r.tierLog ?? []).some(l => /Wasm compiled/.test(l)), "numeric array should still JIT");
+  });
+});
+
 describe("Phase 29: 2ループ関数の SSA (param が phantom 値にならない)", () => {
   it("2ループで param を参照しても正しく JIT 化", () => {
     // SSA の Phi collapse バグで、2 つ目のループの param 参照が dangling

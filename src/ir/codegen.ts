@@ -1257,6 +1257,45 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
           }
         }
       }
+      // 要素の型チェック: WasmGC array は i32/f64 のみ。配列に格納する値が
+      // object (Alloc — base address は i32 だが意味的には非数値) だと、
+      // 数値配列として誤コンパイルされる (a[0]+a[1] が文字列連結でなく
+      // アドレスの加算になる)。Alloc を格納する配列は VM フォールバック。
+      const opByIdForElem = new Map<number, Op>();
+      for (const block of irFunc.blocks) {
+        for (const phi of block.phis) opByIdForElem.set(phi.id, phi);
+        for (const op of block.ops) opByIdForElem.set(op.id, op);
+      }
+      // 数値を生む opcode のホワイトリスト (これ以外を配列に格納したら bail)。
+      // LoadGlobal("undefined") / Alloc(object) / LoadProperty 等は非数値。
+      const NUMERIC_OPCODES = new Set<string>([
+        "Param", "Add", "Sub", "Mul", "Div", "Mod", "Negate",
+        "BitAnd", "BitOr", "BitXor", "BitNot", "ShiftLeft", "ShiftRight",
+        "LessThan", "LessEqual", "GreaterThan", "GreaterEqual",
+        "Equal", "StrictEqual", "NotEqual", "StrictNotEqual", "Not",
+        "ArrayGet", "ArrayLength", "Call", "TypeGuard", "LoadUpvalue", "LoadThis",
+      ]);
+      const isNumericValue = (id: number | undefined): boolean => {
+        if (id === undefined) return false; // 引数欠落 (object リテラル等を落とした)
+        const o = opByIdForElem.get(id);
+        if (!o) return false;
+        if (o.opcode === "Const") return typeof o.value === "number" || typeof o.value === "boolean";
+        if (o.opcode === "Phi") return (o as PhiOp).inputs.every(([, vid]) => isNumericValue(vid));
+        return NUMERIC_OPCODES.has(o.opcode);
+      };
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          // ArrayPush(arr, value) の value、ArraySet(arr, idx, value) の value
+          const isPush = op.opcode === "ArrayPush";
+          const isSet = op.opcode === "ArraySet";
+          if (!isPush && !isSet) continue;
+          const valId = isPush ? op.args[1] : op.args[2];
+          if (!isNumericValue(valId)) {
+            if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: non-numeric value stored in array");
+            return null;
+          }
+        }
+      }
     }
 
     // upvalue の数を検出
