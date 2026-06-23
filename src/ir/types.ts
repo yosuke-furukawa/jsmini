@@ -51,6 +51,8 @@ export type IROpcode =
   | "ArrayGet"        // args[0] = array, args[1] = index → 要素値
   | "ArraySet"        // args[0] = array, args[1] = index, args[2] = value
   | "ArrayLength"     // args[0] = array → 長さ
+  | "AllocArray"      // args[0] = 長さ → 新規 WasmGC array (array.new_default)。
+                      //                  関数内で確保する local array (new Array(n))
 
   // グローバル変数
   | "LoadGlobal"      // グローバル変数の読み込み。globalName フィールドに変数名

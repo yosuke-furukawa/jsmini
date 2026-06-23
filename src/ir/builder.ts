@@ -424,6 +424,15 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           const ctorRef = stack.pop()!; // コンストラクタ参照
           const args: number[] = [];
           for (let j = 0; j < argc; j++) args.unshift(stack.pop()!);
+          // new Array(n) → AllocArray(n): 関数内で確保する固定長 WasmGC array。
+          // 1 引数 (長さ) の形のみ対応。それ以外は通常の Construct にフォールバック。
+          const ctorOpEarly = opById.get(ctorRef);
+          if (ctorOpEarly?.opcode === "LoadGlobal" && ctorOpEarly.globalName === "Array" && argc === 1) {
+            const allocArr = registerOp(createOp(irFunc, "AllocArray", [args[0]], "any"));
+            block.ops.push(allocArr);
+            stack.push(allocArr.id);
+            break;
+          }
           // Alloc: オブジェクト領域確保
           const alloc = registerOp(createOp(irFunc, "Alloc", [], "i32"));
           block.ops.push(alloc);

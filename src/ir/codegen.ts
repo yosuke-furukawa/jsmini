@@ -962,6 +962,13 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
         if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") {
           hasArrayOps = true;
         }
+        // AllocArray (new Array(n) の関数内確保) は ref 型 local の管理
+        // (cross-loop の配列 Phi を含む) が未実装なので、現状は VM フォールバック。
+        // ここで明示的に bail して壊れた Wasm を出さないことを保証する。
+        if (op.opcode === "AllocArray") {
+          if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: AllocArray (local array) not yet supported");
+          return null;
+        }
         if (op.opcode === "Const" && op.value !== undefined &&
             typeof op.value !== "number" && typeof op.value !== "boolean" &&
             op.value !== null) return null; // 非数値 Const (関数オブジェクト等)

@@ -142,12 +142,37 @@ VM はヒープ上の frames 配列なので同じ深さでも溢れない。
 
 教育的には A (deopt 設計の実例) が筋がいいが、実害は限定的。
 
-### Array hot loop の本丸 (#2: local array allocation)
+### Array hot loop の本丸 (#2: local array allocation) — IR 基盤のみ着手
 
 29-1 は「配列を **引数で** 受け取る関数」の JIT を直しただけ。関数内で
-`var a = []; a[i] = ...` と確保する local array を `array.new` で Wasm 化
-するのは未着手。spectral-norm は配列を引数渡しするので 29-1 で足りたが、
-より広い配列コードを JIT 化するには local array allocation が要る。
+`var a = new Array(n); a[i] = ...` と確保する local array を `array.new`
+で Wasm 化するのが本丸。spectral-norm は配列を引数渡しするので 29-1 で
+足りたが、より広い配列コード (画像処理・行列演算等の自己完結カーネル) を
+JIT 化するには local array allocation が要る。
+
+着手状況:
+- [x] IR builder: `new Array(n)` の `Construct(Array, n)` を `AllocArray(n)`
+      IR op に変換 (builder.ts)。`[]`/`[1,2,3]`/push は対象外
+- [x] IR types に `AllocArray` opcode 追加
+- [x] codegen に明示ガード: AllocArray を見たら VM フォールバック
+      (壊れた Wasm を絶対出さない)。array-jit.test.ts で結果が正しいこと確認
+- [ ] **codegen 本体 (未実装、本丸の難所)**: ref 型 local の管理。
+      - AllocArray 結果は `(ref $arr)` 型の local が要る (現状 local は全て
+        i32/f64 単一型)
+      - **cross-loop で配列を使うと配列参照がループヘッダで Phi になる →
+        その Phi local も ref 型** にする必要 (最小ケース
+        `var a=new Array(n); loop{a[i]=} loop{s+=a[j]}` でも発生)
+      - extraLocalGroups を [scalar 群, ref 群] の 2 群に
+      - escape 解析: 配列が Return/Call で関数外に漏れるならフォールバック
+      - 自己完結ケース (配列を作り使いスカラーに畳んで return) は境界変換
+        不要で一番きれい。まずそこから
+
+設計メモ (V8 との対比): WasmGC `(array (mut T))` は固定長で、V8 の
+**backing store** プリミティブに相当。JS の growable な push/`[]`+grow を
+真面目にやるなら `struct { length: i32, backing: (array (mut T)) }` +
+grow 時 realloc が正攻法 = V8 の JSArray + backing store の構造そのもの。
+elements-kind (SMI→double→tagged) の遷移も V8 と同型。今回の AllocArray は
+capacity==length の固定長 (= backing store 一個、grow 無し) の最小形。
 
 ## 技術メモ
 

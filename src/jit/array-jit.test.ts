@@ -76,4 +76,26 @@ describe("Phase 29: array param JIT (WasmGC array)", () => {
     const jit = vmEvaluate(src, { jit: true, jitThreshold: 5, useIR: true });
     assert.equal(jit, plain);
   });
+
+  it("関数内で確保する配列 (new Array(n)) は VM フォールバックで正しい結果を返す", () => {
+    // local array allocation の JIT は未実装 (ref 型 local 管理が要る)。
+    // AllocArray を見たら compileIRToWasm が bail して VM 実行になるが、
+    // 結果は正しくなければならない。
+    const src = `
+      function f(n) {
+        var a = new Array(n);
+        for (var i = 0; i < n; i = i + 1) { a[i] = i * 2; }
+        var s = 0;
+        for (var j = 0; j < n; j = j + 1) { s = s + a[j]; }
+        return s;
+      }
+      var t = 0;
+      for (var r = 0; r < 50; r = r + 1) { t = f(100); }
+      t;
+    `;
+    const plain = vmEvaluate(src);
+    const jit = vmEvaluate(src, { jit: true, jitThreshold: 5, useIR: true });
+    assert.equal(jit, plain);
+    assert.equal(jit, 9900); // sum(i*2, i=0..99) = 2 * 4950
+  });
 });
