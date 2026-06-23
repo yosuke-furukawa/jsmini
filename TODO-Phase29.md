@@ -124,23 +124,22 @@ Wasm 化** (ArrayGet/Set + length を Float64Array 風の WasmGC array に下ろ
 
 ## 残課題 (Phase 29 範囲外)
 
-### 深い再帰の Wasm スタック溢れ (診断のみ、未修正)
+### 深い再帰の Wasm スタック溢れ — 修正済み (29-7)
 
 自己再帰関数が Wasm 内で `call self` 直接再帰にコンパイルされ、深さ
 ~1〜2万で Wasm 実行スタックが溢れる (`RangeError: Maximum call stack`)。
 VM はヒープ上の frames 配列なので同じ深さでも溢れない。
 
-- fib は分岐再帰で最大深さ = n なので fib(20000) 級でのみ発生
-- `sum(20000)` (線形深い再帰) で再現
-- 「ことがある」= 浅い再帰では起きず、JIT 発動後かつ深い入力でのみ
+- [x] 29-7a: `executeWasm` / `executeWithArrayArgs` の `fn(...)` 呼び出しを
+      try/catch し、`RangeError` を捕まえたら `deopt` + VM 再実行 (jit.ts)。
+      スタック溢れ時点で副作用 (配列書き戻し等) は未適用なので再実行は安全
+- [x] 29-7b: jit.test.ts に sum(50000) の回帰テスト追加
+- 効果: sum(100000) まで JIT 有効でも正しい結果 (以前は 20000 で
+  `Maximum call stack`)。fib(25/30/35) 等の浅い再帰は従来通り Wasm 実行
 
-対策案 (未着手):
-- A. Wasm 自己再帰に深さガードを持たせ、一定深さで deopt して VM に戻す (中)
-- B. ループ無しの純再帰は JIT しない (小・退化)
-- C. Wasm→VM 境界で深さ監視 (大)
-- D. 現状維持 + ドキュメント化 (最小)
-
-教育的には A (deopt 設計の実例) が筋がいいが、実害は限定的。
+採用したのは当初案 C (境界で監視) の軽量版 = 「Wasm が溢れたら catch して
+deopt」。案 A (Wasm 内深さガード) より単純で、深い再帰だけ自動的に VM に
+落ちる。一度溢れた関数は deopt されるので以降は最初から VM。
 
 ### Array hot loop の本丸 (#2: local array allocation) — IR 基盤のみ着手
 

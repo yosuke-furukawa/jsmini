@@ -350,7 +350,20 @@ export class JitManager {
     }
 
     this.logTier(func, "Wasm", callCount);
-    return { result: fn(...wasmArgs) };
+    try {
+      return { result: fn(...wasmArgs) };
+    } catch (e) {
+      // Wasm 自己再帰が深くなると実行スタックが溢れる
+      // (RangeError: Maximum call stack size exceeded)。VM はヒープ上の
+      // frames 配列なので同じ深さでも溢れない。deopt して VM で再実行する。
+      // スタック溢れ時点で副作用 (配列書き戻し等) は未適用なので再実行は安全。
+      if (e instanceof RangeError) {
+        this.deoptimize(func, args);
+        this.logTier(func, "Bytecode VM (after deopt: wasm stack overflow)", callCount);
+        return null;
+      }
+      throw e;
+    }
   }
 
   private executeWithArrayArgs(
@@ -396,7 +409,19 @@ export class JitManager {
     }
 
     this.logTier(func, "Wasm (array)", callCount);
-    const result = fn(...(wasmArgs as number[]));
+    let result: number;
+    try {
+      result = fn(...(wasmArgs as number[]));
+    } catch (e) {
+      // Wasm 自己再帰のスタック溢れ → deopt して VM 再実行。
+      // 書き戻し前なので jsArr は未変更、VM 再実行は安全。
+      if (e instanceof RangeError) {
+        this.deoptimize(func, args);
+        this.logTier(func, "Bytecode VM (after deopt: wasm stack overflow)", callCount);
+        return null;
+      }
+      throw e;
+    }
 
     // WasmGC 配列から JS 配列に書き戻し
     for (const { jsArr, gcArr, length } of arrayRefs) {
