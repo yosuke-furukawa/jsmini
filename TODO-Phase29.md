@@ -149,22 +149,52 @@ deopt」。案 A (Wasm 内深さガード) より単純で、深い再帰だけ�
 足りたが、より広い配列コード (画像処理・行列演算等の自己完結カーネル) を
 JIT 化するには local array allocation が要る。
 
-着手状況:
+着手状況 — **完了 (29-8)**:
 - [x] IR builder: `new Array(n)` の `Construct(Array, n)` を `AllocArray(n)`
       IR op に変換 (builder.ts)。`[]`/`[1,2,3]`/push は対象外
 - [x] IR types に `AllocArray` opcode 追加
-- [x] codegen に明示ガード: AllocArray を見たら VM フォールバック
-      (壊れた Wasm を絶対出さない)。array-jit.test.ts で結果が正しいこと確認
-- [ ] **codegen 本体 (未実装、本丸の難所)**: ref 型 local の管理。
-      - AllocArray 結果は `(ref $arr)` 型の local が要る (現状 local は全て
-        i32/f64 単一型)
-      - **cross-loop で配列を使うと配列参照がループヘッダで Phi になる →
-        その Phi local も ref 型** にする必要 (最小ケース
-        `var a=new Array(n); loop{a[i]=} loop{s+=a[j]}` でも発生)
-      - extraLocalGroups を [scalar 群, ref 群] の 2 群に
-      - escape 解析: 配列が Return/Call で関数外に漏れるならフォールバック
-      - 自己完結ケース (配列を作り使いスカラーに畳んで return) は境界変換
-        不要で一番きれい。まずそこから
+- [x] codegen 本体: ref 型 local の管理
+      - AllocArray 結果と「配列を運ぶ Phi」を `arrayRefValues` として集め、
+        scalar local の後ろに ref 型 local を別グループ (extraLocalGroups)
+        で割り当て
+      - AllocArray → `array.new_default $arr` + ref local に格納
+      - ArrayGet/Set は emitLoadValue(args[0]) で ref local を local.get
+      - escape 解析: 配列が ArrayGet/Set/Length の args[0] か Phi 入力以外
+        (Return/Call 等) で使われたら VM フォールバック
+- [x] CSE: AllocArray / Alloc を CSE 対象外に (2 つの new Array(n) は別
+      オブジェクトなので aliasing 防止)
+- [x] 過程で見つけた pre-existing バグ 3 件も修正 (下記 29-9〜29-11)
+
+効果: `new Array(n)` で fill→reduce する数値カーネルが JIT 化。
+V8-JIT 有効で VM の 59x / TW の 296x (fill+sum 200要素 × 5000回)。
+spectral-norm の spectralnorm 本体 (配列確保側) も JIT 対象に。
+
+### 29-9: maybeStoreLocal の local.tee → local.set (pre-existing)
+
+local を持つ値の消費側は必ず local.get するので、producer の local.tee は
+冗長で値をスタックに残す (stray)。return 前なら frame 巻き取りで無害だが、
+**ループ back-edge ではスタック不一致**で死ぬ。two-loop 関数が JIT 失敗
+していた一因。local.set に変更。
+
+### 29-10: SSA Phi collapse のタイミングバグ (pre-existing)
+
+builder のパス3が「phi の inputs 充填→即 collapse」を phi 毎にやるため、
+先に collapse した phi の置換が、まだ inputs 未充填の後続 phi に届かず
+stale な値を拾って **dangling 参照** になっていた。例: 2 つ目のループの
+param 参照が消えた phi (v1) を指し、`f64.lt` のオペランドが欠ける。
+→ パス3a (全 inputs 充填) と 3b (fixpoint collapse) に分離。
+副次効果: LICM の不変式が 1 パスで entry まで巻き上がるよう改善。
+
+### 29-11: CSE が AllocArray をマージ (本タスクで導入した AllocArray の穴)
+
+2 つの `new Array(n)` が同じ `AllocArray(v0)` として CSE され aliasing。
+NOT_CSE_TARGET に AllocArray / Alloc を追加。
+
+範囲外 (今回もやらない):
+- `[]` + `a[i]=` / `a.push()` の動的成長配列 (length+capacity の struct
+  ラッパ + realloc が要る = V8 の JSArray+backing store 相当、別フェーズ)
+- 配列を関数間で受け渡す local array (compileMulti で複数関数を一緒に
+  コンパイルする必要)
 
 設計メモ (V8 との対比): WasmGC `(array (mut T))` は固定長で、V8 の
 **backing store** プリミティブに相当。JS の growable な push/`[]`+grow を

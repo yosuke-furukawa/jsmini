@@ -77,10 +77,9 @@ describe("Phase 29: array param JIT (WasmGC array)", () => {
     assert.equal(jit, plain);
   });
 
-  it("関数内で確保する配列 (new Array(n)) は VM フォールバックで正しい結果を返す", () => {
-    // local array allocation の JIT は未実装 (ref 型 local 管理が要る)。
-    // AllocArray を見たら compileIRToWasm が bail して VM 実行になるが、
-    // 結果は正しくなければならない。
+  it("関数内で確保する配列 (new Array(n)) を fill+sum で JIT 化", () => {
+    // local array allocation: new Array(n) → array.new_default、
+    // cross-loop の配列参照は ref 型 local + ref Phi で運ぶ。
     const src = `
       function f(n) {
         var a = new Array(n);
@@ -94,8 +93,62 @@ describe("Phase 29: array param JIT (WasmGC array)", () => {
       t;
     `;
     const plain = vmEvaluate(src);
+    const r = vmEvaluate(src, { jit: true, jitThreshold: 5, useIR: true, traceTier: true }) as { value: unknown; tierLog?: string[] };
+    assert.equal(r.value, plain);
+    assert.equal(r.value, 9900); // sum(i*2, i=0..99) = 2 * 4950
+    assert.ok((r.tierLog ?? []).some(l => /Wasm compiled/.test(l)), "should JIT-compile to Wasm");
+  });
+
+  it("複数の local array (a, b) が aliasing しない", () => {
+    // 2 つの new Array(n) は別オブジェクト。CSE が AllocArray をマージ
+    // すると aliasing して結果が壊れる (回帰防止)。
+    const src = `
+      function f(n) {
+        var a = new Array(n); var b = new Array(n);
+        for (var i = 0; i < n; i = i + 1) { a[i] = i; b[i] = 2; }
+        var s = 0;
+        for (var j = 0; j < n; j = j + 1) { s = s + a[j] * b[j]; }
+        return s;
+      }
+      var t = 0;
+      for (var r = 0; r < 50; r = r + 1) { t = f(50); }
+      t;
+    `;
+    const plain = vmEvaluate(src);
     const jit = vmEvaluate(src, { jit: true, jitThreshold: 5, useIR: true });
     assert.equal(jit, plain);
-    assert.equal(jit, 9900); // sum(i*2, i=0..99) = 2 * 4950
+    assert.equal(jit, 2450); // sum(i*2, i=0..49) = 2 * 1225
+  });
+
+  it("配列を Return すると VM フォールバック (escape)", () => {
+    // 配列が関数外に漏れる (Return) と WasmGC ref を host に返せないので
+    // VM フォールバック。結果は正しい。
+    const src = `
+      function f(n) { var a = new Array(n); for (var i = 0; i < n; i = i + 1) { a[i] = i; } return a; }
+      var arr = f(5); arr[0] + arr[4];
+    `;
+    const plain = vmEvaluate(src);
+    const jit = vmEvaluate(src, { jit: true, jitThreshold: 2, useIR: true });
+    assert.equal(jit, plain);
+    assert.equal(jit, 4);
+  });
+});
+
+describe("Phase 29: 2ループ関数の SSA (param が phantom 値にならない)", () => {
+  it("2ループで param を参照しても正しく JIT 化", () => {
+    // SSA の Phi collapse バグで、2 つ目のループの param 参照が dangling
+    // 値 (v1 等) になり f64.lt のオペランドが欠けてコンパイル失敗していた。
+    const src = `
+      function f(n) {
+        var x = 0; for (var i = 0; i < n; i = i + 1) { x = x + 1.0/(i+1); }
+        var s = 0; for (var j = 0; j < n; j = j + 1) { s = s + 1.0/(j+1); }
+        return s;
+      }
+      var t = 0; for (var r = 0; r < 50; r = r + 1) { t = f(20); } t;
+    `;
+    const plain = vmEvaluate(src);
+    const r = vmEvaluate(src, { jit: true, jitThreshold: 5, useIR: true, traceTier: true }) as { value: unknown; tierLog?: string[] };
+    assert.equal(r.value, plain);
+    assert.ok((r.tierLog ?? []).some(l => /Wasm compiled/.test(l)), "two-loop f64 should JIT-compile");
   });
 });

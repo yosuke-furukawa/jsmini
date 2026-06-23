@@ -52,7 +52,7 @@ function classifyMathCall(name: string, argc: number): "native_unary" | "native_
   return "unsupported";
 }
 
-export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0): { body: number[]; extraLocals: number; wat: string } {
+export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set()): { body: number[]; extraLocals: number; refLocals: number; wat: string } {
   const body: number[] = [];
   const watLines: string[] = [];
   let watIndent = 1;
@@ -120,8 +120,10 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   }
 
   // Phi ノード → Wasm local に割り当て
+  // (配列 ref を運ぶ Phi は ref 型 local が要るので後でまとめて割り当てる)
   for (const block of irFunc.blocks) {
     for (const phi of block.phis) {
+      if (arrayRefValues.has(phi.id)) continue;
       opToLocal.set(phi.id, nextLocal++);
     }
   }
@@ -133,6 +135,9 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
       if ((op.opcode === "LoadGlobal" || op.opcode === "StoreGlobal") && op.globalName) {
         // 自己再帰の callee 参照は local 不要 (call 0 で直接呼ぶ)
         if (op.globalName === irFunc.name) continue;
+        // "Math" / "Array" は dispatch / AllocArray で消費される参照なので
+        // 値としての local は不要 (codegen 側でも emit skip)
+        if (op.globalName === "Math" || op.globalName === "Array") continue;
         if (!globalToLocal.has(op.globalName)) {
           globalToLocal.set(op.globalName, nextLocal++);
         }
@@ -160,6 +165,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   const needsLocal = new Set<number>();
   for (const [id, count] of useCount) {
     if (opToLocal.has(id)) continue;
+    if (arrayRefValues.has(id)) continue; // 配列 ref は ref 型 local で後割り当て
     const defBlock = opDefBlock.get(id);
     const useBlocks = opUseBlocks.get(id);
     // 複数回使用 or 別ブロックで使用 → local に格納
@@ -199,6 +205,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         let sawLeafBefore = false;
         for (let i = firstOperand; i < op.args.length; i++) {
           const argId = op.args[i];
+          if (arrayRefValues.has(argId)) continue; // 配列 ref は ref 型 local で後割り当て
           const rematerializable = isRematerializable(argId);
           if (!rematerializable && !opToLocal.has(argId)) {
             // (a) この計算値の定義が直前の op か?
@@ -220,6 +227,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   for (const block of irFunc.blocks) {
     for (const phi of block.phis) {
       for (const [, valueId] of phi.inputs) {
+        if (arrayRefValues.has(valueId)) continue; // 配列 ref は ref 型 local で後割り当て
         if (!opToLocal.has(valueId)) {
           needsLocal.add(valueId);
           opToLocal.set(valueId, nextLocal++);
@@ -229,6 +237,19 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   }
 
   const extraLocals = nextLocal - irFunc.paramCount;
+
+  // 配列 ref を運ぶ値 (AllocArray 結果 + 配列 Phi) を ref 型 local に割り当てる。
+  // scalar local の後ろ (= scalar group の後の ref group) に並べる。
+  const scalarLocalEnd = nextLocal;
+  for (const block of irFunc.blocks) {
+    for (const phi of block.phis) {
+      if (arrayRefValues.has(phi.id) && !opToLocal.has(phi.id)) opToLocal.set(phi.id, nextLocal++);
+    }
+    for (const op of block.ops) {
+      if (op.opcode === "AllocArray" && !opToLocal.has(op.id)) opToLocal.set(op.id, nextLocal++);
+    }
+  }
+  const refLocals = nextLocal - scalarLocalEnd;
 
   // Op を id で引けるテーブル
   const opById = new Map<number, Op>();
@@ -415,7 +436,8 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     : "";
   const fullWat = [header, localDecls, ";; phi init", ...watLines, ")"].filter(Boolean).join("\n");
 
-  return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount, wat: fullWat };
+  // extraLocals は scalar group の数 (ref local は別グループ)。
+  return { body: [...initCode, ...body], extraLocals, refLocals, wat: fullWat };
 }
 
 // ========== Op → Wasm 命令 ==========
@@ -473,8 +495,8 @@ function emitOp(
     case "LoadGlobal": {
       // 自己再帰の callee 参照は skip (Call で直接 call 0 する)
       if (op.globalName === irFunc.name) break;
-      // "Math" の参照は Math.X dispatch で消費されるので emit 不要
-      if (op.globalName === "Math") break;
+      // "Math" / "Array" の参照は dispatch / AllocArray で消費されるので emit 不要
+      if (op.globalName === "Math" || op.globalName === "Array") break;
       const gLocal = globalToLocal.get(op.globalName!);
       if (gLocal !== undefined) {
         body.push(WASM_OP.local_get, gLocal);
@@ -511,6 +533,19 @@ function emitOp(
         if (forceF64) body.push(0xb7); // f64.convert_i32_s
       }
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      break;
+    }
+    case "AllocArray": {
+      // new Array(n) → array.new_default $arr (要素は 0 / 0.0 で初期化)。
+      // 結果の ref は専用 ref 型 local に格納し、以降の ArrayGet/Set は
+      // emitLoadValue(args[0]) で local.get する。
+      if (arrayTypeIdx >= 0) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // length
+        if (forceF64) body.push(0xab); // i32.trunc_f64_s (length は i32)
+        body.push(0xfb, WASM_GC_OP.array_new_default, arrayTypeIdx);
+        const refLocal = opToLocal.get(op.id);
+        if (refLocal !== undefined) body.push(WASM_OP.local_set, refLocal);
+      }
       break;
     }
 
@@ -837,11 +872,15 @@ function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, n
   body.push(WASM_OP.i32_const, 0);
 }
 
-// 複数回使われる値を local に保存
+// local を持つ値を local に保存。
+// 消費側は emitLoadValue/emitValueOrConst で必ず local.get するので、ここは
+// local.set でスタックから降ろす (local.tee で残すと誰も消費せず stray になり、
+// ループ back-edge でスタック不一致を起こす。return 前なら frame 巻き取りで
+// 無害だが two-loop 等のループ内で詰む)。
 function maybeStoreLocal(opId: number, body: number[], opToLocal: Map<number, number>, needsLocal: Set<number>): void {
   if (needsLocal.has(opId)) {
     const local = opToLocal.get(opId)!;
-    body.push(WASM_OP.local_tee, local);
+    body.push(WASM_OP.local_set, local);
   }
 }
 
@@ -959,15 +998,8 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
           }
         }
         // 配列 Op を検出 (WasmGC array 構築が必要)
-        if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") {
+        if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "AllocArray") {
           hasArrayOps = true;
-        }
-        // AllocArray (new Array(n) の関数内確保) は ref 型 local の管理
-        // (cross-loop の配列 Phi を含む) が未実装なので、現状は VM フォールバック。
-        // ここで明示的に bail して壊れた Wasm を出さないことを保証する。
-        if (op.opcode === "AllocArray") {
-          if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: AllocArray (local array) not yet supported");
-          return null;
         }
         if (op.opcode === "Const" && op.value !== undefined &&
             typeof op.value !== "number" && typeof op.value !== "boolean" &&
@@ -1017,6 +1049,51 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
                   arrayParams.add(o.index);
                 }
               }
+            }
+          }
+        }
+      }
+    }
+
+    // 配列 ref を運ぶ値の集合 (AllocArray 結果 + 配列オペランド + それらを
+    // 合流する Phi)。ref 型 local の割り当てに使う。
+    const arrayRefValues = new Set<number>();
+    if (hasArrayOps) {
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if (op.opcode === "AllocArray") arrayRefValues.add(op.id);
+          if ((op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") && op.args[0] !== undefined) {
+            arrayRefValues.add(op.args[0]);
+          }
+        }
+      }
+      // Phi 経由で伝播 (配列を運ぶ Phi の入力も配列 ref)
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const block of irFunc.blocks) {
+          for (const phi of block.phis) {
+            if (arrayRefValues.has(phi.id)) {
+              for (const [, vid] of phi.inputs) {
+                if (!arrayRefValues.has(vid)) { arrayRefValues.add(vid); changed = true; }
+              }
+            }
+          }
+        }
+      }
+      // escape 解析: 配列 ref が ArrayGet/Set/Length の args[0] か Phi 入力
+      // 以外で使われたら (Return / Call 引数 / ArraySet の value 等)、host
+      // 境界を越えたり Wasm 化できないので VM フォールバック。
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          for (let i = 0; i < op.args.length; i++) {
+            const argId = op.args[i];
+            if (!arrayRefValues.has(argId)) continue;
+            const isArrayOperand =
+              (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") && i === 0;
+            if (!isArrayOperand) {
+              if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: array ref escapes via", op.opcode, "arg", i);
+              return null;
             }
           }
         }
@@ -1088,7 +1165,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     }
     const results = [wasmType];
 
-    const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount);
+    const { body: bodyCode, extraLocals, refLocals } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues);
 
     // OSR モード: extra locals もパラメータに含める (VM から全 locals を受け取る)
     if (osrLocalCount !== undefined && osrLocalCount > irFunc.paramCount) {
@@ -1103,9 +1180,14 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
     // OSR: extra locals をパラメータで渡すので Wasm locals を減らす
     const wasmExtraLocals = (osrLocalCount !== undefined) ? Math.max(0, extraLocals - (osrLocalCount - irFunc.paramCount)) : extraLocals;
-    const extraLocalGroups = wasmExtraLocals > 0 ? [{ count: wasmExtraLocals, type: localType }] : undefined;
+    // local 宣言: [scalar group, ref group (AllocArray/配列 Phi 用)]。
+    // ref group は scalar の後ろに置く (opToLocal の index 割り当てと一致)。
+    const groups: LocalGroup[] = [];
+    if (wasmExtraLocals > 0) groups.push({ count: wasmExtraLocals, type: localType });
+    if (refLocals > 0 && arrayTypeIdx >= 0) groups.push({ count: refLocals, type: refType(arrayTypeIdx) });
+    const extraLocalGroups = groups.length > 0 ? groups : undefined;
     builder.addFunction(irFunc.name, params, results, bodyCode,
-      wasmExtraLocals > 0 ? wasmExtraLocals : 0,
+      wasmExtraLocals + refLocals > 0 ? wasmExtraLocals + refLocals : 0,
       totalParamCount, 1, extraLocalGroups);
     // WasmGC 配列ヘルパー関数
     if (hasArrayOps && arrayTypeIdx >= 0) {

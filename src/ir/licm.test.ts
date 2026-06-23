@@ -126,20 +126,16 @@ describe("LICM", () => {
     const changed = licm(ir);
     assert.ok(changed, "LICM should hoist from nested loops");
 
-    // Mul は内側ループから外側ループの本体 (B2) に移動
-    // (x と 2 はループ外定義なのでループ不変)
-    const b2Opcodes = blockOpcodes(ir, 2);
-    assert.ok(b2Opcodes.includes("Mul"), "Mul should be hoisted out of inner loop");
-
-    // 2回目の LICM で外側ループからも巻き上げ
-    const changed2 = licm(ir);
-    if (changed2) {
-      // Mul が B0 まで到達する可能性
-      const b0Opcodes = blockOpcodes(ir, 0);
-      if (b0Opcodes.includes("Mul")) {
-        assert.ok(true, "Mul hoisted to entry block");
-      }
-    }
+    // x * 2 は両ループに対して不変。SSA の Phi collapse 改善後は、x が
+    // 完全にループ不変と認識されるため 1 パスで entry (B0) まで巻き上がる。
+    // (内側/外側どちらのループ本体にも残っていないことを確認)
+    const innerBody = blockOpcodes(ir, 4); // 内側ループ本体
+    const outerBody = blockOpcodes(ir, 2);
+    assert.ok(!innerBody.includes("Mul") && !outerBody.includes("Mul"),
+      "Mul should be hoisted out of both loop bodies");
+    // entry まで到達している
+    const b0Opcodes = blockOpcodes(ir, 0);
+    assert.ok(b0Opcodes.includes("Mul"), "Mul should reach the entry block");
   });
 
   it("does NOT hoist LoadGlobal when the loop stores the same global", () => {
