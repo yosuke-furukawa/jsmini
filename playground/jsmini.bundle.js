@@ -9994,6 +9994,7 @@ var jsmini = (() => {
 
   // src/ir/codegen.ts
   var WASM_VOID = 64;
+  var DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
   var MATH_NATIVE_UNARY = {
     "Math.sqrt": WASM_OP.f64_sqrt,
     "Math.abs": WASM_OP.f64_abs,
@@ -10914,12 +10915,12 @@ var jsmini = (() => {
               const argc = op.args.length - 1;
               const cls = classifyMathCall(op.calleeName, argc);
               if (cls === "unsupported") {
-                if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: unsupported Math call", op.calleeName, "argc=", argc);
+                if (DEBUG_WASM) console.error("[compileIRToWasm] reject: unsupported Math call", op.calleeName, "argc=", argc);
                 return null;
               }
               if (cls === "host") mathHostImports.add(op.calleeName);
             } else {
-              if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: unknown call", op.calleeName, "args=", op.args.length);
+              if (DEBUG_WASM) console.error("[compileIRToWasm] reject: unknown call", op.calleeName, "args=", op.args.length);
               return null;
             }
           }
@@ -11002,7 +11003,7 @@ var jsmini = (() => {
         for (const block of irFunc.blocks) {
           for (const phi of block.phis) {
             if (growableArrayValues.has(phi.id) && phi.inputs.length > 0) {
-              if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: growable array carried by phi (reassigned)");
+              if (DEBUG_WASM) console.error("[compileIRToWasm] reject: growable array carried by phi (reassigned)");
               return null;
             }
           }
@@ -11014,9 +11015,64 @@ var jsmini = (() => {
               if (!arrayRefValues.has(argId)) continue;
               const isArrayOperand = (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "ArrayPush") && i === 0;
               if (!isArrayOperand) {
-                if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: array ref escapes via", op.opcode, "arg", i);
+                if (DEBUG_WASM) console.error("[compileIRToWasm] reject: array ref escapes via", op.opcode, "arg", i);
                 return null;
               }
+            }
+          }
+        }
+        const opByIdForElem = /* @__PURE__ */ new Map();
+        for (const block of irFunc.blocks) {
+          for (const phi of block.phis) opByIdForElem.set(phi.id, phi);
+          for (const op of block.ops) opByIdForElem.set(op.id, op);
+        }
+        const NUMERIC_OPCODES = /* @__PURE__ */ new Set([
+          "Param",
+          "Add",
+          "Sub",
+          "Mul",
+          "Div",
+          "Mod",
+          "Negate",
+          "BitAnd",
+          "BitOr",
+          "BitXor",
+          "BitNot",
+          "ShiftLeft",
+          "ShiftRight",
+          "LessThan",
+          "LessEqual",
+          "GreaterThan",
+          "GreaterEqual",
+          "Equal",
+          "StrictEqual",
+          "NotEqual",
+          "StrictNotEqual",
+          "Not",
+          "ArrayGet",
+          "ArrayLength",
+          "Call",
+          "TypeGuard",
+          "LoadUpvalue",
+          "LoadThis"
+        ]);
+        const isNumericValue = (id2) => {
+          if (id2 === void 0) return false;
+          const o = opByIdForElem.get(id2);
+          if (!o) return false;
+          if (o.opcode === "Const") return typeof o.value === "number" || typeof o.value === "boolean";
+          if (o.opcode === "Phi") return o.inputs.every(([, vid]) => isNumericValue(vid));
+          return NUMERIC_OPCODES.has(o.opcode);
+        };
+        for (const block of irFunc.blocks) {
+          for (const op of block.ops) {
+            const isPush = op.opcode === "ArrayPush";
+            const isSet = op.opcode === "ArraySet";
+            if (!isPush && !isSet) continue;
+            const valId = isPush ? op.args[1] : op.args[2];
+            if (!isNumericValue(valId)) {
+              if (DEBUG_WASM) console.error("[compileIRToWasm] reject: non-numeric value stored in array");
+              return null;
             }
           }
         }
@@ -11237,12 +11293,13 @@ var jsmini = (() => {
         jspiWrapped
       };
     } catch (e) {
-      if (typeof process !== "undefined" && process.env?.DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e, e.stack);
+      if (DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e, e.stack);
       return null;
     }
   }
 
   // src/jit/jit.ts
+  var DEBUG_WASM2 = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
   var JitManager = class {
     constructor(feedback, options) {
       __publicField(this, "feedback");
@@ -11341,7 +11398,7 @@ var jsmini = (() => {
         });
         const result = compileIRToWasm(ir);
         if (!result) {
-          if (process.env?.DEBUG_WASM) console.error("[compileViaIR] compileIRToWasm returned null for", ir.name);
+          if (DEBUG_WASM2) console.error("[compileViaIR] compileIRToWasm returned null for", ir.name);
           return null;
         }
         const wasmFn = result.instance.exports[ir.name];
@@ -11354,7 +11411,7 @@ var jsmini = (() => {
         if (result.jspiWrapped) cached.jspiWrapped = result.jspiWrapped;
         return cached;
       } catch (e) {
-        if (process.env?.DEBUG_WASM) console.error("[compileViaIR] threw", e.message || e, e.stack);
+        if (DEBUG_WASM2) console.error("[compileViaIR] threw", e.message || e, e.stack);
         return null;
       }
     }

@@ -9,6 +9,9 @@ import { buildIR } from "../ir/builder.js";
 import { optimize, type InlineOptions } from "../ir/optimize.js";
 import { compileIRToWasm } from "../ir/codegen.js";
 
+// ブラウザ (playground) には process が無いので安全にガード
+const DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
+
 export type JitOptions = {
   threshold: number;
   useIR?: boolean;
@@ -150,7 +153,7 @@ export class JitManager {
         buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs },
       });
       const result = compileIRToWasm(ir);
-      if (!result) { if (process.env?.DEBUG_WASM) console.error("[compileViaIR] compileIRToWasm returned null for", ir.name); return null; }
+      if (!result) { if (DEBUG_WASM) console.error("[compileViaIR] compileIRToWasm returned null for", ir.name); return null; }
       const wasmFn = (result.instance.exports as any)[ir.name] as (...args: number[]) => number;
       if (!wasmFn) return null;
 
@@ -164,7 +167,7 @@ export class JitManager {
       if (result.jspiWrapped) cached.jspiWrapped = result.jspiWrapped;
       return cached;
     } catch (e: any) {
-      if (process.env?.DEBUG_WASM) console.error("[compileViaIR] threw", e.message || e, e.stack);
+      if (DEBUG_WASM) console.error("[compileViaIR] threw", e.message || e, e.stack);
       return null;
     }
   }

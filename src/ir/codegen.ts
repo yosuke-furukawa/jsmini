@@ -8,6 +8,8 @@ import { isPhi } from "./types.js";
 import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, f64ToBytes, type LocalGroup, WASM_GC_OP, refType } from "../jit/wasm-builder.js";
 
 const WASM_VOID = 0x40; // void block type
+// ブラウザ (playground) には process が無いので安全にガード
+const DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
 import { analyzeCFG, type CFGAnalysis, type LoopInfo } from "./loop-analysis.js";
 import { functionNeedsF64 } from "./range.js";
 
@@ -1131,13 +1133,13 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
             const argc = op.args.length - 1;
             const cls = classifyMathCall(op.calleeName, argc);
             if (cls === "unsupported") {
-              if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: unsupported Math call", op.calleeName, "argc=", argc);
+              if (DEBUG_WASM) console.error("[compileIRToWasm] reject: unsupported Math call", op.calleeName, "argc=", argc);
               return null;
             }
             if (cls === "host") mathHostImports.add(op.calleeName);
             // native_unary / native_binary は import 不要
           } else {
-            if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: unknown call", op.calleeName, "args=", op.args.length);
+            if (DEBUG_WASM) console.error("[compileIRToWasm] reject: unknown call", op.calleeName, "args=", op.args.length);
             return null; // 他の関数 or 自己再帰+配列 → 未対応
           }
         }
@@ -1235,7 +1237,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
       for (const block of irFunc.blocks) {
         for (const phi of block.phis) {
           if (growableArrayValues.has(phi.id) && phi.inputs.length > 0) {
-            if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: growable array carried by phi (reassigned)");
+            if (DEBUG_WASM) console.error("[compileIRToWasm] reject: growable array carried by phi (reassigned)");
             return null;
           }
         }
@@ -1251,7 +1253,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
             const isArrayOperand =
               (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "ArrayPush") && i === 0;
             if (!isArrayOperand) {
-              if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: array ref escapes via", op.opcode, "arg", i);
+              if (DEBUG_WASM) console.error("[compileIRToWasm] reject: array ref escapes via", op.opcode, "arg", i);
               return null;
             }
           }
@@ -1291,7 +1293,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
           if (!isPush && !isSet) continue;
           const valId = isPush ? op.args[1] : op.args[2];
           if (!isNumericValue(valId)) {
-            if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: non-numeric value stored in array");
+            if (DEBUG_WASM) console.error("[compileIRToWasm] reject: non-numeric value stored in array");
             return null;
           }
         }
@@ -1493,7 +1495,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     };
   } catch (e: any) {
     // Wasm コンパイルエラー → null (フォールバック)
-    if (typeof process !== "undefined" && process.env?.DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e, e.stack);
+    if (DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e, e.stack);
     return null;
   }
 }
