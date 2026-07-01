@@ -88,9 +88,9 @@ Wasm 化** (ArrayGet/Set + length を Float64Array 風の WasmGC array に下ろ
 - [x] 29-6a: SunSpider math/regexp/string 系 6 本が TW/VM/JIT 全モード完走
       確認 (cordic / spectral-norm / partial-sums / regexp-dna /
       tagcloud / validate-input)
-- [x] 29-6b: 全 917 テストパス確認
-- [ ] 29-6c: LEARN-Phase29.md (任意 — TODO に詳細あり)
-- [ ] 29-6d: PR 作成・レビュー
+- [x] 29-6b: 全 935 テストパス確認 (最終)
+- [x] 29-6c: LEARN-Phase29.md
+- [x] 29-6d: PR 作成
 
 ## 発見したバグ一覧 (6 個)
 
