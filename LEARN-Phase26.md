@@ -142,7 +142,7 @@ export function functionNeedsF64(irFunc: IRFunction): boolean {
 | ベンチ | 状態 | ブロック要因 |
 |---|---|---|
 | math-cordic | ✅ 完動 | (整数 >> ベース、Math 呼び出し無し) |
-| math-spectral-norm | TW のみ | 配列内 f64 計算で VM/JIT の結果が違う |
+| math-spectral-norm | TW/VM/JIT 完動 (Phase 29 で修正) | 当初「配列 f64 バグ」と推測したが実体は prefix++ のスタックリーク + JIT 除算の i32 化 + オペランド順反転だった |
 | math-partial-sums | VM のみ | TW は chain-assign sloppy global 未対応 |
 | date-format-tofte | 全 NG | chain-assign 未対応 |
 | date-format-xparb | 全 NG | regex リテラル `/.../` 未対応 (Phase 28) |

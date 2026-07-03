@@ -41,4 +41,20 @@ describe("JIT - Step 5-3: ホットコード検出 + 自動 JIT", () => {
     `, { jit: true, jitThreshold: 10 });
     assert.equal(result, "hello world");
   });
+
+  it("深い自己再帰が Wasm スタック溢れせず正しい結果を返す (VM フォールバック)", () => {
+    // 自己再帰は Wasm 内 `call self` にコンパイルされ、深さ ~2万で Wasm
+    // 実行スタックが溢れる (RangeError)。executeWasm が RangeError を catch
+    // して deopt → VM 再実行することで、深い再帰でも正しい結果を返す。
+    const src = `
+      function sum(n) { if (n <= 0) { return 0; } return n + sum(n - 1); }
+      var w = 0;
+      for (var r = 0; r < 50; r = r + 1) { w = sum(100); }
+      sum(50000);
+    `;
+    const plain = vmEvaluate(src);
+    const jit = vmEvaluate(src, { jit: true, jitThreshold: 5, useIR: true });
+    assert.equal(jit, plain);
+    assert.equal(jit, 1250025000); // sum(1..50000)
+  });
 });

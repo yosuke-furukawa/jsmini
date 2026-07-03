@@ -141,7 +141,7 @@ export function compileWithWasmGC(
     }
     return { functions: result, structTypeIndex: structType };
   } catch (e: any) {
-    if (process?.env?.DEBUG) console.error("Wasm GC compile error:", e.message);
+    if (typeof process !== "undefined" && process.env?.DEBUG) console.error("Wasm GC compile error:", e.message);
     return null;
   }
 }

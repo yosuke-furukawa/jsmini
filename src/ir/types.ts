@@ -51,6 +51,11 @@ export type IROpcode =
   | "ArrayGet"        // args[0] = array, args[1] = index → 要素値
   | "ArraySet"        // args[0] = array, args[1] = index, args[2] = value
   | "ArrayLength"     // args[0] = array → 長さ
+  | "AllocArray"      // args[0] = 長さ → 新規 WasmGC array (array.new_default)。
+                      //                  関数内で確保する固定長 local array (new Array(n))
+  | "AllocGrowableArray" // 引数なし → 動的成長する空配列 ([])。length+backing の
+                      //                  2 local で表現 (V8 の JSArray + backing store 相当)
+  | "ArrayPush"       // args[0] = array, args[1] = value → 末尾追加 (容量超過で grow)
 
   // グローバル変数
   | "LoadGlobal"      // グローバル変数の読み込み。globalName フィールドに変数名

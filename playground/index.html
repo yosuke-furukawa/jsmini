@@ -274,6 +274,7 @@ main {
     <option value="modern-syntax">Modern Syntax</option>
     <option value="ir-vs-direct">IR vs Direct JIT</option>
     <option value="array-jit">Array JIT</option>
+    <option value="local-array-jit">Local Array JIT (new Array / [] / push)</option>
     <option value="ir-optimizations">IR Optimizations (LICM/CSE/SR)</option>
     <option value="promise">Promise</option>
     <option value="async-await">async/await</option>
@@ -1067,6 +1068,64 @@ function sumSquares(arr, n) {
 }
 console.log("sumSquares:", sumSquares([50000, 50000, 50000], 3));
 // 50000^2 * 3 = 7.5 billion — overflows i32, auto-promoted to f64`,
+
+  "local-array-jit": `// Local Array JIT (Phase 29) — 関数内で確保する配列を Wasm 化
+// "Wasm JIT (IR)" モードで実行し、IR / WAT タブを見てください。
+// これらは以前 VM フォールバックしていましたが、今は配列ごと Wasm に
+// 閉じ込まります (V8 の JSArray + backing store 相当)。
+
+// 1. new Array(n) — 固定長配列 (array.new_default)
+//    fill → reduce が 1 つの Wasm 関数で完結 (境界コピー無し)
+function dotFixed(n) {
+  var a = new Array(n);
+  for (var i = 0; i < n; i = i + 1) { a[i] = i * 2; }
+  var s = 0;
+  for (var j = 0; j < n; j = j + 1) { s = s + a[j]; }
+  return s;
+}
+// ホットにするため繰り返し呼ぶ → JIT 発動
+var r1 = 0;
+for (var k = 0; k < 200; k = k + 1) { r1 = dotFixed(100); }
+console.log("new Array(n) fill+sum:", r1);  // 9900
+
+// 2. [] + push — 動的成長配列 (length + backing、容量超過で 2倍に再確保)
+function buildAndSum(n) {
+  var a = [];
+  for (var i = 0; i < n; i = i + 1) { a.push(i * 2); }
+  var s = 0;
+  for (var j = 0; j < a.length; j = j + 1) { s = s + a[j]; }
+  return s;
+}
+var r2 = 0;
+for (var k = 0; k < 200; k = k + 1) { r2 = buildAndSum(100); }
+console.log("[] + push fill+sum:", r2);  // 9900
+
+// 3. [] + a[i]= — 添字代入による成長 (length は max(i+1) に更新)
+function fillByIndex(n) {
+  var a = [];
+  for (var i = 0; i < n; i = i + 1) { a[i] = 1.0 / (i + 1); }
+  var s = 0;
+  for (var j = 0; j < a.length; j = j + 1) { s = s + a[j]; }
+  return s;
+}
+var r3 = 0;
+for (var k = 0; k < 200; k = k + 1) { r3 = fillByIndex(50); }
+console.log("[] + a[i]= harmonic sum:", r3);
+
+// 4. 配列引数 — dot product (呼び出し側が host array を渡す)
+function dot(a, b, n) {
+  var s = 0;
+  for (var i = 0; i < n; i = i + 1) { s = s + a[i] * b[i]; }
+  return s;
+}
+var x = [], y = [];
+for (var i = 0; i < 100; i = i + 1) { x[i] = i; y[i] = 2; }
+var r4 = 0;
+for (var k = 0; k < 200; k = k + 1) { r4 = dot(x, y, 100); }
+console.log("dot(array args):", r4);  // 9900
+
+// Tree-Walking や Bytecode VM モードに切り替えると、同じコードが
+// 数十〜数百倍遅くなります (配列ループの dispatch が Wasm で消える)。`,
 
   "ir-optimizations": `// IR Optimizations — LICM, CSE, Strength Reduction
 // Use "Wasm JIT (IR)" mode and check the IR tab!

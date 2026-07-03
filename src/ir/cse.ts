@@ -20,6 +20,8 @@ const NOT_CSE_TARGET = new Set([
   "LoadGlobal",                   // グローバル読み込み (副作用の間で値が変わりうる)
   "ArrayGet",                     // 配列読み込み (ArraySet で値が変わりうる)
   "ArrayLength",                  // 配列長 (変わりうる)
+  "Alloc",                        // オブジェクト確保 (identity を持つ)
+  "AllocArray",                   // 配列確保 (new Array(n) 2つは別オブジェクト)
 ]);
 
 function opKey(op: Op): string {

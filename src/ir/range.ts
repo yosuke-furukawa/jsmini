@@ -191,10 +191,14 @@ function computePhiRange(phi: PhiOp, ranges: Map<number, Range>): Range {
 
 // 関数内の全演算が i32 に収まるか判定
 export function functionNeedsF64(irFunc: IRFunction): boolean {
-  // Math.X 呼び出しは f64 in/out → 関数全体を f64 に格上げ
   for (const block of irFunc.blocks) {
     for (const op of block.ops) {
+      // Math.X 呼び出しは f64 in/out → 関数全体を f64 に格上げ
       if (op.opcode === "Call" && op.calleeName?.startsWith("Math.")) return true;
+      // JS の `/` は常に浮動小数除算 (7/2 === 3.5)。i32.div_s だと切り捨てに
+      // なってしまうので、Div を含む関数は f64 化する。
+      // 整数除算が欲しい場合は `(a/b)|0` のように明示するのが JS の慣習。
+      if (op.opcode === "Div") return true;
     }
   }
   const ranges = analyzeRanges(irFunc);

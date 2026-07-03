@@ -8,6 +8,8 @@ import { isPhi } from "./types.js";
 import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, f64ToBytes, type LocalGroup, WASM_GC_OP, refType } from "../jit/wasm-builder.js";
 
 const WASM_VOID = 0x40; // void block type
+// ブラウザ (playground) には process が無いので安全にガード
+const DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
 import { analyzeCFG, type CFGAnalysis, type LoopInfo } from "./loop-analysis.js";
 import { functionNeedsF64 } from "./range.js";
 
@@ -52,7 +54,7 @@ function classifyMathCall(name: string, argc: number): "native_unary" | "native_
   return "unsupported";
 }
 
-export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0): { body: number[]; extraLocals: number; wat: string } {
+export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set(), growableArrayValues: Set<number> = new Set(), growFnIndex = -1): { body: number[]; extraLocals: number; lenLocals: number; refLocals: number; wat: string } {
   const body: number[] = [];
   const watLines: string[] = [];
   let watIndent = 1;
@@ -120,8 +122,10 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   }
 
   // Phi ノード → Wasm local に割り当て
+  // (配列 ref を運ぶ Phi は ref 型 local が要るので後でまとめて割り当てる)
   for (const block of irFunc.blocks) {
     for (const phi of block.phis) {
+      if (arrayRefValues.has(phi.id)) continue;
       opToLocal.set(phi.id, nextLocal++);
     }
   }
@@ -133,6 +137,9 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
       if ((op.opcode === "LoadGlobal" || op.opcode === "StoreGlobal") && op.globalName) {
         // 自己再帰の callee 参照は local 不要 (call 0 で直接呼ぶ)
         if (op.globalName === irFunc.name) continue;
+        // "Math" / "Array" は dispatch / AllocArray で消費される参照なので
+        // 値としての local は不要 (codegen 側でも emit skip)
+        if (op.globalName === "Math" || op.globalName === "Array") continue;
         if (!globalToLocal.has(op.globalName)) {
           globalToLocal.set(op.globalName, nextLocal++);
         }
@@ -160,6 +167,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   const needsLocal = new Set<number>();
   for (const [id, count] of useCount) {
     if (opToLocal.has(id)) continue;
+    if (arrayRefValues.has(id)) continue; // 配列 ref は ref 型 local で後割り当て
     const defBlock = opDefBlock.get(id);
     const useBlocks = opUseBlocks.get(id);
     // 複数回使用 or 別ブロックで使用 → local に格納
@@ -169,10 +177,89 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     }
   }
 
+  // 計算値 (Const/Param 以外) を local に入れず「スタックに残したまま」消費する
+  // 最適化は、次の 2 条件が両方成り立つときだけ正しい:
+  //   (a) 消費する op が定義の *直後* にある (間に別の push が挟まらない)。
+  //       挟まると埋もれて、消費側が別の値を読んでしまう。
+  //         例: k3 = k*k*k; sk = Math.sin(k); k3*sk*sk
+  //             → k3 の上に sk が積まれ、k3*sk が sk*sk になる
+  //   (b) その計算値が消費側で「最初に push されるオペランド」(スタック最下位)。
+  //       後続オペランドに来て手前に leaf (Const/Param: emitLoadValue が消費時に
+  //       push) があると、leaf が上に積まれてオペランド順が反転する。
+  //         例: 1/(n*2) → [n*2] の上に const 1 → (n*2)/1
+  // どちらかでも崩れる計算値は local に退避して順序を固定する。
+  {
+    const opByIdEarly = new Map<number, Op>();
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) opByIdEarly.set(phi.id, phi);
+      for (const op of block.ops) opByIdEarly.set(op.id, op);
+    }
+    const isRematerializable = (id: number): boolean => {
+      // local を持つ (Param 含む) か Const なら emitLoadValue が正しい位置で再生成できる
+      if (opToLocal.has(id)) return true;
+      const o = opByIdEarly.get(id);
+      return !o || o.opcode === "Const";
+    };
+    for (const block of irFunc.blocks) {
+      for (let pos = 0; pos < block.ops.length; pos++) {
+        const op = block.ops[pos];
+        const firstOperand = op.opcode === "Call" ? 1 : 0;
+        let sawLeafBefore = false;
+        for (let i = firstOperand; i < op.args.length; i++) {
+          const argId = op.args[i];
+          if (arrayRefValues.has(argId)) continue; // 配列 ref は ref 型 local で後割り当て
+          const rematerializable = isRematerializable(argId);
+          if (!rematerializable && !opToLocal.has(argId)) {
+            // (a) この計算値の定義が直前の op か?
+            const defImmediatelyBefore = pos > 0 && block.ops[pos - 1].id === argId;
+            // (b) 先頭オペランドか? (手前に leaf があると反転)
+            const orderBroken = i > firstOperand && sawLeafBefore;
+            if (!defImmediatelyBefore || orderBroken) {
+              needsLocal.add(argId);
+              opToLocal.set(argId, nextLocal++);
+            }
+          }
+          if (rematerializable) sawLeafBefore = true;
+        }
+      }
+    }
+  }
+
+  // growable 配列 op (ArrayPush / growable ArrayGet) は args[0] (配列) を
+  // 通常フローで emit しない (backing/len local で別処理) ため、value/index
+  // が計算値だとインラインでスタック底に埋もれて順序が壊れる。これらの
+  // 非配列オペランドが計算値なら local に退避する。
+  if (growableArrayValues.size > 0) {
+    const opLookup = new Map<number, Op>();
+    for (const block of irFunc.blocks) {
+      for (const phi of block.phis) opLookup.set(phi.id, phi);
+      for (const op of block.ops) opLookup.set(op.id, op);
+    }
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        const isGrowableOp =
+          op.opcode === "ArrayPush" ||
+          ((op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength")
+            && growableArrayValues.has(op.args[0]));
+        if (!isGrowableOp) continue;
+        for (let i = 1; i < op.args.length; i++) {
+          const argId = op.args[i];
+          if (opToLocal.has(argId) || arrayRefValues.has(argId)) continue;
+          const o = opLookup.get(argId);
+          if (o && o.opcode !== "Const") { // 計算値のみ (Const は再生成される)
+            needsLocal.add(argId);
+            opToLocal.set(argId, nextLocal++);
+          }
+        }
+      }
+    }
+  }
+
   // Phi の入力値も local に格納する必要がある (back edge の local.set で使うため)
   for (const block of irFunc.blocks) {
     for (const phi of block.phis) {
       for (const [, valueId] of phi.inputs) {
+        if (arrayRefValues.has(valueId)) continue; // 配列 ref は ref 型 local で後割り当て
         if (!opToLocal.has(valueId)) {
           needsLocal.add(valueId);
           opToLocal.set(valueId, nextLocal++);
@@ -182,6 +269,48 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   }
 
   const extraLocals = nextLocal - irFunc.paramCount;
+
+  // local 群の順序: [scalar, len(i32), backing/ref]。
+  // growable 配列は len local (i32) と backing local (ref) の 2 本で表現する。
+  //   growableLenLocal: 配列 id → length を持つ i32 local
+  //   growableBackingLocal: 配列 id → backing array を持つ ref local
+  const growableLenLocal = new Map<number, number>();
+  const growableBackingLocal = new Map<number, number>();
+
+  // (1) len local (i32 group): growable 配列ごとに 1 本
+  const scalarLocalEnd = nextLocal;
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      if (op.opcode === "AllocGrowableArray" && !growableLenLocal.has(op.id)) {
+        growableLenLocal.set(op.id, nextLocal++);
+      }
+    }
+  }
+  const lenLocals = nextLocal - scalarLocalEnd;
+
+  // (2) ref group: 固定配列 (AllocArray) + 配列 Phi + growable の backing
+  const refLocalStart = nextLocal;
+  for (const block of irFunc.blocks) {
+    for (const phi of block.phis) {
+      if (arrayRefValues.has(phi.id) && !opToLocal.has(phi.id)) opToLocal.set(phi.id, nextLocal++);
+    }
+    for (const op of block.ops) {
+      if (op.opcode === "AllocArray" && !opToLocal.has(op.id)) opToLocal.set(op.id, nextLocal++);
+      if (op.opcode === "AllocGrowableArray" && !growableBackingLocal.has(op.id)) {
+        growableBackingLocal.set(op.id, nextLocal++);
+      }
+    }
+  }
+  const refLocals = nextLocal - refLocalStart;
+
+  // growable 配列の emit 用コンテキスト (emitOp に渡す)
+  const growCtx: GrowCtx = {
+    growableArrayValues,
+    growableLenLocal,
+    growableBackingLocal,
+    growFnIndex,
+    arrayTypeIdx,
+  };
 
   // Op を id で引けるテーブル
   const opById = new Map<number, Op>();
@@ -319,7 +448,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         wat("return");
       } else {
         const beforeLen = body.length;
-        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets, importIndices, importCount);
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets, importIndices, importCount, growCtx);
         // emitOp が出力した命令を WAT に変換
         watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
       }
@@ -368,10 +497,20 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     : "";
   const fullWat = [header, localDecls, ";; phi init", ...watLines, ")"].filter(Boolean).join("\n");
 
-  return { body: [...initCode, ...body], extraLocals: nextLocal - irFunc.paramCount, wat: fullWat };
+  // extraLocals は scalar group の数 (ref local は別グループ)。
+  return { body: [...initCode, ...body], extraLocals, lenLocals, refLocals, wat: fullWat };
 }
 
 // ========== Op → Wasm 命令 ==========
+
+// growable 配列の codegen コンテキスト
+type GrowCtx = {
+  growableArrayValues: Set<number>;
+  growableLenLocal: Map<number, number>;    // 配列 id → length local (i32)
+  growableBackingLocal: Map<number, number>; // 配列 id → backing local (ref)
+  growFnIndex: number;                        // __grow ヘルパの関数 index
+  arrayTypeIdx: number;
+};
 
 function emitOp(
   op: Op,
@@ -390,9 +529,12 @@ function emitOp(
   propOffsets: Map<string, number> = new Map(),
   importIndices: Map<string, number> = new Map(),
   importCount = 0,
+  growCtx?: GrowCtx,
 ): void {
   // forceF64 なら全演算を f64 として扱う
   const effectiveType = forceF64 ? "f64" : op.type;
+  // growable 配列かどうか
+  const isGrowable = (id: number) => growCtx?.growableArrayValues.has(id) ?? false;
   switch (op.opcode) {
     case "Const": {
       // needsLocal に入ってる場合だけ出力して local に保存
@@ -426,8 +568,8 @@ function emitOp(
     case "LoadGlobal": {
       // 自己再帰の callee 参照は skip (Call で直接 call 0 する)
       if (op.globalName === irFunc.name) break;
-      // "Math" の参照は Math.X dispatch で消費されるので emit 不要
-      if (op.globalName === "Math") break;
+      // "Math" / "Array" の参照は dispatch / AllocArray で消費されるので emit 不要
+      if (op.globalName === "Math" || op.globalName === "Array") break;
       const gLocal = globalToLocal.get(op.globalName!);
       if (gLocal !== undefined) {
         body.push(WASM_OP.local_get, gLocal);
@@ -438,7 +580,11 @@ function emitOp(
     // 配列操作 (WasmGC array)
     case "ArrayGet": {
       if (arrayTypeIdx >= 0) {
-        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
+        if (isGrowable(op.args[0])) {
+          body.push(WASM_OP.local_get, growCtx!.growableBackingLocal.get(op.args[0])!); // backing
+        } else {
+          emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
+        }
         emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // index
         if (forceF64) body.push(0xab); // i32.trunc_f64_s (index must be i32 for array.get)
         body.push(0xfb, WASM_GC_OP.array_get, arrayTypeIdx);
@@ -448,7 +594,38 @@ function emitOp(
       break;
     }
     case "ArraySet": {
-      if (arrayTypeIdx >= 0) {
+      if (isGrowable(op.args[0]) && growCtx && growCtx.growFnIndex >= 0) {
+        // a[i] = x (動的成長)。i >= cap なら grow、backing[i]=x、len=max(len,i+1)。
+        // index は複数回使うので emitLoadValue で都度ロード (local 化済み or const)。
+        const lenL = growCtx.growableLenLocal.get(op.args[0])!;
+        const backL = growCtx.growableBackingLocal.get(op.args[0])!;
+        const emitIdx = () => {
+          emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+          if (forceF64) body.push(0xab); // i32.trunc_f64_s
+        };
+        // if (array.len(backing) <= i) backing = __grow(backing, i+1)
+        body.push(WASM_OP.local_get, backL, 0xfb, WASM_GC_OP.array_len);
+        emitIdx();
+        body.push(0x4c); // i32.le_s
+        body.push(WASM_OP.if, 0x40);
+        body.push(WASM_OP.local_get, backL);
+        emitIdx(); body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add); // mincap = i+1
+        body.push(WASM_OP.call, growCtx.growFnIndex);
+        body.push(WASM_OP.local_set, backL);
+        body.push(WASM_OP.end);
+        // backing[i] = value
+        body.push(WASM_OP.local_get, backL);
+        emitIdx();
+        emitLoadValue(op.args[2], body, opToLocal, opById, forceF64);
+        body.push(0xfb, WASM_GC_OP.array_set, arrayTypeIdx);
+        // len = max(len, i+1)
+        emitIdx(); body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add); // i+1
+        body.push(WASM_OP.local_get, lenL);
+        body.push(0x4a); // i32.gt_s : (i+1) > len
+        body.push(WASM_OP.if, 0x40);
+        emitIdx(); body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add, WASM_OP.local_set, lenL);
+        body.push(WASM_OP.end);
+      } else if (arrayTypeIdx >= 0) {
         emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
         emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // index
         if (forceF64) body.push(0xab); // i32.trunc_f64_s
@@ -458,12 +635,63 @@ function emitOp(
       break;
     }
     case "ArrayLength": {
-      if (arrayTypeIdx >= 0) {
+      if (isGrowable(op.args[0])) {
+        body.push(WASM_OP.local_get, growCtx!.growableLenLocal.get(op.args[0])!); // length (i32)
+        if (forceF64) body.push(0xb7); // f64.convert_i32_s
+      } else if (arrayTypeIdx >= 0) {
         emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
         body.push(0xfb, WASM_GC_OP.array_len);
         if (forceF64) body.push(0xb7); // f64.convert_i32_s
       }
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+      break;
+    }
+    case "AllocGrowableArray": {
+      // [] → len=0, backing=array.new_default(初期容量 4)
+      if (growCtx && arrayTypeIdx >= 0) {
+        const lenL = growCtx.growableLenLocal.get(op.id)!;
+        const backL = growCtx.growableBackingLocal.get(op.id)!;
+        body.push(WASM_OP.i32_const, 0, WASM_OP.local_set, lenL);
+        body.push(WASM_OP.i32_const, 4, 0xfb, WASM_GC_OP.array_new_default, arrayTypeIdx, WASM_OP.local_set, backL);
+      }
+      break;
+    }
+    case "ArrayPush": {
+      // 末尾追加: 容量超過なら __grow で 2 倍に再確保コピーしてから set、len++
+      if (growCtx && arrayTypeIdx >= 0 && growCtx.growFnIndex >= 0) {
+        const lenL = growCtx.growableLenLocal.get(op.args[0])!;
+        const backL = growCtx.growableBackingLocal.get(op.args[0])!;
+        // if (array.len(backing) <= len) backing = __grow(backing, len+1)
+        body.push(WASM_OP.local_get, backL, 0xfb, WASM_GC_OP.array_len);
+        body.push(WASM_OP.local_get, lenL);
+        body.push(0x4c); // i32.le_s
+        body.push(WASM_OP.if, 0x40); // if (void)
+        body.push(WASM_OP.local_get, backL);
+        body.push(WASM_OP.local_get, lenL, WASM_OP.i32_const, 1, WASM_OP.i32_add); // mincap = len+1
+        body.push(WASM_OP.call, growCtx.growFnIndex);
+        body.push(WASM_OP.local_set, backL);
+        body.push(WASM_OP.end);
+        // backing[len] = value
+        body.push(WASM_OP.local_get, backL);
+        body.push(WASM_OP.local_get, lenL);
+        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
+        body.push(0xfb, WASM_GC_OP.array_set, arrayTypeIdx);
+        // len = len + 1
+        body.push(WASM_OP.local_get, lenL, WASM_OP.i32_const, 1, WASM_OP.i32_add, WASM_OP.local_set, lenL);
+      }
+      break;
+    }
+    case "AllocArray": {
+      // new Array(n) → array.new_default $arr (要素は 0 / 0.0 で初期化)。
+      // 結果の ref は専用 ref 型 local に格納し、以降の ArrayGet/Set は
+      // emitLoadValue(args[0]) で local.get する。
+      if (arrayTypeIdx >= 0) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // length
+        if (forceF64) body.push(0xab); // i32.trunc_f64_s (length は i32)
+        body.push(0xfb, WASM_GC_OP.array_new_default, arrayTypeIdx);
+        const refLocal = opToLocal.get(op.id);
+        if (refLocal !== undefined) body.push(WASM_OP.local_set, refLocal);
+      }
       break;
     }
 
@@ -790,11 +1018,15 @@ function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, n
   body.push(WASM_OP.i32_const, 0);
 }
 
-// 複数回使われる値を local に保存
+// local を持つ値を local に保存。
+// 消費側は emitLoadValue/emitValueOrConst で必ず local.get するので、ここは
+// local.set でスタックから降ろす (local.tee で残すと誰も消費せず stray になり、
+// ループ back-edge でスタック不一致を起こす。return 前なら frame 巻き取りで
+// 無害だが two-loop 等のループ内で詰む)。
 function maybeStoreLocal(opId: number, body: number[], opToLocal: Map<number, number>, needsLocal: Set<number>): void {
   if (needsLocal.has(opId)) {
     const local = opToLocal.get(opId)!;
-    body.push(WASM_OP.local_tee, local);
+    body.push(WASM_OP.local_set, local);
   }
 }
 
@@ -901,18 +1133,19 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
             const argc = op.args.length - 1;
             const cls = classifyMathCall(op.calleeName, argc);
             if (cls === "unsupported") {
-              if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: unsupported Math call", op.calleeName, "argc=", argc);
+              if (DEBUG_WASM) console.error("[compileIRToWasm] reject: unsupported Math call", op.calleeName, "argc=", argc);
               return null;
             }
             if (cls === "host") mathHostImports.add(op.calleeName);
             // native_unary / native_binary は import 不要
           } else {
-            if (process.env?.DEBUG_WASM) console.error("[compileIRToWasm] reject: unknown call", op.calleeName, "args=", op.args.length);
+            if (DEBUG_WASM) console.error("[compileIRToWasm] reject: unknown call", op.calleeName, "args=", op.args.length);
             return null; // 他の関数 or 自己再帰+配列 → 未対応
           }
         }
         // 配列 Op を検出 (WasmGC array 構築が必要)
-        if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") {
+        if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength"
+            || op.opcode === "AllocArray" || op.opcode === "AllocGrowableArray" || op.opcode === "ArrayPush") {
           hasArrayOps = true;
         }
         if (op.opcode === "Const" && op.value !== undefined &&
@@ -969,6 +1202,104 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
       }
     }
 
+    // 配列 ref を運ぶ値の集合 (AllocArray/AllocGrowableArray 結果 + 配列
+    // オペランド + それらを合流する Phi)。local 割り当てに使う。
+    const arrayRefValues = new Set<number>();
+    const growableArrayValues = new Set<number>(); // [] 由来の動的成長配列
+    if (hasArrayOps) {
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if (op.opcode === "AllocArray") arrayRefValues.add(op.id);
+          if (op.opcode === "AllocGrowableArray") { arrayRefValues.add(op.id); growableArrayValues.add(op.id); }
+          if ((op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "ArrayPush") && op.args[0] !== undefined) {
+            arrayRefValues.add(op.args[0]);
+          }
+        }
+      }
+      // Phi 経由で伝播 (配列を運ぶ Phi の入力も配列 ref)
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const block of irFunc.blocks) {
+          for (const phi of block.phis) {
+            if (arrayRefValues.has(phi.id)) {
+              for (const [, vid] of phi.inputs) {
+                if (!arrayRefValues.has(vid)) { arrayRefValues.add(vid); changed = true; }
+                if (growableArrayValues.has(phi.id) && !growableArrayValues.has(vid)) { growableArrayValues.add(vid); changed = true; }
+              }
+            }
+          }
+        }
+      }
+      // growable 配列が Phi で他の配列と合流すると len/backing local の併合が
+      // 必要になり複雑。SSA collapse 後は単一代入なら Phi にならないので、
+      // growable 値が Phi になっていたら (= 再代入された) VM フォールバック。
+      for (const block of irFunc.blocks) {
+        for (const phi of block.phis) {
+          if (growableArrayValues.has(phi.id) && phi.inputs.length > 0) {
+            if (DEBUG_WASM) console.error("[compileIRToWasm] reject: growable array carried by phi (reassigned)");
+            return null;
+          }
+        }
+      }
+      // escape 解析: 配列 ref が 配列オペランド (args[0]) か Phi 入力以外で
+      // 使われたら (Return / Call 引数 / ArraySet の value 等) VM フォールバック。
+      // growable は ArrayPush の args[0] も許可。
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          for (let i = 0; i < op.args.length; i++) {
+            const argId = op.args[i];
+            if (!arrayRefValues.has(argId)) continue;
+            const isArrayOperand =
+              (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "ArrayPush") && i === 0;
+            if (!isArrayOperand) {
+              if (DEBUG_WASM) console.error("[compileIRToWasm] reject: array ref escapes via", op.opcode, "arg", i);
+              return null;
+            }
+          }
+        }
+      }
+      // 要素の型チェック: WasmGC array は i32/f64 のみ。配列に格納する値が
+      // object (Alloc — base address は i32 だが意味的には非数値) だと、
+      // 数値配列として誤コンパイルされる (a[0]+a[1] が文字列連結でなく
+      // アドレスの加算になる)。Alloc を格納する配列は VM フォールバック。
+      const opByIdForElem = new Map<number, Op>();
+      for (const block of irFunc.blocks) {
+        for (const phi of block.phis) opByIdForElem.set(phi.id, phi);
+        for (const op of block.ops) opByIdForElem.set(op.id, op);
+      }
+      // 数値を生む opcode のホワイトリスト (これ以外を配列に格納したら bail)。
+      // LoadGlobal("undefined") / Alloc(object) / LoadProperty 等は非数値。
+      const NUMERIC_OPCODES = new Set<string>([
+        "Param", "Add", "Sub", "Mul", "Div", "Mod", "Negate",
+        "BitAnd", "BitOr", "BitXor", "BitNot", "ShiftLeft", "ShiftRight",
+        "LessThan", "LessEqual", "GreaterThan", "GreaterEqual",
+        "Equal", "StrictEqual", "NotEqual", "StrictNotEqual", "Not",
+        "ArrayGet", "ArrayLength", "Call", "TypeGuard", "LoadUpvalue", "LoadThis",
+      ]);
+      const isNumericValue = (id: number | undefined): boolean => {
+        if (id === undefined) return false; // 引数欠落 (object リテラル等を落とした)
+        const o = opByIdForElem.get(id);
+        if (!o) return false;
+        if (o.opcode === "Const") return typeof o.value === "number" || typeof o.value === "boolean";
+        if (o.opcode === "Phi") return (o as PhiOp).inputs.every(([, vid]) => isNumericValue(vid));
+        return NUMERIC_OPCODES.has(o.opcode);
+      };
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          // ArrayPush(arr, value) の value、ArraySet(arr, idx, value) の value
+          const isPush = op.opcode === "ArrayPush";
+          const isSet = op.opcode === "ArraySet";
+          if (!isPush && !isSet) continue;
+          const valId = isPush ? op.args[1] : op.args[2];
+          if (!isNumericValue(valId)) {
+            if (DEBUG_WASM) console.error("[compileIRToWasm] reject: non-numeric value stored in array");
+            return null;
+          }
+        }
+      }
+    }
+
     // upvalue の数を検出
     let upvalueCount = 0;
     for (const block of irFunc.blocks) {
@@ -1009,43 +1340,83 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
       builder.addGlobal(WASM_TYPE.i32, true, 0); // global 0 = heapPtr, mutable, init=0
     }
 
-    // パラメータ: 配列は ref $array、他は i32/f64、upvalue も追加
+    // パラメータ: 配列は ref $array、他は i32/f64、upvalue も追加。
+    // params はエンコード済みバイト列。ref 型は 2 バイトなので、Wasm の型
+    // セクションが要求する「値型の個数」は別途 paramValTypeCount で数える。
     const params: number[] = [];
+    let paramValTypeCount = 0;
     for (let i = 0; i < irFunc.paramCount; i++) {
       if (arrayParams.has(i)) {
         params.push(...refType(arrayTypeIdx));
       } else {
         params.push(wasmType);
       }
+      paramValTypeCount++;
     }
     // upvalue 追加パラメータ
     for (let i = 0; i < upvalueCount; i++) {
       params.push(wasmType);
+      paramValTypeCount++;
     }
     // this 追加パラメータ (i32: メモリ上のベースアドレス)
     if (hasThis) {
       params.push(WASM_TYPE.i32);
+      paramValTypeCount++;
     }
     const results = [wasmType];
 
-    const { body: bodyCode, extraLocals } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount);
+    // growable 配列があれば __grow ヘルパを main の直後 (index importCount+1) に置く
+    const hasGrowable = growableArrayValues.size > 0;
+    const growFnIndex = hasGrowable ? builder.importCount + 1 : -1;
+    const { body: bodyCode, extraLocals, lenLocals, refLocals } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues, growableArrayValues, growFnIndex);
 
     // OSR モード: extra locals もパラメータに含める (VM から全 locals を受け取る)
     if (osrLocalCount !== undefined && osrLocalCount > irFunc.paramCount) {
       const osrExtraParams = osrLocalCount - irFunc.paramCount;
       for (let i = 0; i < osrExtraParams; i++) {
         params.push(wasmType);
+        paramValTypeCount++;
       }
     }
 
-    const totalParamCount = params.length;
+    const totalParamCount = paramValTypeCount;
     const localType = useF64 ? [WASM_TYPE.f64] : [wasmType];
     // OSR: extra locals をパラメータで渡すので Wasm locals を減らす
     const wasmExtraLocals = (osrLocalCount !== undefined) ? Math.max(0, extraLocals - (osrLocalCount - irFunc.paramCount)) : extraLocals;
-    const extraLocalGroups = wasmExtraLocals > 0 ? [{ count: wasmExtraLocals, type: localType }] : undefined;
+    // local 宣言: [scalar group, len group (i32, growable 用), ref group]。
+    // codegenIR の index 割り当て (scalar → len → ref の順) と一致させる。
+    const groups: LocalGroup[] = [];
+    if (wasmExtraLocals > 0) groups.push({ count: wasmExtraLocals, type: localType });
+    if (lenLocals > 0) groups.push({ count: lenLocals, type: [WASM_TYPE.i32] });
+    if (refLocals > 0 && arrayTypeIdx >= 0) groups.push({ count: refLocals, type: refType(arrayTypeIdx) });
+    const extraLocalGroups = groups.length > 0 ? groups : undefined;
     builder.addFunction(irFunc.name, params, results, bodyCode,
-      wasmExtraLocals > 0 ? wasmExtraLocals : 0,
+      wasmExtraLocals + lenLocals + refLocals > 0 ? wasmExtraLocals + lenLocals + refLocals : 0,
       totalParamCount, 1, extraLocalGroups);
+    // __grow(old, mincap) → ref: 容量を max(mincap, oldcap*2) に拡張して
+    // 旧要素をコピーした新しい backing array を返す (main の直後 = importCount+1)
+    if (hasGrowable && arrayTypeIdx >= 0) {
+      const growBody = [
+        WASM_OP.local_get, 0, 0xfb, WASM_GC_OP.array_len,       // oldcap
+        WASM_OP.i32_const, 1, 0x74,                              // << 1 → oldcap*2
+        WASM_OP.local_set, 2,                                    // newcap = oldcap*2
+        WASM_OP.local_get, 2, WASM_OP.local_get, 1, 0x48,        // newcap < mincap (i32.lt_s)
+        WASM_OP.if, 0x40,
+          WASM_OP.local_get, 1, WASM_OP.local_set, 2,            // newcap = mincap
+        WASM_OP.end,
+        WASM_OP.local_get, 2, 0xfb, WASM_GC_OP.array_new_default, arrayTypeIdx, WASM_OP.local_set, 3, // new
+        // array.copy(new, 0, old, 0, array.len(old))
+        WASM_OP.local_get, 3, WASM_OP.i32_const, 0,
+        WASM_OP.local_get, 0, WASM_OP.i32_const, 0,
+        WASM_OP.local_get, 0, 0xfb, WASM_GC_OP.array_len,
+        0xfb, WASM_GC_OP.array_copy, arrayTypeIdx, arrayTypeIdx,
+        WASM_OP.local_get, 3,
+        WASM_OP.end,
+      ];
+      builder.addFunction("__grow", [...refType(arrayTypeIdx), WASM_TYPE.i32], refType(arrayTypeIdx),
+        growBody, 0, 2, 1,
+        [{ count: 1, type: [WASM_TYPE.i32] }, { count: 1, type: refType(arrayTypeIdx) }]);
+    }
     // WasmGC 配列ヘルパー関数
     if (hasArrayOps && arrayTypeIdx >= 0) {
       // __create_array(len) → ref $array
@@ -1124,7 +1495,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     };
   } catch (e: any) {
     // Wasm コンパイルエラー → null (フォールバック)
-    if (typeof process !== "undefined" && process.env?.DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e, e.stack);
+    if (DEBUG_WASM) console.error("[compileIRToWasm error]", e.message || e, e.stack);
     return null;
   }
 }

@@ -409,6 +409,17 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           // methodRef から calleeName を取得 (Math.X は LoadProperty で
           // calleeName="Math.sin" 等がタグ付け済み。それを優先する)
           const methodOp = opById.get(methodRef);
+          // arr.push(x) → ArrayPush(arr, x)。1 引数の push のみ対応。
+          if (methodOp?.globalName === "push" && !methodOp?.calleeName && argc === 1) {
+            const op = registerOp(createOp(irFunc, "ArrayPush", [thisObj, args[0]], "any"));
+            block.ops.push(op);
+            // push は新しい length を返す。簡単のため length を別途読む形にせず、
+            // ArrayLength を後続で読めるよう、ここでは push の戻り値として
+            // ArrayLength(arr) を積む (push の戻り値が使われるケースは稀)
+            const lenOp = registerOp(createOp(irFunc, "ArrayLength", [thisObj], "i32"));
+            block.ops.push(lenOp); stack.push(lenOp.id);
+            break;
+          }
           const isMathCall = methodOp?.calleeName?.startsWith("Math.");
           const methodName = methodOp?.calleeName ?? methodOp?.globalName;
           // Math.X は this を使わないので thisObj を落として通常の Call 形式にする
@@ -424,6 +435,15 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           const ctorRef = stack.pop()!; // コンストラクタ参照
           const args: number[] = [];
           for (let j = 0; j < argc; j++) args.unshift(stack.pop()!);
+          // new Array(n) → AllocArray(n): 関数内で確保する固定長 WasmGC array。
+          // 1 引数 (長さ) の形のみ対応。それ以外は通常の Construct にフォールバック。
+          const ctorOpEarly = opById.get(ctorRef);
+          if (ctorOpEarly?.opcode === "LoadGlobal" && ctorOpEarly.globalName === "Array" && argc === 1) {
+            const allocArr = registerOp(createOp(irFunc, "AllocArray", [args[0]], "any"));
+            block.ops.push(allocArr);
+            stack.push(allocArr.id);
+            break;
+          }
           // Alloc: オブジェクト領域確保
           const alloc = registerOp(createOp(irFunc, "Alloc", [], "i32"));
           block.ops.push(alloc);
@@ -434,6 +454,23 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           block.ops.push(call);
           // Construct の結果は alloc (base address)
           stack.push(alloc.id);
+          break;
+        }
+        case "CreateArray": {
+          // [] (空配列) → AllocGrowableArray。動的成長対応。
+          // [a, b, c] (要素あり) は未対応 (要素のプッシュが要る) なので、
+          // 0 要素のみ growable array に。N>0 は AllocGrowableArray + ArrayPush に展開。
+          const n = instr.operand!;
+          const elems: number[] = [];
+          for (let j = 0; j < n; j++) elems.unshift(stack.pop()!);
+          const arr = registerOp(createOp(irFunc, "AllocGrowableArray", [], "any"));
+          block.ops.push(arr);
+          // 初期要素を push で詰める
+          for (const e of elems) {
+            const p = registerOp(createOp(irFunc, "ArrayPush", [arr.id, e], "any"));
+            block.ops.push(p);
+          }
+          stack.push(arr.id);
           break;
         }
         case "LoadThis": {
@@ -468,7 +505,11 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
     }
   }
 
-  // ======== パス 3: Phi の inputs を埋める ========
+  // ======== パス 3a: 全 Phi の inputs を先に埋める ========
+  // (collapse を「埋めながら」やると、先に collapse した Phi の置換が
+  //  まだ inputs 未充填の後続 Phi に届かず、stale な値を拾って dangling
+  //  参照になる。例: 2 つ目のループの param 参照が消えた Phi を指す。
+  //  → 充填と collapse を分離する)
   for (const [blockId, phis] of phiMap) {
     const preds = blockEdges.get(blockId)!.predecessors;
     for (const [slot, phi] of phis) {
@@ -480,24 +521,35 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           phi.inputs.push([predId, val]);
         }
       }
-      // 自己参照を除いて、全入力が同じ値なら Phi 不要
-      const nonSelfInputs = phi.inputs.filter(([, vid]) => vid !== phi.id);
-      const allSame = nonSelfInputs.length > 0 && nonSelfInputs.every(([, vid]) => vid === nonSelfInputs[0][1]);
-      if (allSame || phi.inputs.length < 2) {
-        // Phi を除去: 参照を唯一の値に置き換え
-        const replacement = nonSelfInputs.length > 0 ? nonSelfInputs[0][1] : undefined;
-        if (replacement !== undefined) {
-          // この Phi を参照してる全 Op の引数を置換
-          for (const b of irFunc.blocks) {
-            for (const op of b.ops) {
-              op.args = op.args.map(a => a === phi.id ? replacement : a);
-            }
-            for (const p of b.phis) {
-              p.inputs = p.inputs.map(([bid, vid]) => [bid, vid === phi.id ? replacement : vid]);
+    }
+  }
+
+  // ======== パス 3b: 不要な Phi を collapse (fixpoint) ========
+  // 全 inputs が充填済みなので、置換は全 Phi/Op に正しく伝播する。
+  // chained collapse (Phi → Phi → 値) に対応するため変化が無くなるまで回す。
+  let collapsed = true;
+  while (collapsed) {
+    collapsed = false;
+    for (const [, phis] of phiMap) {
+      for (const [, phi] of phis) {
+        if (phi.inputs.length === 0) continue; // 既に collapse 済み
+        const nonSelfInputs = phi.inputs.filter(([, vid]) => vid !== phi.id);
+        const allSame = nonSelfInputs.length > 0 && nonSelfInputs.every(([, vid]) => vid === nonSelfInputs[0][1]);
+        if (allSame || phi.inputs.length < 2) {
+          const replacement = nonSelfInputs.length > 0 ? nonSelfInputs[0][1] : undefined;
+          if (replacement !== undefined) {
+            for (const b of irFunc.blocks) {
+              for (const op of b.ops) {
+                op.args = op.args.map(a => a === phi.id ? replacement : a);
+              }
+              for (const p of b.phis) {
+                p.inputs = p.inputs.map(([bid, vid]) => [bid, vid === phi.id ? replacement : vid]);
+              }
             }
           }
+          phi.inputs = [];
+          collapsed = true;
         }
-        phi.inputs = [];
       }
     }
   }

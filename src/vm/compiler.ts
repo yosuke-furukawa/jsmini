@@ -1342,8 +1342,10 @@ class BytecodeCompiler {
         if (expr.argument.type === "Identifier") {
           this.emitLoad(expr.argument.name);
           if (expr.prefix) {
+            // ++x / --x: 新しい値を計算してストア。StaLocal/StaUpvalue/StaGlobal は
+            // peek ベース (スタックを pop しない) なので、ストア後もスタック頂点に
+            // 新しい値が残る = 式の結果。Dup は不要 (入れると 2 値残ってリークする)。
             this.emit(expr.operator === "++" ? "Increment" : "Decrement");
-            this.emit("Dup");
             this.emitStore(expr.argument.name);
           } else {
             this.emit("Dup"); // 古い値を残す

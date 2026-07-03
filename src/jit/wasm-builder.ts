@@ -101,6 +101,7 @@ export const WASM_GC_OP = {
   array_get_u: 0x0d,
   array_set: 0x0e,
   array_len: 0x0f,
+  array_copy: 0x11,   // 0xfb 0x11 <dst_type_idx> <src_type_idx>
 } as const;
 
 // ref 型のバイト列を生成 (params/results で使用)
