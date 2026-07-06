@@ -54,7 +54,7 @@ function classifyMathCall(name: string, argc: number): "native_unary" | "native_
   return "unsupported";
 }
 
-export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set(), growableArrayValues: Set<number> = new Set(), growFnIndex = -1): { body: number[]; extraLocals: number; lenLocals: number; refLocals: number; wat: string } {
+export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set(), growableArrayValues: Set<number> = new Set(), growFnIndex = -1, globalsAsParams = false): { body: number[]; extraLocals: number; lenLocals: number; refLocals: number; wat: string; propNames: string[]; writtenProps: string[]; globalNames: string[]; hasStoreGlobal: boolean } {
   const body: number[] = [];
   const watLines: string[] = [];
   let watIndent = 1;
@@ -90,25 +90,49 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
       }
     }
   }
-  // this (オブジェクトプロパティアクセス) の検出
+  // this (オブジェクトプロパティアクセス) の検出。
+  // propOffsets: この関数が使うプロパティ名 → linear memory の offset (IR 出現順)。
+  // writtenProps: StoreProperty されるプロパティ名 (実行後に VM へ write-back が必要)
   let hasThis = false;
   const propOffsets = new Map<string, number>();
+  const writtenProps = new Set<string>();
   let propCounter = 0;
   for (const block of irFunc.blocks) {
     for (const op of block.ops) {
       if (op.opcode === "LoadThis") hasThis = true;
       if ((op.opcode === "LoadProperty" || op.opcode === "StoreProperty") && op.globalName) {
+        if (op.opcode === "LoadProperty" && op.calleeName?.startsWith("Math.")) continue;
         if (!propOffsets.has(op.globalName)) {
           propOffsets.set(op.globalName, propCounter++);
         }
+        if (op.opcode === "StoreProperty") writtenProps.add(op.globalName);
       }
     }
   }
 
-  const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0);
+  // グローバル参照の収集 (skip: 自己再帰 callee / Math / Array / undefined)。
+  // tryCall 経路 (globalsAsParams=true) では読み取り専用の追加パラメータとして
+  // 呼び出し時に実際の値を渡す。OSR 経路では従来通り zero-init local
+  // (スクリプト全体が Wasm 内で完結し内部整合するため)。
+  const globalNames: string[] = [];
+  let hasStoreGlobal = false;
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      if ((op.opcode === "LoadGlobal" || op.opcode === "StoreGlobal") && op.globalName) {
+        if (op.globalName === irFunc.name) continue;
+        if (op.globalName === "Math" || op.globalName === "Array" || op.globalName === "undefined") continue;
+        if (op.opcode === "StoreGlobal") hasStoreGlobal = true;
+        if (!globalNames.includes(op.globalName)) globalNames.push(op.globalName);
+      }
+    }
+  }
+
+  const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0)
+    + (globalsAsParams ? globalNames.length : 0);
 
   // Op ID → Wasm local index のマッピング
-  // Wasm locals: [params..., upvalue params..., this param..., phi locals..., temp locals...]
+  // Wasm locals: [params..., upvalue params..., this param..., global params...,
+  //               phi locals..., temp locals...]
   const opToLocal = new Map<number, number>();
   let nextLocal = totalParamCount;
 
@@ -130,21 +154,13 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     }
   }
 
-  // グローバル変数 → Wasm local に割り当て
+  // グローバル変数 → Wasm local に割り当て。
+  // params-mode: [user params][upvalues][this] の直後の param index に固定。
+  // locals-mode (OSR): 従来通り locals 領域に割当 (zero-init)
   const globalToLocal = new Map<string, number>();
-  for (const block of irFunc.blocks) {
-    for (const op of block.ops) {
-      if ((op.opcode === "LoadGlobal" || op.opcode === "StoreGlobal") && op.globalName) {
-        // 自己再帰の callee 参照は local 不要 (call 0 で直接呼ぶ)
-        if (op.globalName === irFunc.name) continue;
-        // "Math" / "Array" は dispatch / AllocArray で消費される参照なので
-        // 値としての local は不要 (codegen 側でも emit skip)
-        if (op.globalName === "Math" || op.globalName === "Array") continue;
-        if (!globalToLocal.has(op.globalName)) {
-          globalToLocal.set(op.globalName, nextLocal++);
-        }
-      }
-    }
+  const globalParamBase = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0);
+  for (let i = 0; i < globalNames.length; i++) {
+    globalToLocal.set(globalNames[i], globalsAsParams ? globalParamBase + i : nextLocal++);
   }
 
   // 中間値で複数回使われるもの or 別ブロックで使われるもの → local に格納
@@ -343,20 +359,24 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   // br N は N 番目のエントリにジャンプ
   const controlStack: { kind: "block" | "loop"; targetBlockId: number }[] = [];
 
+  // topoOrder 上の次ブロック (= fall-through 先) の逆引き
+  const topoNext = new Map<number, number>();
+  for (let i = 0; i + 1 < cfg.topoOrder.length; i++) topoNext.set(cfg.topoOrder[i], cfg.topoOrder[i + 1]);
+
   // トポロジカル順にブロックを処理
   for (const blockId of cfg.topoOrder) {
     const block = blockMap.get(blockId);
     if (!block) continue;
 
     // if-else の block end: false 分岐ブロックの前に end を出す
-    if (controlStack.length > 0) {
+    while (controlStack.length > 0) {
       const top = controlStack[controlStack.length - 1];
       if (top.kind === "block" && top.targetBlockId === blockId && !cfg.loopHeaders.has(blockId)) {
         watIndent--;
         body.push(WASM_OP.end);
         wat("end ;; block (if-else)");
         controlStack.pop();
-      }
+      } else break;
     }
 
     // ループヘッダ: block $exit + loop $continue を開始
@@ -383,11 +403,36 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
       // 正しくは: successors[1] (false=B2) のブロックを block の外に、
       //           successors[0] (true=B1) を block の中に入れる
       // br_if で条件 false のとき B1 を実行 → eqz + br_if で「cond=false → skip」
-      const falseTarget = block.successors[1]; // B2 (false 分岐, block の外)
+      // ダイヤモンドの向き:
+      // - if/else (JumpIfFalse 由来): true 辺が fall-through → block end = falseTarget,
+      //   条件を反転して false なら skip
+      // - || / && / 三項 (JumpIfTrue 由来): false 辺が fall-through → block end =
+      //   trueTarget, 条件そのままで true なら skip (inverted diamond)
+      const trueTarget = block.successors[0];
+      const falseTarget = block.successors[1];
+      const nextEmit = topoNext.get(blockId);
+      const invertedDiamond = falseTarget === nextEmit && trueTarget !== nextEmit;
+      const wrapTarget = invertedDiamond ? trueTarget : falseTarget;
+      // 完全ダイヤモンド (三項 / if-else 合流): then 側が join へ Jump で
+      // 飛び越える場合は、join で閉じる外側 block も開く (then の Jump が
+      // br できる先を作る)。then が Return で終わる形 (fib 等) は不要
+      if (!invertedDiamond) {
+        const thenBlock = blockMap.get(trueTarget);
+        const thenLast = thenBlock?.ops[thenBlock.ops.length - 1];
+        if (thenLast?.opcode === "Jump") {
+          const join = thenBlock!.successors[0];
+          if (join !== undefined && join !== falseTarget && !cfg.backEdges.has(`${trueTarget}→${join}`)) {
+            body.push(WASM_OP.block, WASM_VOID);
+            controlStack.push({ kind: "block", targetBlockId: join });
+            wat(`block $join_${join}`);
+            watIndent++;
+          }
+        }
+      }
       body.push(WASM_OP.block, WASM_VOID);
-      controlStack.push({ kind: "block", targetBlockId: falseTarget });
-      wat(`;; B${blockId} (if-else)`);
-      wat(`block $else_${falseTarget}`);
+      controlStack.push({ kind: "block", targetBlockId: wrapTarget });
+      wat(`;; B${blockId} (if-else${invertedDiamond ? ", inverted" : ""})`);
+      wat(`block $else_${wrapTarget}`);
       watIndent++;
     } else if (block.ops.length > 0) {
       wat(`;; B${blockId}`);
@@ -396,6 +441,19 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     // 通常の命令を出力
     for (const op of block.ops) {
       if (op.opcode === "Branch") {
+        // Branch 経由のエッジにも Phi 書き込みが要る (|| / && / 三項の
+        // スタック Phi は Branch の true 側から値を受ける)。同じ Phi が
+        // 両 successor から異なる値を貰うことは無い (Phi は 1 ブロックに
+        // 属する) ので、br_if の前に無条件で書いてよい
+        const bwrites = phiWrites.get(blockId);
+        if (bwrites) {
+          for (const { phiLocal, valueId } of bwrites) {
+            emitValueOrConst(valueId, body, opToLocal, opById);
+            wat(`;; phi write (branch): local ${phiLocal} = v${valueId}`);
+            body.push(WASM_OP.local_set, phiLocal);
+            wat(`local.set ${phiLocal}`);
+          }
+        }
         // 条件分岐: Branch の条件を出力
         emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         // Phi の値を書き込み (fall-through = body 方向の場合)
@@ -410,14 +468,20 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
           body.push(WASM_OP.br_if, exitDepth);
           wat(`br_if ${exitDepth} ;; → exit`);
         } else {
-          // 非ループ: 条件を反転して、false のとき true 分岐 (B1) をスキップ
-          body.push(WASM_OP.i32_eqz);
-          wat("i32.eqz");
+          // 非ループ: ダイヤモンドの向きに合わせて br。
+          // 通常 (true 辺が fall-through): 条件反転して false なら skip
+          // inverted (false 辺が fall-through, || / && 等): true なら skip
+          const nextEmit2 = topoNext.get(blockId);
+          const inverted2 = block.successors[1] === nextEmit2 && block.successors[0] !== nextEmit2;
+          if (!inverted2) {
+            body.push(WASM_OP.i32_eqz);
+            wat("i32.eqz");
+          }
           const skipDepth = controlStack.length - 1 - controlStack.findLastIndex(
             e => e.kind === "block"
           );
           body.push(WASM_OP.br_if, skipDepth);
-          wat(`br_if ${skipDepth} ;; → else (skip true branch)`);
+          wat(`br_if ${skipDepth} ;; → ${inverted2 ? "join (skip false branch)" : "else (skip true branch)"}`);
         }
       } else if (op.opcode === "Jump") {
         // 無条件ジャンプ
@@ -439,8 +503,17 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
           );
           body.push(WASM_OP.br, loopDepth);
           wat(`br ${loopDepth} ;; → loop`);
+        } else if (jumpTarget !== undefined && jumpTarget !== topoNext.get(blockId)) {
+          // forward jump が fall-through でない (then → join の飛び越え等):
+          // 対応する block end があれば br で抜ける
+          const idx = controlStack.findLastIndex(e => e.kind === "block" && e.targetBlockId === jumpTarget);
+          if (idx >= 0) {
+            const depth = controlStack.length - 1 - idx;
+            body.push(WASM_OP.br, depth);
+            wat(`br ${depth} ;; → join B${jumpTarget}`);
+          }
         }
-        // forward jump は fall-through
+        // それ以外の forward jump は fall-through
       } else if (op.opcode === "Return") {
         emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
         wat(`local.get ${opToLocal.get(op.args[0]) ?? "?"} ;; v${op.args[0]}`);
@@ -498,7 +571,10 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   const fullWat = [header, localDecls, ";; phi init", ...watLines, ")"].filter(Boolean).join("\n");
 
   // extraLocals は scalar group の数 (ref local は別グループ)。
-  return { body: [...initCode, ...body], extraLocals, lenLocals, refLocals, wat: fullWat };
+  // propNames[offset] = プロパティ名 (executeWasm の copy-in/out 用)
+  const propNames: string[] = [];
+  for (const [name, off] of propOffsets) propNames[off] = name;
+  return { body: [...initCode, ...body], extraLocals, lenLocals, refLocals, wat: fullWat, propNames, writtenProps: [...writtenProps], globalNames, hasStoreGlobal };
 }
 
 // ========== Op → Wasm 命令 ==========
@@ -570,6 +646,13 @@ function emitOp(
       if (op.globalName === irFunc.name) break;
       // "Math" / "Array" の参照は dispatch / AllocArray で消費されるので emit 不要
       if (op.globalName === "Math" || op.globalName === "Array") break;
+      // undefined は数値モデルでは 0 (Undefined op と同じ扱い)
+      if (op.globalName === "undefined") {
+        if (forceF64) body.push(WASM_OP.f64_const, ...f64ToBytes(0));
+        else body.push(WASM_OP.i32_const, ...i32ToLEB128(0));
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
       const gLocal = globalToLocal.get(op.globalName!);
       if (gLocal !== undefined) {
         body.push(WASM_OP.local_get, gLocal);
@@ -1115,7 +1198,7 @@ function getReturnType(irFunc: IRFunction): IRType {
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
-export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; memory?: WebAssembly.Memory; hasAwait?: boolean; jspiWrapped?: (...args: number[]) => Promise<number> } | null {
+export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; propNames?: string[]; writtenProps?: string[]; globalNames?: string[]; memory?: WebAssembly.Memory; hasAwait?: boolean; jspiWrapped?: (...args: number[]) => Promise<number> } | null {
   try {
     // IR に Wasm 化できない Op が含まれてたらスキップ
     let hasArrayOps = false;
@@ -1368,7 +1451,18 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     // growable 配列があれば __grow ヘルパを main の直後 (index importCount+1) に置く
     const hasGrowable = growableArrayValues.size > 0;
     const growFnIndex = hasGrowable ? builder.importCount + 1 : -1;
-    const { body: bodyCode, extraLocals, lenLocals, refLocals } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues, growableArrayValues, growFnIndex);
+    // tryCall 経路 (osrLocalCount 無し) ではグローバルを読み取り専用の追加
+    // パラメータとして渡す。StoreGlobal を含む関数は VM 側へ書き戻す術が
+    // 無いので reject (OSR は従来通り zero-init local で自己完結)
+    const globalsAsParams = osrLocalCount === undefined;
+    const { body: bodyCode, extraLocals, lenLocals, refLocals, propNames, writtenProps, globalNames, hasStoreGlobal } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues, growableArrayValues, growFnIndex, globalsAsParams);
+    if (globalsAsParams && hasStoreGlobal) {
+      if (DEBUG_WASM) console.error("[compileIRToWasm] reject: StoreGlobal in tryCall path (no write-back for globals)");
+      return null;
+    }
+    if (globalsAsParams) {
+      for (let i = 0; i < globalNames.length; i++) { params.push(wasmType); paramValTypeCount++; }
+    }
 
     // OSR モード: extra locals もパラメータに含める (VM から全 locals を受け取る)
     if (osrLocalCount !== undefined && osrLocalCount > irFunc.paramCount) {
@@ -1489,6 +1583,9 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
       arrayParams: [...arrayParams],
       upvalueCount: upvalueCount > 0 ? upvalueCount : undefined,
       hasThis: hasThis || undefined,
+      propNames: propNames.length > 0 ? propNames : undefined,
+      writtenProps: writtenProps.length > 0 ? writtenProps : undefined,
+      globalNames: globalsAsParams && globalNames.length > 0 ? globalNames : undefined,
       memory,
       hasAwait: hasAwait || undefined,
       jspiWrapped,
