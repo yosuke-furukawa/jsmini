@@ -75,6 +75,13 @@ export function getProperty(obj: JSObject, key: string): unknown {
     }
     current = (current[PROTO_KEY] as JSObject | null) ?? null;
   }
+  // PROTO_KEY チェーンに無ければ host のプロトタイプチェーンを見る。
+  // TW のオブジェクト/JSFunction は素の JS オブジェクトなので、
+  // `Object.defineProperty(Object.prototype, "inh", ...)` で定義した
+  // プロパティ (deltablue の inheritsFrom パターン) はここで見える
+  if (typeof obj === "object" && obj !== null && key in obj) {
+    return (obj as any)[key];
+  }
   return undefined;
 }
 
