@@ -29,38 +29,38 @@ Phase 30 で Octane 4 本 × 3 モードが完走したが **JIT ≈ VM** (ど�
 
 ### 31-1: 準備
 
-- [ ] 31-1a: TODO + draft PR
+- [x] 31-1a: TODO + draft PR
 
 ### 31-2: this-model 刷新 (used-props ベース)
 
-- [ ] 31-2a: compileIRToWasm が propOffsets (offset 順の名前リスト) と
+- [x] 31-2a: compileIRToWasm が propOffsets (offset 順の名前リスト) と
       writtenProps (StoreProperty される名前) を返す
-- [ ] 31-2b: executeWasm: 関数が**使う**プロパティだけを名前で HC から
+- [x] 31-2b: executeWasm: 関数が**使う**プロパティだけを名前で HC から
       引いて offset 順に copy-in。使うプロパティが非数値 (または i32
       spec で非整数) なら deopt。使わないプロパティは参照でも無視
       (richards の TCB.link 等があっても state だけ使うメソッドは JIT 可)
-- [ ] 31-2c: writtenProps があれば fn 後に linear memory → jsObjSet で
+- [x] 31-2c: writtenProps があれば fn 後に linear memory → jsObjSet で
       copy-back (mutating メソッドの正しさ)
-- [ ] 31-2d: 回帰テスト — mutating メソッド / プロパティ順不一致 /
+- [x] 31-2d: 回帰テスト — mutating メソッド / プロパティ順不一致 /
       未使用オブジェクト参照プロパティ / f64 値で deopt
 
 ### 31-3: 計測
 
-- [ ] 31-3a: richards/deltablue の tier 棚卸し再取得 (compiled 増・
+- [x] 31-3a: richards/deltablue の tier 棚卸し再取得 (compiled 増・
       deopt 減の確認)
-- [ ] 31-3b: octane-bench で JIT vs VM 比較
+- [x] 31-3b: octane-bench で JIT vs VM 比較
 
 ### 31-4: navier-stokes カーネル (調査 → 可能なら着手)
 
-- [ ] 31-4a: lin_solve 等が reject される正確な理由の列挙
+- [x] 31-4a: lin_solve 等が reject される正確な理由の列挙
       (upvalue / 配列引数 / 相互呼び出しのどれがブロッカーか)
-- [ ] 31-4b: 対応方針を決める (compileMulti 拡張 or 呼び出し規約追加)。
+- [x] 31-4b: 対応方針を決める (compileMulti 拡張 or 呼び出し規約追加)。
       規模次第で Phase 32 に切り出し
 
 ### 31-5: まとめ
 
-- [ ] 31-5a: LEARN-Phase31.md
-- [ ] 31-5b: PR を Ready for review に
+- [x] 31-5a: LEARN-Phase31.md
+- [x] 31-5b: PR を Ready for review に
 
 ## 技術メモ
 
@@ -78,3 +78,17 @@ V8 はオブジェクトスロットを tagged pointer で持つため、参照�
 used-props に参照が含まれるメソッド (scheduler.schedule 等) は引き続き
 deopt で VM 実行。これらを JIT するには tagged 表現か object-table
 (参照を整数 ID にして間接参照) が必要で、それは次フェーズ以降の候補。
+
+## 結果 (完了時追記)
+
+- richards: **JIT 112ms vs VM 116ms — JIT 初勝利**。splay/NS 同等、
+  deltablue -10% (小メソッド境界コスト。本質解 = メソッドクラスタの
+  インライン化 → Phase 32 候補)
+- 過程で ||/&&/三項の JIT が最初から壊れていた 3 層バグを発見・修正
+  (スタック Phi / Branch phi write / ダイヤモンド構造化)。詳細 LEARN-Phase31
+- グローバル読みの JIT が zero-init local を読んでいた correctness バグも
+  修正 (読み取り専用パラメータ渡し + StoreGlobal reject)
+- 簿記 fast path (__jitCached) で「決まったら profiling を止める」
+- 31-4b: NS カーネルは「クロージャクラスタ同時コンパイル + 配列 upvalue」
+  が必要と判明 → deltablue インラインと合わせて Phase 32 に切り出し
+- 全 985 テストパス (回帰 11 ケース追加)
