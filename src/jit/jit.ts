@@ -11,6 +11,8 @@ import { compileIRToWasm } from "../ir/codegen.js";
 
 // ブラウザ (playground) には process が無いので安全にガード
 const DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
+// デバッグ用: JIT_SKIP=name1,name2 で特定関数の JIT を無効化 (犯人の二分探索用)
+const JIT_SKIP = new Set((typeof process !== "undefined" && process.env?.JIT_SKIP ? process.env.JIT_SKIP.split(",") : []));
 
 export type JitOptions = {
   threshold: number;
@@ -61,9 +63,11 @@ export class JitManager {
     if (!this.traceTier) return;
     const count = callCount ?? this.feedback.get(func)?.callCount ?? 0;
     this.tierLog.push(`[TIER] ${func.name}: ${tier} (call #${count})`);
+    if (DEBUG_WASM) console.error(`[TIER] ${func.name}: ${tier} (call #${count})`);
   }
 
   tryCall(func: BytecodeFunction, args: unknown[], upvalueValues: unknown[] = [], thisObj?: unknown): { result: unknown } | null {
+    if (JIT_SKIP.size > 0 && JIT_SKIP.has(func.name)) return null;
     const fb = this.feedback.get(func);
     const callCount = fb?.callCount ?? 0;
 
@@ -333,14 +337,23 @@ export class JitManager {
       const slots = getSlots(thisObj);
       const hc = getHiddenClass(thisObj as any);
       const view = new Int32Array(memory.buffer);
-      // hidden class の properties から、数値プロパティだけを 0-based で詰めてコピー
+      // hidden class の properties から 0-based で詰めてコピー
       // IR codegen の propOffsets は出現順で 0, 1, 2... と振るので同じ順序にする
       const base = 0;
       let dst = 0;
       for (const [name, slotIdx] of hc.properties) {
         if (name === "__proto__") continue;
         const v = slots[slotIdx];
-        view[dst] = typeof v === "number" ? v : 0;
+        if (typeof v !== "number") {
+          // this のスロットに非数値 (オブジェクト/null/文字列) がある →
+          // linear memory の数値モデルに乗らない。黙って 0 にすると
+          // splay の this.root_ (木のノード) が 0 になり結果が壊れるので
+          // deopt して VM で実行する
+          this.deoptimize(func, args);
+          this.logTier(func, "Bytecode VM (after deopt: non-numeric this slot)", callCount);
+          return null;
+        }
+        view[dst] = v;
         dst++;
       }
       wasmArgs.push(base);

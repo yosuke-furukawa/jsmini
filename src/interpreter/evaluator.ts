@@ -67,6 +67,12 @@ function isTruthy(value: unknown): boolean {
   return !!value;
 }
 
+// `==` で「オブジェクト」として扱う値 (JSString は primitive 扱い)。
+// 両辺がこれなら参照比較で、ToPrimitive しない (JS 仕様 7.2.14)
+function isEqObjectTW(v: unknown): boolean {
+  return (typeof v === "object" && v !== null && !isJSString(v)) || typeof v === "function";
+}
+
 // Generator を同期的に最後まで実行するヘルパー
 function exhaustGen(gen: Generator): unknown {
   let r = gen.next();
@@ -328,7 +334,7 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     return typeof key === "symbol" ? key : String(key);
   };
   twObjectWrapper.defineProperty = (obj: unknown, key: unknown, desc: any) => {
-    if (obj === null || typeof obj !== "object") {
+    if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
       throw new TypeError("Object.defineProperty called on non-object");
     }
     const k = twToKey(key);
@@ -336,7 +342,9 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
       throw new TypeError("accessor descriptors not yet supported");
     }
     if (desc && typeof desc === "object" && "value" in desc) {
-      (obj as any)[k] = desc.value;
+      // enumerable は JS デフォルト (false) — 素の代入だと for-in を汚染する
+      // (Object.prototype への定義で顕在化)。writable/configurable は true
+      Object.defineProperty(obj, k, { value: desc.value, writable: true, configurable: true });
     }
     return obj;
   };
@@ -377,6 +385,8 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     if (obj === null || typeof obj !== "object") return [];
     return Object.getOwnPropertySymbols(obj);
   };
+  // `Object.prototype` 参照を host Object.prototype に直結 (VM と同方針)
+  twObjectWrapper.prototype = Object.prototype;
   env.defineReadOnly("Object", twObjectWrapper);
 
   // JSON
@@ -1871,6 +1881,9 @@ function* evalBinaryExpression(
     case "==":
       if (isJSString(left) && isJSString(right)) return jsStringEquals(left, right);
       if (isJSString(left) || isJSString(right)) return false;
+      // 両辺オブジェクトなら参照比較 (JS 仕様 7.2.14)。ToPrimitive しない。
+      // これを怠ると別オブジェクト同士が "[object Object]" 同士で true になる
+      if (isEqObjectTW(rawLeft) && isEqObjectTW(rawRight)) return rawLeft === rawRight;
       return left == right;
     case "===":
       if (isJSString(rawLeft) && isJSString(rawRight)) return jsStringEquals(rawLeft, rawRight);
@@ -1879,6 +1892,7 @@ function* evalBinaryExpression(
     case "!=":
       if (isJSString(left) && isJSString(right)) return !jsStringEquals(left, right);
       if (isJSString(left) || isJSString(right)) return true;
+      if (isEqObjectTW(rawLeft) && isEqObjectTW(rawRight)) return rawLeft !== rawRight;
       return left != right;
     case "!==":
       if (isJSString(rawLeft) && isJSString(rawRight)) return !jsStringEquals(rawLeft, rawRight);

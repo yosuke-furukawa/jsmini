@@ -401,7 +401,18 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
       throw new TypeError("accessor descriptors not yet supported");
     }
     if (descHas(desc, "value")) {
-      jsObjSet(obj as any, k, descField(desc, "value"));
+      if (isJSObject(obj)) {
+        jsObjSet(obj as any, k, descField(desc, "value"));
+      } else if (obj !== null && (typeof obj === "object" || typeof obj === "function")) {
+        // host オブジェクト (Object.prototype / BytecodeFunction 等)。
+        // jsObjSet だと getHiddenClass で内部エラーになるので host の
+        // defineProperty を使う。enumerable は JS デフォルト (false) のまま
+        // にして for-in を汚染しない。configurable/writable は restore や
+        // 再定義を許すため true (jsmini は属性を強制しない方針)
+        Object.defineProperty(obj, k, { value: descField(desc, "value"), writable: true, configurable: true });
+      } else {
+        throw new TypeError("Object.defineProperty called on non-object");
+      }
     }
     return obj;
   };
@@ -454,6 +465,10 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return [];
   };
 
+  // ユーザコードの `Object.prototype` 参照を host Object.prototype に繋ぐ
+  // (deltablue の defineProperty(Object.prototype, ...) パターン。
+  //  Array/String/Map 等と同じ host prototype 直結方針)
+  ObjectWrapper.prototype = Object.prototype;
   vm.setGlobal("Object", ObjectWrapper);
 
   // Math

@@ -368,6 +368,11 @@ class BytecodeCompiler {
         if (this.resolveLocal(name) === null) this.declareLocal(name);
       }
     }
+    // var hoisting: 本体内 (ネスト関数は除く) の var 束縛名を事前に
+    // declareLocal。これが無いと「クロージャがソース上で後方の var を
+    // 参照する」とき、compile 時点で locals に無く global 扱いになる
+    // (navier-stokes の this.update が var dens_prev より前にあるパターン)
+    this.hoistVarNames(body);
     // 本体をコンパイル
     for (const stmt of body) {
       this.compileStatement(stmt);
@@ -375,6 +380,50 @@ class BytecodeCompiler {
     // 明示的 return がない場合は undefined を返す
     this.emit("LdaUndefined");
     this.emit("Return");
+  }
+
+  // 関数本体の var 束縛名を再帰的に集めて declareLocal する (var hoisting)。
+  // ネスト関数 (FunctionDeclaration/FunctionExpression) の中は走査しない。
+  hoistVarNames(stmts: Statement[]): void {
+    for (const stmt of stmts) {
+      const s = stmt as any;
+      switch (s.type) {
+        case "VariableDeclaration":
+          if (s.kind === "var") {
+            for (const decl of s.declarations) this.preDeclareBindingNames(decl.id);
+          }
+          break;
+        case "BlockStatement": this.hoistVarNames(s.body); break;
+        case "IfStatement":
+          this.hoistVarNames([s.consequent]);
+          if (s.alternate) this.hoistVarNames([s.alternate]);
+          break;
+        case "WhileStatement": case "DoWhileStatement":
+          this.hoistVarNames([s.body]); break;
+        case "ForStatement":
+          if (s.init && s.init.type === "VariableDeclaration" && s.init.kind === "var") {
+            for (const decl of s.init.declarations) this.preDeclareBindingNames(decl.id);
+          }
+          this.hoistVarNames([s.body]);
+          break;
+        case "ForInStatement": case "ForOfStatement":
+          if (s.left && s.left.type === "VariableDeclaration" && s.left.kind === "var") {
+            for (const decl of s.left.declarations) this.preDeclareBindingNames(decl.id);
+          }
+          this.hoistVarNames([s.body]);
+          break;
+        case "TryStatement":
+          if (s.block) this.hoistVarNames(s.block.body);
+          if (s.handler?.body) this.hoistVarNames(s.handler.body.body);
+          if (s.finalizer) this.hoistVarNames(s.finalizer.body);
+          break;
+        case "SwitchStatement":
+          for (const c of s.cases ?? []) this.hoistVarNames(c.consequent ?? []);
+          break;
+        case "LabeledStatement": this.hoistVarNames([s.body]); break;
+        default: break;
+      }
+    }
   }
 
   compileStatement(stmt: Statement): void {
@@ -1353,6 +1402,52 @@ class BytecodeCompiler {
             this.emitStore(expr.argument.name);
             this.emit("Pop"); // 新しい値を捨て、古い値を返す
           }
+        } else if (expr.argument.type === "MemberExpression") {
+          // ++obj.prop / obj.prop++ / ++obj[k] / obj[k]++。
+          // obj/key を 2 回 (読み+書き) 使うので temp に退避する。
+          // 関数内なら local slot、トップレベルなら global (for-in と同じパターン)。
+          // ※ 以前は Identifier 以外で何も emit せず、ExpressionStatement の
+          //    Pop が別の値を壊していた (deltablue の ++this.currentMark、
+          //    richards の this.count++ 等が全滅していた)
+          const member = expr.argument as any;
+          const useLocal = this.isFunction;
+          const off = this.currentOffset();
+          const mkTmp = (tag: string) => useLocal
+            ? { slot: this.localCount++, g: 0 }
+            : { slot: 0, g: this.addConstant(`__upd_${tag}_${off}`) };
+          const sta = (t: { slot: number; g: number }) => useLocal ? this.emit("StaLocal", t.slot) : this.emit("StaGlobal", t.g);
+          const lda = (t: { slot: number; g: number }) => useLocal ? this.emit("LdaLocal", t.slot) : this.emit("LdaGlobal", t.g);
+          const objT = mkTmp("obj");
+          const keyT = member.computed ? mkTmp("key") : null;
+          const valT = mkTmp("val");
+          const oldT = expr.prefix ? null : mkTmp("old");
+          // obj (と computed key) を退避
+          this.compileExpression(member.object);
+          sta(objT); this.emit("Pop");
+          if (keyT) { this.compileExpression(member.property); sta(keyT); this.emit("Pop"); }
+          // 現在値を読む
+          lda(objT);
+          if (keyT) { lda(keyT); this.emit("GetPropertyComputed"); }
+          else {
+            const nameIdx = this.addConstant(member.property.name ?? String(member.property.value));
+            this.emitWithIC("GetProperty", nameIdx);
+          }
+          // stack: [old]
+          if (oldT) sta(oldT); // postfix: 古い値を退避 (Sta は peek なのでスタック不変)
+          this.emit(expr.operator === "++" ? "Increment" : "Decrement");
+          // stack: [new]
+          sta(valT); this.emit("Pop");
+          // 書き戻し (SetPropertyAssign: [value, obj] / SetPropertyComputed: [obj, key, value])
+          if (keyT) { lda(objT); lda(keyT); lda(valT); this.emit("SetPropertyComputed"); }
+          else {
+            const nameIdx = this.addConstant(member.property.name ?? String(member.property.value));
+            lda(valT); lda(objT); this.emitWithIC("SetPropertyAssign", nameIdx);
+          }
+          // stack: [new]
+          if (oldT) { this.emit("Pop"); lda(oldT); } // postfix は古い値を返す
+        } else {
+          // その他 (来ないはずだが、スタック整合のため undefined を積む)
+          this.emit("LdaUndefined");
         }
         break;
       }

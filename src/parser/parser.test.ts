@@ -529,3 +529,39 @@ describe("Parser - Step 3: for...of", () => {
     assert.equal(stmt.left.declarations[0].id.type, "ArrayPattern");
   });
 });
+
+describe("Parser - Phase 30: new の callee は member チェーンを含む", () => {
+  it("new T.Node(5) は new (T.Node)(5) に解析される", () => {
+    const ast = parse("new T.Node(5);");
+    const expr = (ast.body[0] as any).expression;
+    assert.equal(expr.type, "NewExpression");
+    assert.equal(expr.callee.type, "MemberExpression");
+    assert.equal(expr.callee.object.name, "T");
+    assert.equal(expr.callee.property.name, "Node");
+    assert.equal(expr.arguments.length, 1);
+  });
+
+  it("new a.b.c() の深いチェーン", () => {
+    const ast = parse("new a.b.c();");
+    const expr = (ast.body[0] as any).expression;
+    assert.equal(expr.type, "NewExpression");
+    assert.equal(expr.callee.type, "MemberExpression");
+    assert.equal(expr.callee.object.type, "MemberExpression");
+  });
+
+  it("new obj[k]() の computed member", () => {
+    const ast = parse("new obj[k]();");
+    const expr = (ast.body[0] as any).expression;
+    assert.equal(expr.type, "NewExpression");
+    assert.equal(expr.callee.type, "MemberExpression");
+    assert.equal(expr.callee.computed, true);
+  });
+
+  it("new Foo().bar() は従来通り (new の結果へのメソッド呼び出し)", () => {
+    const ast = parse("new Foo().bar();");
+    const expr = (ast.body[0] as any).expression;
+    assert.equal(expr.type, "CallExpression");
+    assert.equal(expr.callee.type, "MemberExpression");
+    assert.equal(expr.callee.object.type, "NewExpression");
+  });
+});
