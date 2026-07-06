@@ -96,16 +96,40 @@ classify + join + Map lookup ×3)。コンパイル済みコードの損は僅�
 V8 も profiling は下位ティア限定で、optimized code への呼び出しは
 インタープリタを経由しない — 同じ構造。
 
-## deltablue が教えてくれた限界: 境界コストとインライン
+## deltablue の「境界コスト」を解体したら 4 つの隠れコストだった
 
-残る deltablue の -10% は「29 個の小メソッドが JIT されたが、
-1 呼び出しあたりのメソッド仕事量 < Wasm 境界コスト」という構造。
-richards が勝てたのは、ホットループの中心 (state 遷移) がちょうど
-JIT できる形だったから。
+当初「小メソッドの Wasm 境界コスト」と一括りにしていた deltablue の
+-10% を、プロファイル (フック計測 + ワークロード 5 倍スケーリング法) で
+分解したら、境界そのものはほぼ無実だった:
+
+| 隠れコスト | 正体 | 修正 |
+|---|---|---|
+| 33k 回/走の無駄往復 | **見せかけ JIT**: hasThis の判定源が codegen (IR) と executeWasm (bytecode) で二重化。IR で LoadThis が消えた関数を this 付きで呼ぼうとして !memory → 毎回 null → VM 再実行 | CachedWasm.hasThis を単一真実源に |
+| 呼び出しごとの再コンパイル | **OSR の __osrDone がフレーム単位**。ループ 100 回超の関数を呼ぶたびに IR 構築 + Wasm コンパイル再試行 | 関数単位の __osrFn キャッシュ |
+| 毎 Return の classify | recordReturn に decided ガードが無い | __jitCached 決定済みでスキップ |
+| host V8 の IC 汚染 | __jitCached を実行途中に追加 → 関数オブジェクトの shape 遷移 → fn.prototype 読みが polymorphic 化 | 生成時にフィールドを持たせ shape 固定 |
+
+さらに「見せかけ JIT」を剥がしたら、**IR パスの StoreProperty が
+forceF64 時に trunc せず CompileError**、**direct パスが this 関数を
+実行不能な形でコンパイル**という correctness バグ 2 つが下から出てきた。
+偶然のガードがバグを隠す構図 (Phase 30 の「バグがバグを隠す」の再演)。
+
+結果: deltablue の JIT-VM 差は初回コンパイル ~10ms が支配になり、
+**定常状態 (ワークロード 5 倍) では +2.9%** まで縮小。navier-stokes も
+VM 同等に。
 
 **V8 が OO コードで速い本質はメソッド JIT ではなくインライン**
-(呼び出し境界の消滅)。jsmini でこれをやるには「メソッドクラスタを
+(呼び出し境界の消滅)。jsmini で勝ちに行くには「メソッドクラスタを
 1 つの Wasm モジュールに」— Phase 32 の本丸候補。
+
+### 計測手法の学び
+
+- **フック計測 (monkey-patch) + スケーリング法の併用が効く**: フックで
+  測れたのは 17ms、実際の差は 55ms — 「フックの外に犯人がいる」ことが
+  分かるのがスケーリング法 (x1 vs x5 で差が定数か比例か) の価値
+- 「◯◯が遅い」という仮説は 4 連続で外れた (executeWasm → tryCall 往復 →
+  recordReturn → shape) 。**毎回計測してから直す**を徹底しないと
+  無関係な最適化を積むところだった
 
 ## navier-stokes の reject 理由 (31-4a、実装は次フェーズ)
 
