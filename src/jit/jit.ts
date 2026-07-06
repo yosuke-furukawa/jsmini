@@ -36,6 +36,11 @@ type CachedWasm = {
   writtenProps?: string[];
   // 読み取り専用グローバル (呼び出しごとに VM の値を追加パラメータで渡す)
   globalNames?: string[];
+  // コンパイル済みモジュールが this パラメータを取るか (IR 基準)。
+  // bytecode に LoadThis があっても最適化で消えていれば false — 
+  // bytecode スキャンで判定すると「this を渡そうとして memory が無い」
+  // ミスマッチで毎回 null になる (deltablue で 33k 回/走)
+  hasThis?: boolean;
   // 呼び出しオーバーヘッド削減用キャッシュ (小メソッドでは view 生成と
   // HC 名前引きが支配的になる)
   i32view?: Int32Array;                     // memory.buffer の共有 view (grow しない前提)
@@ -152,7 +157,10 @@ export class JitManager {
       if (arrayArgIndices.length > 0) {
         compiled = this.compileWithRelatedFuncs(func, spec, arrayArgIndices);
         if (compiled) compiled.stringArgIndices = stringArgIndices;
-      } else {
+      } else if (!func.bytecode.some(i => i.op === "LoadThis")) {
+        // direct パスの this-model は memory を CachedWasm に渡せず実行できない
+        // (旧実装は「compiled ログを出すが !memory で毎回 VM」という見せかけ
+        //  JIT になっていた)。this 関数は IR パス専用にする
         const wasmFn = compileToWasmSync(func, spec);
         if (wasmFn) {
           compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
@@ -196,6 +204,7 @@ export class JitManager {
       if (result.propNames) cached.propNames = result.propNames;
       if (result.writtenProps) cached.writtenProps = result.writtenProps;
       if (result.globalNames) cached.globalNames = result.globalNames;
+      cached.hasThis = result.hasThis ?? false;
       return cached;
     } catch (e: any) {
       if (DEBUG_WASM) console.error("[compileViaIR] threw", e.message || e, e.stack);
@@ -351,14 +360,17 @@ export class JitManager {
 
     // this パラメータ: LoadThis がある関数で thisObj が JSObject の場合
     // slots をメモリにコピーしてベースアドレスを渡す
-    const hasThis = func.bytecode.some(i => i.op === "LoadThis");
+    // compile 結果基準 (undefined = legacy direct パスは this 関数を弾くので false 扱い)
+    const hasThis = cached.hasThis === true;
     if (hasThis && thisObj !== undefined) {
       if (!isJSObject(thisObj)) {
-        // thisObj が JSObject でない → JIT 不可
+        // thisObj が JSObject でない → JIT 不可 (フラグ化して以後 VM 直行)
+        this.deoptimize(func, args);
         return null;
       }
       if (!memory) {
-        // メモリがない → JIT 不可
+        // メモリがない → JIT 不可 (同上)
+        this.deoptimize(func, args);
         return null;
       }
       const slots = getSlots(thisObj);

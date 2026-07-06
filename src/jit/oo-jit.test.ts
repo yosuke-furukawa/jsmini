@@ -145,3 +145,22 @@ describe("Phase 31 — 読み取り専用グローバルのパラメータ渡し
     `, 30 * 1000 + 30);
   });
 });
+
+describe("Phase 31 — 見せかけ JIT の排除 (hasThis 単一真実源)", () => {
+  it("this を読み書きするメソッドが実際に Wasm で実行され結果が正しい", () => {
+    // 旧: IR パスが StoreProperty の f64 型不整合で CompileError →
+    // direct パスが this-model 無しでコンパイル → 旧 executeWasm の
+    // !memory ガードで「compiled ログは出るが毎回 VM」の見せかけ JIT。
+    // hasThis を compile 結果基準に単一化したら誤実行 (2802) が露呈した
+    const src = `
+      function T(s) { this.link = { big: "object" }; this.state = s; this.extra = null; }
+      T.prototype.bump = function () { this.state = this.state + 1; return this.state; };
+      var t = new T(0);
+      var r = 0;
+      for (var i = 0; i < 30; i++) { r = t.bump(); }
+      r * 100 + t.state;
+    `;
+    const jit = vmEvaluate(src, { jit: true, jitThreshold: 3, useIR: true });
+    assert.equal(jit, 3030);
+  });
+});

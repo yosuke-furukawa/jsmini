@@ -838,7 +838,8 @@ function emitOp(
           body.push(WASM_OP.i32_const, ...i32ToLEB128(byteOffset));
           body.push(WASM_OP.i32_add);
         }
-        emitLoadValue(op.args[1], body, opToLocal, opById, false); // value as i32
+        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // value
+        if (forceF64) body.push(0xaa); // i32.trunc_f64_s (プロパティは i32 セル)
         body.push(WASM_OP.i32_store, 0x02, 0x00);
       }
       break;

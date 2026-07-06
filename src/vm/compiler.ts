@@ -176,6 +176,7 @@ class BytecodeCompiler {
       handlers: this.handlers,
       icSlotCount: this.icSlotCount,
       upvalues: this.upvalues,
+      __jitCached: undefined,
     };
   }
 
