@@ -132,3 +132,27 @@ describe("Phase 30 — 後方宣言 var のクロージャ捕獲 (B4, navier-sto
     var f = new F(); f.get();
   `, v => assert.equal(v, 3));
 });
+
+describe("Phase 30 — JIT: this の非数値スロットは deopt (richards/deltablue/splay JIT)", () => {
+  it("オブジェクトを持つ this のメソッドが JIT 有効でも正しい", () => {
+    // 以前は this の非数値スロット (オブジェクト/null) を黙って 0 に
+    // していたため、splay の this.root_ が 0 になり "Not a function"、
+    // richards は scheduler の連結リストが壊れて無限ループしていた
+    const src = `
+      function Tree() { this.root_ = null; this.n = 0; }
+      Tree.prototype.isEmpty = function() { return !this.root_; };
+      Tree.prototype.set = function(node) { this.root_ = node; this.n++; };
+      var t = new Tree();
+      var before = 0;
+      for (var i = 0; i < 20; i++) { if (t.isEmpty()) before++; }
+      t.set({ value: 42 });
+      var after = 0;
+      for (var i = 0; i < 20; i++) { if (t.isEmpty()) after++; }
+      before * 1000 + after * 10 + t.n;
+    `;
+    const plain = vmEvaluate(src);
+    const jit = vmEvaluate(src, { jit: true, jitThreshold: 5, useIR: true });
+    assert.equal(jit, plain);
+    assert.equal(jit, 20 * 1000 + 0 + 1);
+  });
+});
