@@ -16,6 +16,12 @@ function isTruthy(value: unknown): boolean {
   return !!value;
 }
 
+// `==` の比較で「オブジェクト」として扱う値 (JSString は primitive 扱い)。
+// 両辺がこれなら参照比較で、ToPrimitive しない (JS 仕様 7.2.14)
+function isEqObject(v: unknown): boolean {
+  return (typeof v === "object" && v !== null && !isJSString(v)) || typeof v === "function";
+}
+
 // jsmini の typeof: Symbol は "@@symbol_" プレフィックスの文字列
 function jsminiTypeof(val: unknown): string {
   if (isJSSymbol(val)) return "symbol";
@@ -750,11 +756,19 @@ export class VM {
           } else if (isJSString(left) || isJSString(right)) {
             this.push(false);
           } else if (instr.op === "Equal") {
-            // == は ToPrimitive で型変換してから比較
-            const l = this.toPrimitive(left); if (l === THROWN_SENTINEL) { continue; }
-            const r = this.toPrimitive(right); if (r === THROWN_SENTINEL) { continue; }
-            if (isJSString(l) && isJSString(r)) this.push(jsStringEquals(l, r));
-            else this.push(l == r);
+            // 両辺がオブジェクトなら参照比較 (JS 仕様 7.2.14)。
+            // ToPrimitive は片辺が primitive のときだけ。これを怠ると
+            // 別オブジェクト同士が "[object Object]" == "[object Object]" で
+            // true になる (deltablue の strength == REQUIRED が誤爆した)
+            if (isEqObject(left) && isEqObject(right)) {
+              this.push(left === right);
+            } else {
+              // == は ToPrimitive で型変換してから比較
+              const l = this.toPrimitive(left); if (l === THROWN_SENTINEL) { continue; }
+              const r = this.toPrimitive(right); if (r === THROWN_SENTINEL) { continue; }
+              if (isJSString(l) && isJSString(r)) this.push(jsStringEquals(l, r));
+              else this.push(l == r);
+            }
           } else {
             this.push(left === right);
           }
@@ -769,10 +783,14 @@ export class VM {
           } else if (isJSString(left) || isJSString(right)) {
             this.push(true);
           } else if (instr.op === "NotEqual") {
-            const l = this.toPrimitive(left); if (l === THROWN_SENTINEL) { continue; }
-            const r = this.toPrimitive(right); if (r === THROWN_SENTINEL) { continue; }
-            if (isJSString(l) && isJSString(r)) this.push(!jsStringEquals(l, r));
-            else this.push(l != r);
+            if (isEqObject(left) && isEqObject(right)) {
+              this.push(left !== right);
+            } else {
+              const l = this.toPrimitive(left); if (l === THROWN_SENTINEL) { continue; }
+              const r = this.toPrimitive(right); if (r === THROWN_SENTINEL) { continue; }
+              if (isJSString(l) && isJSString(r)) this.push(!jsStringEquals(l, r));
+              else this.push(l != r);
+            }
           } else {
             this.push(left !== right);
           }
