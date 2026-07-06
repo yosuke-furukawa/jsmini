@@ -4,7 +4,7 @@ import { compileToWasmSync, compileMultiSync } from "./wasm-compiler.js";
 import type { WasmNumericType } from "./feedback.js";
 import { getElementKind, isTrackedArray } from "../vm/js-array.js";
 import { isJSString, getInternId, getStringById } from "../vm/js-string.js";
-import { isJSObject, getSlots, getHiddenClass } from "../vm/js-object.js";
+import { isJSObject, getSlots, getHiddenClass, setProperty as jsObjSet } from "../vm/js-object.js";
 import { buildIR } from "../ir/builder.js";
 import { optimize, type InlineOptions } from "../ir/optimize.js";
 import { compileIRToWasm } from "../ir/codegen.js";
@@ -30,6 +30,16 @@ type CachedWasm = {
   getArray: ((arr: unknown, idx: number) => number) | null;
   setArray: ((arr: unknown, idx: number, val: number) => void) | null;
   jspiWrapped?: (...args: number[]) => Promise<number>;  // JSPI promising 済み
+  // this-model (IR パス): 関数が使うプロパティ名 (index = linear memory offset) と
+  // StoreProperty されるプロパティ名 (実行後に write-back)
+  propNames?: string[];
+  writtenProps?: string[];
+  // 読み取り専用グローバル (呼び出しごとに VM の値を追加パラメータで渡す)
+  globalNames?: string[];
+  // 呼び出しオーバーヘッド削減用キャッシュ (小メソッドでは view 生成と
+  // HC 名前引きが支配的になる)
+  i32view?: Int32Array;                     // memory.buffer の共有 view (grow しない前提)
+  hcSlotCache?: Map<unknown, (number | undefined)[]>; // HiddenClass → propNames の slot index 列
 };
 
 export class JitManager {
@@ -45,6 +55,8 @@ export class JitManager {
 
   deoptLog: string[] = [];
   tierLog: string[] = [];
+  // VM の globals (読み取り専用グローバルのパラメータ渡し用に VM 側から注入)
+  globalsMap: Map<string, unknown> | null = null;
   traceTier = false;
   useIR = false;
 
@@ -67,6 +79,14 @@ export class JitManager {
   }
 
   tryCall(func: BytecodeFunction, args: unknown[], upvalueValues: unknown[] = [], thisObj?: unknown): { result: unknown } | null {
+    // fast path: JIT の運命が決定済みの関数は簿記を全部スキップ
+    // (VM 行きなら 1 プロパティ読みで抜ける。OO ベンチではこの簿記が
+    //  JIT ≈ VM の主因だった)
+    const decided = (func as { __jitCached?: CachedWasm | null }).__jitCached;
+    if (decided === null) return null;
+    if (decided !== undefined) {
+      return this.executeWasm(func, decided, args, 0, upvalueValues, thisObj);
+    }
     if (JIT_SKIP.size > 0 && JIT_SKIP.has(func.name)) return null;
     const fb = this.feedback.get(func);
     const callCount = fb?.callCount ?? 0;
@@ -96,6 +116,7 @@ export class JitManager {
     // monomorphic チェック
     if (!fb.isMonomorphic) {
       this.wasmCache.set(func, null);
+      (func as { __jitCached?: CachedWasm | null }).__jitCached = null;
       this.logTier(func, "Bytecode VM (polymorphic)", callCount);
       return null;
     }
@@ -103,6 +124,7 @@ export class JitManager {
     const wasmArgTypes = this.feedback.getWasmArgTypes(func);
     if (!wasmArgTypes) {
       this.wasmCache.set(func, null);
+      (func as { __jitCached?: CachedWasm | null }).__jitCached = null;
       this.logTier(func, "Bytecode VM (non-numeric)", callCount);
       return null;
     }
@@ -139,6 +161,7 @@ export class JitManager {
     }
 
     this.wasmCache.set(func, compiled);
+    (func as { __jitCached?: CachedWasm | null }).__jitCached = compiled;
 
     if (compiled) {
       this.logTier(func, `→ Wasm compiled (${spec}, arrays: [${arrayArgIndices}])`, callCount);
@@ -169,6 +192,10 @@ export class JitManager {
 
       const cached: CachedWasm = { fn: wasmFn, memory: result.memory ?? null, arrayArgIndices, stringArgIndices, spec, createArray, getArray, setArray };
       if (result.jspiWrapped) cached.jspiWrapped = result.jspiWrapped;
+      if (DEBUG_WASM) console.error("[compileViaIR] compiled", JSON.stringify({ name: func.name, params: func.paramCount, props: result.propNames, written: result.writtenProps, globals: result.globalNames }));
+      if (result.propNames) cached.propNames = result.propNames;
+      if (result.writtenProps) cached.writtenProps = result.writtenProps;
+      if (result.globalNames) cached.globalNames = result.globalNames;
       return cached;
     } catch (e: any) {
       if (DEBUG_WASM) console.error("[compileViaIR] threw", e.message || e, e.stack);
@@ -336,27 +363,65 @@ export class JitManager {
       }
       const slots = getSlots(thisObj);
       const hc = getHiddenClass(thisObj as any);
-      const view = new Int32Array(memory.buffer);
-      // hidden class の properties から 0-based で詰めてコピー
-      // IR codegen の propOffsets は出現順で 0, 1, 2... と振るので同じ順序にする
+      const view = cached.i32view ?? (cached.i32view = new Int32Array(memory.buffer));
       const base = 0;
-      let dst = 0;
-      for (const [name, slotIdx] of hc.properties) {
-        if (name === "__proto__") continue;
-        const v = slots[slotIdx];
-        if (typeof v !== "number") {
-          // this のスロットに非数値 (オブジェクト/null/文字列) がある →
-          // linear memory の数値モデルに乗らない。黙って 0 にすると
-          // splay の this.root_ (木のノード) が 0 になり結果が壊れるので
-          // deopt して VM で実行する
-          this.deoptimize(func, args);
-          this.logTier(func, "Bytecode VM (after deopt: non-numeric this slot)", callCount);
-          return null;
+      if (cached.propNames) {
+        // used-props モデル (IR パス): 関数が実際に使うプロパティだけを
+        // 名前で HC から引いて、codegen の propOffsets と同じ順序で
+        // linear memory に copy-in する。
+        // - 使わないプロパティは参照 (オブジェクト/null) でも無視できる
+        //   → richards の TCB.link 等があっても state だけ使うメソッドは JIT 可
+        // - 使うプロパティが非数値/非整数なら i32 モデルに乗らないので deopt
+        // (旧実装は HC 挿入順で全コピーしており、IR 出現順の propOffsets と
+        //  順序がずれうる + 非数値が 1 つでもあると deopt だった)
+        // HC ごとの slot index 列をキャッシュ (名前引きは HC につき 1 回)
+        let slotIdxs = cached.hcSlotCache?.get(hc);
+        if (!slotIdxs) {
+          slotIdxs = cached.propNames.map(n => hc.properties.get(n));
+          (cached.hcSlotCache ?? (cached.hcSlotCache = new Map())).set(hc, slotIdxs);
         }
-        view[dst] = v;
-        dst++;
+        for (let i = 0; i < cached.propNames.length; i++) {
+          const slotIdx = slotIdxs[i];
+          const v = slotIdx !== undefined ? slots[slotIdx] : undefined;
+          if (typeof v !== "number" || !Number.isInteger(v) || v > 2147483647 || v < -2147483648) {
+            this.deoptimize(func, args);
+            this.logTier(func, "Bytecode VM (after deopt: non-i32 used prop)", callCount);
+            return null;
+          }
+          view[i] = v;
+        }
+      } else {
+        // legacy (propNames 無し = 非 IR パス): HC 挿入順で全コピー。
+        // 非数値があれば deopt (Phase 30 のガード)
+        let dst = 0;
+        for (const [name, slotIdx] of hc.properties) {
+          if (name === "__proto__") continue;
+          const v = slots[slotIdx];
+          if (typeof v !== "number") {
+            this.deoptimize(func, args);
+            this.logTier(func, "Bytecode VM (after deopt: non-numeric this slot)", callCount);
+            return null;
+          }
+          view[dst] = v;
+          dst++;
+        }
       }
       wasmArgs.push(base);
+    }
+
+    // 読み取り専用グローバル: VM の現在値を追加パラメータで渡す。
+    // 非数値/非整数なら i32 モデルに乗らないので deopt
+    if (cached.globalNames && cached.globalNames.length > 0) {
+      if (!this.globalsMap) { this.deoptimize(func, args); return null; }
+      for (const gname of cached.globalNames) {
+        const v = this.globalsMap.get(gname);
+        if (typeof v !== "number" || (cached.spec === "i32" && !Number.isInteger(v))) {
+          this.deoptimize(func, args);
+          this.logTier(func, "Bytecode VM (after deopt: non-numeric global " + gname + ")", callCount);
+          return null;
+        }
+        wasmArgs.push(v);
+      }
     }
 
     // JSPI: async 関数は promising ラップ済み関数を呼ぶ → Promise を返す
@@ -367,7 +432,25 @@ export class JitManager {
 
     this.logTier(func, "Wasm", callCount);
     try {
-      return { result: fn(...wasmArgs) };
+      const result = fn(...wasmArgs);
+      // this の StoreProperty write-back: JIT 内で書き換えたプロパティを
+      // linear memory から VM の HiddenClass オブジェクトへ反映する。
+      // (これが無いと this.state = x 等の変更が VM 側から見えない)
+      if (hasThis && thisObj !== undefined && memory && cached.propNames && cached.writtenProps && cached.writtenProps.length > 0) {
+        // copy-in で存在と数値性は確認済みなので slot 直書きでよい
+        const view = cached.i32view ?? (cached.i32view = new Int32Array(memory.buffer));
+        const hc = getHiddenClass(thisObj as any);
+        const slots = getSlots(thisObj);
+        const slotIdxs = cached.hcSlotCache?.get(hc);
+        for (const name of cached.writtenProps) {
+          const off = cached.propNames.indexOf(name);
+          if (off < 0) continue;
+          const slotIdx = slotIdxs ? slotIdxs[off] : hc.properties.get(name);
+          if (slotIdx !== undefined) slots[slotIdx] = view[off];
+          else jsObjSet(thisObj as any, name, view[off]);
+        }
+      }
+      return { result };
     } catch (e) {
       // Wasm 自己再帰が深くなると実行スタックが溢れる
       // (RangeError: Maximum call stack size exceeded)。VM はヒープ上の
@@ -450,6 +533,7 @@ export class JitManager {
   }
 
   private deoptimize(func: BytecodeFunction, args: unknown[]): void {
+    (func as { __jitCached?: CachedWasm | null }).__jitCached = null; // 以後 fast path で VM 直行
     const argTypes = args.map(a => {
       if (Array.isArray(a)) return `array(${a.length})`;
       return typeof a;

@@ -824,6 +824,8 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
       useIR: options.useIR,
     });
     if (options.traceTier) vm.jit.traceTier = true;
+    // 読み取り専用グローバルのパラメータ渡し用に VM の globals を注入
+    vm.jit.globalsMap = (vm as any).globals;
   }
 
   // GC トレース

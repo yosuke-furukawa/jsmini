@@ -1338,7 +1338,7 @@ export class VM {
             this.setArguments(fn, locals, args);
             if (fn.isAsync) {
               // Async: JIT (JSPI) を試みる
-              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.feedback && (fn as { __jitCached?: unknown }).__jitCached === undefined) this.feedback.recordCall(fn, args);
               if (this.jit) {
                 const jitResult = this.jit.tryCall(fn, args, closureBoxes.map(b => b.value));
                 if (jitResult !== null) { this.push(jitResult.result); break; }
@@ -1350,7 +1350,7 @@ export class VM {
               const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
               this.push(genObj);
             } else {
-              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.feedback && (fn as { __jitCached?: unknown }).__jitCached === undefined) this.feedback.recordCall(fn, args);
               if (this.jit) {
                 const upvalueValues = closureBoxes.map(b => b.value);
                 const jitResult = this.jit.tryCall(fn, args, upvalueValues);
@@ -1388,7 +1388,7 @@ export class VM {
             }
             this.setArguments(fn, locals, args);
             if (fn.isAsync) {
-              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.feedback && (fn as { __jitCached?: unknown }).__jitCached === undefined) this.feedback.recordCall(fn, args);
               if (this.jit) {
                 const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
@@ -1399,7 +1399,7 @@ export class VM {
               const genObj = this.createGeneratorObject(fn, locals, closure.capturedBoxes);
               this.push(genObj);
             } else {
-              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.feedback && (fn as { __jitCached?: unknown }).__jitCached === undefined) this.feedback.recordCall(fn, args);
               if (this.jit) {
                 const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
@@ -1414,7 +1414,7 @@ export class VM {
             }
             this.setArguments(fn, locals, args);
             if (fn.isAsync) {
-              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.feedback && (fn as { __jitCached?: unknown }).__jitCached === undefined) this.feedback.recordCall(fn, args);
               if (this.jit) {
                 const jitResult = this.jit.tryCall(fn, args, [], thisObj);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
@@ -1425,7 +1425,7 @@ export class VM {
               const genObj = this.createGeneratorObject(fn, locals, []);
               this.push(genObj);
             } else {
-              if (this.feedback) this.feedback.recordCall(fn, args);
+              if (this.feedback && (fn as { __jitCached?: unknown }).__jitCached === undefined) this.feedback.recordCall(fn, args);
               if (this.jit) {
                 const jitResult = this.jit.tryCall(fn, args, [], thisObj);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
