@@ -19,11 +19,11 @@ richards / deltablue / splay / navier-stokes が TW/VM/JIT すべてで
 
 ### 30-1: ベンチ整備
 
-- [ ] 30-1a: `bench/octane/` に 4 本を配置 (chromium/octane から取得、
+- [x] 30-1a: `bench/octane/` に 4 本を配置 (chromium/octane から取得、
       最小加工: BenchmarkSuite 登録ブロック除去 + 末尾に実行呼び出し追記)
-- [ ] 30-1b: deltablue の `alert(...)` → throw 化、splay の
+- [x] 30-1b: deltablue の `alert(...)` → throw 化、splay の
       `performance.now` → Date.now stub を preamble 注入
-- [ ] 30-1c: `src/octane-bench.ts` — TW/VM/JIT の wall-time 直測
+- [x] 30-1c: `src/octane-bench.ts` — TW/VM/JIT の wall-time 直測
       (sunspider-bench.ts と同形式)
 
 ### 30-2: B2 — 関数オブジェクトへの static プロパティ (splay 解放)
@@ -31,9 +31,9 @@ richards / deltablue / splay / navier-stokes が TW/VM/JIT すべてで
 最小再現: `function T(){} T.Node = function(k){this.k=k}; new T.Node(5)`
 → TW: undefined is not a function / VM: Not a function
 
-- [ ] 30-2a: TW/VM それぞれの原因特定 (代入が落ちるのか、読み出しが
+- [x] 30-2a: TW/VM それぞれの原因特定 (代入が落ちるのか、読み出しが
       落ちるのか、new の callee 解決か)
-- [ ] 30-2b: 修正 + 最小再現の回帰テスト (TW/VM 両方)
+- [x] 30-2b: 修正 + 最小再現の回帰テスト (TW/VM 両方)
 
 ### 30-3: B3 — 関数のプロトタイプチェーン + defineProperty (deltablue 解放)
 
@@ -41,40 +41,40 @@ richards / deltablue / splay / navier-stokes が TW/VM/JIT すべてで
 function C(){} C.inh()` → TW: undefined is not a function /
 VM: 内部エラー (reading 'properties')
 
-- [ ] 30-3a: 関数オブジェクトのプロパティ解決が Object.prototype まで
+- [x] 30-3a: 関数オブジェクトのプロパティ解決が Object.prototype まで
       届くようにする (TW/VM)
-- [ ] 30-3b: VM ObjectWrapper.defineProperty が host plain object 以外で
+- [x] 30-3b: VM ObjectWrapper.defineProperty が host plain object 以外で
       内部エラーになる件の修正
-- [ ] 30-3c: 回帰テスト + bench 実行間の Object.prototype 汚染ガード確認
+- [x] 30-3c: 回帰テスト + bench 実行間の Object.prototype 汚染ガード確認
 
 ### 30-4: B4 — VM の upvalue 解決 (navier-stokes 解放)
 
 TW は 3.2s で完走、VM だけ `dens_prev is not defined`。単純な兄弟
 クロージャ 2 つの再現は通るので、より深いパターンが条件。
 
-- [ ] 30-4a: navier-stokes を削って最小再現を特定 (二分探索)
-- [ ] 30-4b: 修正 + 回帰テスト
-- [ ] 30-4c: JIT モード (upvalue 渡し) への波及確認
+- [x] 30-4a: navier-stokes を削って最小再現を特定 (二分探索)
+- [x] 30-4b: 修正 + 回帰テスト
+- [x] 30-4c: JIT モード (upvalue 渡し) への波及確認
 
 ### 30-5: B1 — richards 無限ループ
 
 TW/VM 両方で 2 分+ 回り続ける。原因未特定。
 
-- [ ] 30-5a: 関数単位で切り出して VM/host の結果突き合わせ (Phase 29 の
+- [x] 30-5a: 関数単位で切り出して VM/host の結果突き合わせ (Phase 29 の
       spectral-norm 方式)。scheduler の状態遷移・switch・ビット演算・
       連結リストが容疑者
-- [ ] 30-5b: 特定したバグの修正 + 回帰テスト (複数バグの可能性を前提に)
+- [x] 30-5b: 特定したバグの修正 + 回帰テスト (複数バグの可能性を前提に)
 
 ### 30-6: 計測と棚卸し
 
-- [ ] 30-6a: 4 本 × 3 モードの wall-time 計測、結果検証パス確認
-- [ ] 30-6b: JIT が刺さっていない箇所の棚卸し (Phase 31 = Octane 性能の
+- [x] 30-6a: 4 本 × 3 モードの wall-time 計測、結果検証パス確認
+- [x] 30-6b: JIT が刺さっていない箇所の棚卸し (Phase 31 = Octane 性能の
       入力データにする)
 
 ### 30-7: まとめ
 
-- [ ] 30-7a: LEARN-Phase30.md (Octane が炙り出した穴と V8 対応)
-- [ ] 30-7b: PR を Ready for review に
+- [x] 30-7a: LEARN-Phase30.md (Octane が炙り出した穴と V8 対応)
+- [x] 30-7b: PR を Ready for review に
 
 ## 技術メモ
 
@@ -104,3 +104,21 @@ null)` が終わらない = どこかで release/holdCurrent/suspendCurrent の
   ロジックには触れない (git diff で追跡)
 - 検証はベンチ内蔵の expected 値 (richards の queueCount/holdCount、
   navier-stokes の checksum、deltablue の projection 検証) をそのまま使う
+
+## 結果 (完了時追記)
+
+12 セル全完走。実際に修正したのは 5 バグ (詳細 LEARN-Phase30):
+1. B2 = parser (`new T.Node()` の member チェーン)
+2. B1 = VM compiler の member ++/-- silent no-emit (richards 無限ループの真因)
+3. deltablue 追加発見: オブジェクト同士の `==` が ToPrimitive で true
+4. B4 = VM compiler の var hoisting 欠落
+5. JIT: this の非数値スロット 0 化 (JIT 3 本の共通真因)
+
+| ベンチ | TW | VM | JIT |
+|---|---|---|---|
+| richards | 201ms | 122ms | 128ms |
+| deltablue | 192ms | 164ms | 192ms |
+| splay | 2765ms | 2549ms | 2663ms |
+| navier-stokes | 3313ms | 2165ms | 2308ms |
+
+JIT ≈ VM (性能はまだ)。棚卸し結果と Phase 31 テーマは LEARN-Phase30 参照。

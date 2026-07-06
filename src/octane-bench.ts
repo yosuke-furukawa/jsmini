@@ -38,12 +38,14 @@ const tests = [
 
 type Mode = "TW" | "VM" | "JIT";
 
-// 無限ループ対策: maxSteps (VM) / onStep (TW) で上限を切る
+// ハング検出 (OCTANE_STEP_LIMIT=1 で有効化)。onStep/maxSteps は
+// それ自体が大きなオーバーヘッドなので計測時はデフォルト無効
+const USE_STEP_LIMIT = typeof process !== "undefined" && !!process.env?.OCTANE_STEP_LIMIT;
 const STEP_LIMIT = 100_000_000;
 
 function timeRun(mode: Mode, source: string, runs = 3): { avg: number; min: number; error?: string } {
   let steps = 0;
-  const opts = mode === "TW"
+  const opts = !USE_STEP_LIMIT ? {} : mode === "TW"
     ? { onStep: () => { if (++steps > STEP_LIMIT) throw new Error("step limit exceeded (infinite loop?)"); } }
     : { maxSteps: STEP_LIMIT };
   const fn = mode === "TW"
