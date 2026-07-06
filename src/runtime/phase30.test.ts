@@ -104,3 +104,31 @@ describe("Phase 30 — オブジェクト同士の == は参照比較 (deltablue
     (o == 5) && (5 == o);
   `, v => assert.equal(v, true));
 });
+
+describe("Phase 30 — 後方宣言 var のクロージャ捕獲 (B4, navier-stokes)", () => {
+  bothModes("クロージャがソース上で後方の var を参照", `
+    function F() {
+      this.get = function() { return x[0]; };
+      var x;
+      function reset() { x = new Array(1); x[0] = 5; }
+      this.reset = reset;
+    }
+    var f = new F(); f.reset(); f.get();
+  `, v => assert.equal(v, 5));
+
+  bothModes("後方 var の単純読み", `
+    function F() {
+      this.get = function() { return y; };
+      var y = 33;
+    }
+    var f = new F(); f.get();
+  `, v => assert.equal(v, 33));
+
+  bothModes("for ループ内 var も hoist される", `
+    function F() {
+      this.get = function() { return i; };
+      for (var i = 0; i < 3; i++) {}
+    }
+    var f = new F(); f.get();
+  `, v => assert.equal(v, 3));
+});

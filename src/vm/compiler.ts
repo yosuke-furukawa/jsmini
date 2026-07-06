@@ -368,6 +368,11 @@ class BytecodeCompiler {
         if (this.resolveLocal(name) === null) this.declareLocal(name);
       }
     }
+    // var hoisting: 本体内 (ネスト関数は除く) の var 束縛名を事前に
+    // declareLocal。これが無いと「クロージャがソース上で後方の var を
+    // 参照する」とき、compile 時点で locals に無く global 扱いになる
+    // (navier-stokes の this.update が var dens_prev より前にあるパターン)
+    this.hoistVarNames(body);
     // 本体をコンパイル
     for (const stmt of body) {
       this.compileStatement(stmt);
@@ -375,6 +380,50 @@ class BytecodeCompiler {
     // 明示的 return がない場合は undefined を返す
     this.emit("LdaUndefined");
     this.emit("Return");
+  }
+
+  // 関数本体の var 束縛名を再帰的に集めて declareLocal する (var hoisting)。
+  // ネスト関数 (FunctionDeclaration/FunctionExpression) の中は走査しない。
+  hoistVarNames(stmts: Statement[]): void {
+    for (const stmt of stmts) {
+      const s = stmt as any;
+      switch (s.type) {
+        case "VariableDeclaration":
+          if (s.kind === "var") {
+            for (const decl of s.declarations) this.preDeclareBindingNames(decl.id);
+          }
+          break;
+        case "BlockStatement": this.hoistVarNames(s.body); break;
+        case "IfStatement":
+          this.hoistVarNames([s.consequent]);
+          if (s.alternate) this.hoistVarNames([s.alternate]);
+          break;
+        case "WhileStatement": case "DoWhileStatement":
+          this.hoistVarNames([s.body]); break;
+        case "ForStatement":
+          if (s.init && s.init.type === "VariableDeclaration" && s.init.kind === "var") {
+            for (const decl of s.init.declarations) this.preDeclareBindingNames(decl.id);
+          }
+          this.hoistVarNames([s.body]);
+          break;
+        case "ForInStatement": case "ForOfStatement":
+          if (s.left && s.left.type === "VariableDeclaration" && s.left.kind === "var") {
+            for (const decl of s.left.declarations) this.preDeclareBindingNames(decl.id);
+          }
+          this.hoistVarNames([s.body]);
+          break;
+        case "TryStatement":
+          if (s.block) this.hoistVarNames(s.block.body);
+          if (s.handler?.body) this.hoistVarNames(s.handler.body.body);
+          if (s.finalizer) this.hoistVarNames(s.finalizer.body);
+          break;
+        case "SwitchStatement":
+          for (const c of s.cases ?? []) this.hoistVarNames(c.consequent ?? []);
+          break;
+        case "LabeledStatement": this.hoistVarNames([s.body]); break;
+        default: break;
+      }
+    }
   }
 
   compileStatement(stmt: Statement): void {
