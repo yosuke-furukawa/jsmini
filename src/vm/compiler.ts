@@ -1353,6 +1353,52 @@ class BytecodeCompiler {
             this.emitStore(expr.argument.name);
             this.emit("Pop"); // 新しい値を捨て、古い値を返す
           }
+        } else if (expr.argument.type === "MemberExpression") {
+          // ++obj.prop / obj.prop++ / ++obj[k] / obj[k]++。
+          // obj/key を 2 回 (読み+書き) 使うので temp に退避する。
+          // 関数内なら local slot、トップレベルなら global (for-in と同じパターン)。
+          // ※ 以前は Identifier 以外で何も emit せず、ExpressionStatement の
+          //    Pop が別の値を壊していた (deltablue の ++this.currentMark、
+          //    richards の this.count++ 等が全滅していた)
+          const member = expr.argument as any;
+          const useLocal = this.isFunction;
+          const off = this.currentOffset();
+          const mkTmp = (tag: string) => useLocal
+            ? { slot: this.localCount++, g: 0 }
+            : { slot: 0, g: this.addConstant(`__upd_${tag}_${off}`) };
+          const sta = (t: { slot: number; g: number }) => useLocal ? this.emit("StaLocal", t.slot) : this.emit("StaGlobal", t.g);
+          const lda = (t: { slot: number; g: number }) => useLocal ? this.emit("LdaLocal", t.slot) : this.emit("LdaGlobal", t.g);
+          const objT = mkTmp("obj");
+          const keyT = member.computed ? mkTmp("key") : null;
+          const valT = mkTmp("val");
+          const oldT = expr.prefix ? null : mkTmp("old");
+          // obj (と computed key) を退避
+          this.compileExpression(member.object);
+          sta(objT); this.emit("Pop");
+          if (keyT) { this.compileExpression(member.property); sta(keyT); this.emit("Pop"); }
+          // 現在値を読む
+          lda(objT);
+          if (keyT) { lda(keyT); this.emit("GetPropertyComputed"); }
+          else {
+            const nameIdx = this.addConstant(member.property.name ?? String(member.property.value));
+            this.emitWithIC("GetProperty", nameIdx);
+          }
+          // stack: [old]
+          if (oldT) sta(oldT); // postfix: 古い値を退避 (Sta は peek なのでスタック不変)
+          this.emit(expr.operator === "++" ? "Increment" : "Decrement");
+          // stack: [new]
+          sta(valT); this.emit("Pop");
+          // 書き戻し (SetPropertyAssign: [value, obj] / SetPropertyComputed: [obj, key, value])
+          if (keyT) { lda(objT); lda(keyT); lda(valT); this.emit("SetPropertyComputed"); }
+          else {
+            const nameIdx = this.addConstant(member.property.name ?? String(member.property.value));
+            lda(valT); lda(objT); this.emitWithIC("SetPropertyAssign", nameIdx);
+          }
+          // stack: [new]
+          if (oldT) { this.emit("Pop"); lda(oldT); } // postfix は古い値を返す
+        } else {
+          // その他 (来ないはずだが、スタック整合のため undefined を積む)
+          this.emit("LdaUndefined");
         }
         break;
       }
