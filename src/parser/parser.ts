@@ -959,11 +959,29 @@ export function parse(source: string): Program {
     return parseCallExpression();
   }
 
-  // NewExpression = 'new' Primary Arguments? ('.' Identifier | '(' args ')' | '[' expr ']')*
+  // NewExpression = 'new' MemberChain Arguments? ('.' Identifier | '(' args ')' | '[' expr ']')*
   function parseNewExpression(): Expression {
     eat("New");
-    // callee は Primary のみ（MemberExpression チェーンはしない）
-    const callee = parsePrimary();
+    // callee は Primary + member アクセスチェーン (`.x` / `[k]`)。
+    // JS の優先順位では `new T.Node(5)` = `new (T.Node)(5)` であり、
+    // 最初の `(` が new の引数になる (call はチェーンに含めない)。
+    // 旧実装は Primary のみで `(new T).Node(5)` に誤解析していた
+    // (Octane splay の `new SplayTree.Node(...)` が壊れる)。
+    let callee = parsePrimary();
+    while (true) {
+      if (current().type === "Dot") {
+        eat("Dot");
+        const property = parsePropertyKey();
+        callee = { type: "MemberExpression", object: callee, property, computed: false } as any;
+      } else if (current().type === "LeftBracket") {
+        eat("LeftBracket");
+        const prop = parseExpression();
+        eat("RightBracket");
+        callee = { type: "MemberExpression", object: callee, property: prop, computed: true } as any;
+      } else {
+        break;
+      }
+    }
     let args: any[] = [];
     if (current().type === "LeftParen") {
       eat("LeftParen");
