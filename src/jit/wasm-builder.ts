@@ -425,6 +425,18 @@ function writeLEB128(buf: number[], value: number): void {
 }
 
 // i32 を LEB128 符号付きで変換 (Wasm の i32.const 用)
+// unsigned LEB128 (local/func index 用。127 超のインデックスは複数バイトになる)
+export function u32ToLEB128(value: number): number[] {
+  const bytes: number[] = [];
+  do {
+    let b = value & 0x7f;
+    value >>>= 7;
+    if (value !== 0) b |= 0x80;
+    bytes.push(b);
+  } while (value !== 0);
+  return bytes;
+}
+
 export function i32ToLEB128(value: number): number[] {
   const buf: number[] = [];
   let v = value | 0;

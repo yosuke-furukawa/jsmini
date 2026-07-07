@@ -7,7 +7,8 @@ import { isJSString, getInternId, getStringById } from "../vm/js-string.js";
 import { isJSObject, getSlots, getHiddenClass, setProperty as jsObjSet } from "../vm/js-object.js";
 import { buildIR } from "../ir/builder.js";
 import { optimize, type InlineOptions } from "../ir/optimize.js";
-import { compileIRToWasm } from "../ir/codegen.js";
+import { compileIRToWasm, type ClusterInfo, type ClusterUpvalueSource } from "../ir/codegen.js";
+import type { IRFunction } from "../ir/types.js";
 
 // ブラウザ (playground) には process が無いので安全にガード
 const DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
@@ -41,6 +42,14 @@ type CachedWasm = {
   // bytecode スキャンで判定すると「this を渡そうとして memory が無い」
   // ミスマッチで毎回 null になる (deltablue で 33k 回/走)
   hasThis?: boolean;
+  // クラスタコンパイル (Phase 32): callee 解決の identity guard と
+  // callee 専用 upvalue box (値を毎呼び出し追加パラメータで渡す)
+  calleeGuards?: Array<{ idx: number; expected: unknown }>;
+  extraBoxes?: Array<{ value: unknown }>;
+  // Wasm 関数が実際に受け取る upvalue param 数 (IR 基準)。callee ref の
+  // LoadUpvalue 除去で縮み得るので、これちょうどを push しないと
+  // 後続の globals/extraBoxes が位置ズレする
+  upvalueCount?: number;
   // 呼び出しオーバーヘッド削減用キャッシュ (小メソッドでは view 生成と
   // HC 名前引きが支配的になる)
   i32view?: Int32Array;                     // memory.buffer の共有 view (grow しない前提)
@@ -83,7 +92,7 @@ export class JitManager {
     if (DEBUG_WASM) console.error(`[TIER] ${func.name}: ${tier} (call #${count})`);
   }
 
-  tryCall(func: BytecodeFunction, args: unknown[], upvalueValues: unknown[] = [], thisObj?: unknown): { result: unknown } | null {
+  tryCall(func: BytecodeFunction, args: unknown[], upvalueValues: unknown[] = [], thisObj?: unknown, upvalueBoxes?: Array<{ value: unknown }>): { result: unknown } | null {
     // fast path: JIT の運命が決定済みの関数は簿記を全部スキップ
     // (VM 行きなら 1 プロパティ読みで抜ける。OO ベンチではこの簿記が
     //  JIT ≈ VM の主因だった)
@@ -112,8 +121,17 @@ export class JitManager {
       return this.executeWasm(func, cached, args, callCount, upvalueValues, thisObj);
     }
 
-    // しきい値チェック
-    if (!fb || callCount < this.threshold) {
+    // しきい値チェック。ループを含む関数は「呼び出し回数は少ないが
+    // 1 呼び出しの中で時間を食う」(NS のカーネル等) ので初回から
+    // コンパイルを試す (V8 の loopy eager optimization 相当)
+    const fobj = func as { __hasLoop?: boolean };
+    if (fobj.__hasLoop === undefined) {
+      fobj.__hasLoop = func.bytecode.some((ins, idx) =>
+        (ins.op === "Jump" || ins.op === "JumpIfFalse" || ins.op === "JumpIfTrue") &&
+        ins.operand !== undefined && ins.operand <= idx);
+    }
+    const effThreshold = fobj.__hasLoop ? 1 : this.threshold;
+    if (!fb || callCount < effThreshold) {
       this.logTier(func, "Bytecode VM", callCount);
       return null;
     }
@@ -150,10 +168,12 @@ export class JitManager {
     // IR パスを優先 (配列対応含む)
     let compiled: CachedWasm | null = null;
     if (this.useIR) {
-      compiled = this.compileViaIR(func, spec, stringArgIndices);
+      compiled = this.compileViaIR(func, spec, stringArgIndices, upvalueBoxes);
     }
-    // IR パスが失敗 or useIR=false → direct パス
-    if (!compiled) {
+    // IR パスが失敗 or useIR=false → direct パス。
+    // ただし upvalue 持ちは direct パスの呼び出し規約に無く誤コンパイル
+    // するので IR 専用 (lin_solve 形で実害があった)
+    if (!compiled && func.upvalues.length === 0) {
       if (arrayArgIndices.length > 0) {
         compiled = this.compileWithRelatedFuncs(func, spec, arrayArgIndices);
         if (compiled) compiled.stringArgIndices = stringArgIndices;
@@ -180,14 +200,106 @@ export class JitManager {
     return null;
   }
 
-  private compileViaIR(func: BytecodeFunction, spec: WasmNumericType, stringArgIndices: number[]): CachedWasm | null {
+  // クラスタ解決 (Phase 32): IR 内の「LoadUpvalue を callee とする Call」を
+  // コンパイル時の box の値 (兄弟クロージャ) に解決し、同一モジュール内の
+  // 直接 call に変換する。callee は call-free な数値/配列カーネルのみ。
+  private resolveCluster(ir: IRFunction, upvalueBoxes: Array<{ value: unknown }>):
+    { cluster: ClusterInfo; guards: Array<{ idx: number; expected: unknown }>; extraBoxes: Array<{ value: unknown }> } | null {
+    const opById = new Map<number, { opcode: string; index?: number; id: number }>();
+    for (const b of ir.blocks) for (const o of b.ops) opById.set(o.id, o);
+
+    const callees: ClusterInfo["callees"] = [];
+    const calleeIndexByClosure = new Map<unknown, number>();
+    const guards: Array<{ idx: number; expected: unknown }> = [];
+    const guardedIdx = new Set<number>();
+    const extraBoxes: Array<{ value: unknown }> = [];
+    const removedRefIds: number[] = [];
+    let resolvedAny = false;
+
+    for (const block of ir.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode !== "Call" || op.calleeName || op.clusterCallee !== undefined) continue;
+        const calleeRef = opById.get(op.args[0]);
+        if (!calleeRef || calleeRef.opcode !== "LoadUpvalue" || calleeRef.index === undefined) continue;
+        const k = calleeRef.index;
+        const v = upvalueBoxes[k]?.value;
+        if (!v || typeof v !== "object") continue;
+        // closure ({func, capturedBoxes}) or 素の BytecodeFunction
+        const calleeBC = ("bytecode" in v ? v : (v as { func?: BytecodeFunction }).func) as BytecodeFunction | undefined;
+        if (!calleeBC || !("bytecode" in calleeBC)) continue;
+        const calleeBoxes = ((v as { capturedBoxes?: Array<{ value: unknown }> }).capturedBoxes) ?? [];
+
+        let calleeIdx = calleeIndexByClosure.get(v);
+        if (calleeIdx === undefined) {
+          // callee IR を構築して純度チェック
+          const cir = buildIR(calleeBC, { feedback: this.feedback, knownFuncs: this.knownFuncs });
+          optimize(cir, { knownFuncs: this.knownFuncs, buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs } });
+          let pure = true;
+          let cUpvalueMax = -1;
+          for (const cb of cir.blocks) {
+            for (const co of cb.ops) {
+              if (co.opcode === "Call" && !co.calleeName?.startsWith("Math.")) pure = false;
+              if (co.opcode === "LoadThis" || co.opcode === "StoreUpvalue" || co.opcode === "StoreGlobal") pure = false;
+              if (co.opcode === "Alloc" || co.opcode === "AllocArray" || co.opcode === "AllocGrowableArray" || co.opcode === "ArrayPush") pure = false;
+              if (co.opcode === "LoadGlobal" && co.globalName && !["Math", "Array", "undefined"].includes(co.globalName) && co.globalName !== cir.name) pure = false;
+              if (co.opcode === "LoadUpvalue" && co.index !== undefined) cUpvalueMax = Math.max(cUpvalueMax, co.index);
+            }
+          }
+          if (!pure) continue;
+          // callee の upvalue 供給元を決定 (box identity で caller とマッチ)
+          const upvalueSources: ClusterUpvalueSource[] = [];
+          let ok = true;
+          for (let j = 0; j <= cUpvalueMax; j++) {
+            const box = calleeBoxes[j];
+            if (!box) { ok = false; break; }
+            const callerIdx = upvalueBoxes.indexOf(box);
+            if (callerIdx >= 0) {
+              upvalueSources.push({ kind: "callerUpvalue", i: callerIdx });
+            } else {
+              let ei = extraBoxes.indexOf(box);
+              if (ei < 0) { ei = extraBoxes.length; extraBoxes.push(box); }
+              upvalueSources.push({ kind: "extraBox", j: ei });
+            }
+          }
+          if (!ok) continue;
+          calleeIdx = callees.length;
+          callees.push({ ir: cir, upvalueSources });
+          calleeIndexByClosure.set(v, calleeIdx);
+          if (DEBUG_WASM) console.error(`[resolveCluster] resolved callee "${calleeBC.name || "anon"}" (upvalue #${k}) as cluster fn ${calleeIdx}`);
+        }
+        // タグ付けして callee ref を引数から外す
+        op.clusterCallee = calleeIdx;
+        op.args = op.args.slice(1);
+        removedRefIds.push(calleeRef.id);
+        if (!guardedIdx.has(k)) { guardedIdx.add(k); guards.push({ idx: k, expected: v }); }
+        resolvedAny = true;
+      }
+    }
+    if (!resolvedAny) return null;
+    // callee ref (LoadUpvalue) が他で使われていなければ IR から除去
+    const stillUsed = new Set<number>();
+    for (const b of ir.blocks) {
+      for (const o of b.ops) for (const a of o.args) stillUsed.add(a);
+      for (const ph of b.phis) for (const [, vid] of ph.inputs) stillUsed.add(vid);
+    }
+    for (const b of ir.blocks) {
+      b.ops = b.ops.filter(o => !(removedRefIds.includes(o.id) && !stillUsed.has(o.id)));
+    }
+    return { cluster: { callees, extraBoxCount: extraBoxes.length }, guards, extraBoxes };
+  }
+
+  private compileViaIR(func: BytecodeFunction, spec: WasmNumericType, stringArgIndices: number[], upvalueBoxes?: Array<{ value: unknown }>): CachedWasm | null {
     try {
       const ir = buildIR(func, { feedback: this.feedback, knownFuncs: this.knownFuncs });
       optimize(ir, {
         knownFuncs: this.knownFuncs,
         buildIROptions: { feedback: this.feedback, knownFuncs: this.knownFuncs },
       });
-      const result = compileIRToWasm(ir);
+      // クラスタ解決: upvalue 経由の兄弟クロージャ呼び出しをコンパイル時の
+      // box の値で特殊化 (実行時は identity guard で守り、外れたら deopt)
+      const resolved = upvalueBoxes && upvalueBoxes.length > 0
+        ? this.resolveCluster(ir, upvalueBoxes) : null;
+      const result = compileIRToWasm(ir, undefined, resolved?.cluster ?? null);
       if (!result) { if (DEBUG_WASM) console.error("[compileViaIR] compileIRToWasm returned null for", ir.name); return null; }
       const wasmFn = (result.instance.exports as any)[ir.name] as (...args: number[]) => number;
       if (!wasmFn) return null;
@@ -205,6 +317,11 @@ export class JitManager {
       if (result.writtenProps) cached.writtenProps = result.writtenProps;
       if (result.globalNames) cached.globalNames = result.globalNames;
       cached.hasThis = result.hasThis ?? false;
+      cached.upvalueCount = result.upvalueCount ?? 0;
+      if (resolved) {
+        cached.calleeGuards = resolved.guards;
+        cached.extraBoxes = resolved.extraBoxes;
+      }
       return cached;
     } catch (e: any) {
       if (DEBUG_WASM) console.error("[compileViaIR] threw", e.message || e, e.stack);
@@ -315,7 +432,17 @@ export class JitManager {
 
     if (arrayArgIndices.length > 0 && cached.createArray) {
       // 配列引数がある: WasmGC 配列で in/out コピー
-      return this.executeWithArrayArgs(func, cached, args, arrayArgIndices, callCount);
+      // クラスタの callee identity guard (配列経路もここで確認)
+      if (cached.calleeGuards) {
+        for (const g of cached.calleeGuards) {
+          if (upvalueValues[g.idx] !== g.expected) {
+            this.deoptimize(func, args);
+            this.logTier(func, "Bytecode VM (after deopt: cluster callee changed)", callCount);
+            return null;
+          }
+        }
+      }
+      return this.executeWithArrayArgs(func, cached, args, arrayArgIndices, callCount, upvalueValues);
     }
 
     // 引数の型チェック + 変換
@@ -344,9 +471,16 @@ export class JitManager {
       }
     }
 
-    // upvalue の値を追加引数として渡す
-    for (const uv of upvalueValues) {
-      if (typeof uv === "number") {
+    // upvalue の値を追加引数として渡す。
+    // クラスタで callee 解決済みのスロット (関数参照) は Wasm 内で読まれない
+    // (LoadUpvalue が除去済み) のでダミー 0 を渡す
+    const guardedSlots = cached.calleeGuards ? new Set(cached.calleeGuards.map(g => g.idx)) : null;
+    const uvCount = cached.upvalueCount ?? upvalueValues.length;
+    for (let uvi = 0; uvi < uvCount; uvi++) {
+      const uv = upvalueValues[uvi];
+      if (guardedSlots?.has(uvi)) {
+        wasmArgs.push(0);
+      } else if (typeof uv === "number") {
         wasmArgs.push(uv);
       } else if (isJSString(uv)) {
         const id = getInternId(uv);
@@ -436,6 +570,25 @@ export class JitManager {
       }
     }
 
+    // クラスタ: callee identity guard (コンパイル時に特殊化した兄弟クロージャが
+    // 差し替わっていたら deopt) + callee 専用 box の現在値を追加パラメータで渡す
+    if (cached.calleeGuards) {
+      for (const g of cached.calleeGuards) {
+        if (upvalueValues[g.idx] !== g.expected) {
+          this.deoptimize(func, args);
+          this.logTier(func, "Bytecode VM (after deopt: cluster callee changed)", callCount);
+          return null;
+        }
+      }
+    }
+    if (cached.extraBoxes) {
+      for (const b of cached.extraBoxes) {
+        const v = b.value;
+        if (typeof v !== "number") { this.deoptimize(func, args); return null; }
+        wasmArgs.push(v);
+      }
+    }
+
     // JSPI: async 関数は promising ラップ済み関数を呼ぶ → Promise を返す
     if (cached.jspiWrapped) {
       this.logTier(func, "Wasm (JSPI)", callCount);
@@ -483,6 +636,7 @@ export class JitManager {
     args: unknown[],
     arrayArgIndices: number[],
     callCount: number,
+    upvalueValues: unknown[] = [],
   ): { result: unknown } | null {
     const { fn, createArray, getArray, setArray } = cached;
     if (!createArray || !getArray || !setArray) return null;
@@ -498,10 +652,14 @@ export class JitManager {
           this.deoptimize(func, args);
           return null;
         }
-        // Element Kind ガード
-        if (isTrackedArray(arr) && getElementKind(arr) !== "SMI") {
-          this.deoptimize(func, args);
-          return null;
+        // Element Kind ガード (i32 spec は SMI のみ、f64 spec は DOUBLE も可)
+        if (isTrackedArray(arr)) {
+          const kind = getElementKind(arr);
+          const kindOk = cached.spec === "f64" ? (kind === "SMI" || kind === "DOUBLE") : kind === "SMI";
+          if (!kindOk) {
+            this.deoptimize(func, args);
+            return null;
+          }
         }
         // WasmGC 配列を作成
         const gcArr = createArray(arr.length);
@@ -516,6 +674,32 @@ export class JitManager {
           return null;
         }
         wasmArgs.push(args[i] as number);
+      }
+    }
+
+    // upvalue / 読み取り専用グローバル / クラスタ extra box (params 順に追加)。
+    // guard 済みスロット (callee 解決済みの関数参照) はダミー 0
+    const guardedSlots2 = cached.calleeGuards ? new Set(cached.calleeGuards.map(g => g.idx)) : null;
+    const uvCount2 = cached.upvalueCount ?? upvalueValues.length;
+    for (let uvi = 0; uvi < uvCount2; uvi++) {
+      const uv = upvalueValues[uvi];
+      if (guardedSlots2?.has(uvi)) wasmArgs.push(0);
+      else if (typeof uv === "number") wasmArgs.push(uv);
+      else { this.deoptimize(func, args); return null; }
+    }
+    if (cached.globalNames && cached.globalNames.length > 0) {
+      if (!this.globalsMap) { this.deoptimize(func, args); return null; }
+      for (const gname of cached.globalNames) {
+        const v = this.globalsMap.get(gname);
+        if (typeof v !== "number") { this.deoptimize(func, args); return null; }
+        wasmArgs.push(v);
+      }
+    }
+    if (cached.extraBoxes) {
+      for (const b of cached.extraBoxes) {
+        const v = b.value;
+        if (typeof v !== "number") { this.deoptimize(func, args); return null; }
+        wasmArgs.push(v);
       }
     }
 

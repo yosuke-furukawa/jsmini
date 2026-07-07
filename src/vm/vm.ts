@@ -1357,7 +1357,7 @@ export class VM {
               if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
               // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
               if (this.jit && __jc !== null) {
-                const jitResult = this.jit.tryCall(fn, args, closureBoxes.map(b => b.value));
+                const jitResult = this.jit.tryCall(fn, args, closureBoxes.map(b => b.value), undefined, closureBoxes);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
               // JIT 不可 → VM で実行
@@ -1372,7 +1372,7 @@ export class VM {
               // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
               if (this.jit && __jc !== null) {
                 const upvalueValues = closureBoxes.map(b => b.value);
-                const jitResult = this.jit.tryCall(fn, args, upvalueValues);
+                const jitResult = this.jit.tryCall(fn, args, upvalueValues, undefined, closureBoxes);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
               this.frames.push({ func: fn, pc: 0, locals, thisValue: undefined, icSlots: this.createICSlots(fn), upvalueBoxes: closureBoxes });
@@ -1411,7 +1411,7 @@ export class VM {
               if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
               // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
               if (this.jit && __jc !== null) {
-                const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
+                const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj, closure.capturedBoxes);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
               const asyncPromise = this.runAsyncFunction(fn, locals, closure.capturedBoxes);
@@ -1424,7 +1424,7 @@ export class VM {
               if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
               // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
               if (this.jit && __jc !== null) {
-                const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
+                const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj, closure.capturedBoxes);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
               this.frames.push({ func: fn, pc: 0, locals, thisValue: thisObj, icSlots: this.createICSlots(fn), upvalueBoxes: closure.capturedBoxes });

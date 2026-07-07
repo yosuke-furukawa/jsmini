@@ -367,11 +367,16 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           block.ops.push(op); stack.push(op.id); break;
         }
         case "SetPropertyComputed": {
+          // VM は [arr, idx, value] を全部 pop して value を push する。
+          // 旧実装は arr を peek で残しており、連鎖代入 (lastX = x[i] = v) で
+          // 後続の Sta が value でなく arr (配列!) を拾う desync だった
           const value = stack.pop()!;
           const index = stack.pop()!;
-          const arr = stack[stack.length - 1]; // peek (arr stays on stack)
+          const arr = stack.pop()!;
           const op = registerOp(createOp(irFunc, "ArraySet", [arr, index, value], "any"));
-          block.ops.push(op); break;
+          block.ops.push(op);
+          stack.push(value);
+          break;
         }
         // プロパティアクセス
         case "GetProperty": {
@@ -587,6 +592,22 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
 
   function propagate(targetBlockId: number, locals: (number | undefined)[], stack: AbstractStack, fromBlockId: number): void {
     const preds = blockEdges.get(targetBlockId)?.predecessors ?? [];
+    // スタック深さがエッジ間で食い違う合流は表現できない (slot がずれて
+    // 配列とスカラーが混ざる等)。検出したら IR を poisoned にして
+    // compile 側で拒否する (VM フォールバック)
+    const prevContrib = stackContribs.get(targetBlockId);
+    if (prevContrib) {
+      for (const [, st] of prevContrib) {
+        if (st.length !== stack.length) {
+          (irFunc as { stackMismatch?: boolean }).stackMismatch = true;
+        }
+        break;
+      }
+    }
+    const existingEntry = blockEntryStacks.get(targetBlockId);
+    if (existingEntry && existingEntry.length !== stack.length && preds.length >= 2) {
+      (irFunc as { stackMismatch?: boolean }).stackMismatch = true;
+    }
     if (preds.length >= 2 && stack.length > 0) {
       // 合流点にスタック値を持ち込む → slot ごとに Phi で受ける
       if (!stackContribs.has(targetBlockId)) stackContribs.set(targetBlockId, new Map());

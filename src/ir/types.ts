@@ -104,6 +104,9 @@ export interface Op {
 
   // LoadGlobal / StoreGlobal 用
   globalName?: string;
+  // クラスタコンパイル: この Call の callee が同一モジュール内の関数 idx
+  // (importCount + 1 + idx) に解決済み (Phase 32)
+  clusterCallee?: number;
 
   // Range Analysis 用
   range?: { min: number; max: number };

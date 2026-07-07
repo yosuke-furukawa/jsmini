@@ -5,9 +5,16 @@
 
 import type { IRFunction, Block, Op, PhiOp, IRType } from "./types.js";
 import { isPhi } from "./types.js";
-import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, f64ToBytes, type LocalGroup, WASM_GC_OP, refType } from "../jit/wasm-builder.js";
+import { WasmBuilder, WASM_OP, WASM_TYPE, i32ToLEB128, u32ToLEB128, f64ToBytes, type LocalGroup, WASM_GC_OP, refType } from "../jit/wasm-builder.js";
 
 const WASM_VOID = 0x40; // void block type
+
+// クラスタコンパイル (Phase 32): main と同一モジュールに入る callee と、
+// callee の upvalue の供給元 (caller の upvalue param か追加 box param)
+export type ClusterUpvalueSource = { kind: "callerUpvalue"; i: number } | { kind: "extraBox"; j: number };
+export type ClusterCallee = { ir: IRFunction; upvalueSources: ClusterUpvalueSource[] };
+export type ClusterInfo = { callees: ClusterCallee[]; extraBoxCount: number };
+type ClusterCtx = { funcIndexBase: number; plans: Map<number, ClusterCallee & { funcIndex: number }>; srcToParam: (src: ClusterUpvalueSource) => number };
 // ブラウザ (playground) には process が無いので安全にガード
 const DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
 import { analyzeCFG, type CFGAnalysis, type LoopInfo } from "./loop-analysis.js";
@@ -54,7 +61,7 @@ function classifyMathCall(name: string, argc: number): "native_unary" | "native_
   return "unsupported";
 }
 
-export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set(), growableArrayValues: Set<number> = new Set(), growFnIndex = -1, globalsAsParams = false): { body: number[]; extraLocals: number; lenLocals: number; refLocals: number; wat: string; propNames: string[]; writtenProps: string[]; globalNames: string[]; hasStoreGlobal: boolean } {
+export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set(), growableArrayValues: Set<number> = new Set(), growFnIndex = -1, globalsAsParams = false, cluster: ClusterInfo | null = null, clusterFuncIndexBase = -1): { body: number[]; extraLocals: number; lenLocals: number; refLocals: number; wat: string; propNames: string[]; writtenProps: string[]; globalNames: string[]; hasStoreGlobal: boolean } {
   const body: number[] = [];
   const watLines: string[] = [];
   let watIndent = 1;
@@ -128,7 +135,8 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   }
 
   const totalParamCount = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0)
-    + (globalsAsParams ? globalNames.length : 0);
+    + (globalsAsParams ? globalNames.length : 0)
+    + (cluster ? cluster.extraBoxCount : 0);
 
   // Op ID → Wasm local index のマッピング
   // Wasm locals: [params..., upvalue params..., this param..., global params...,
@@ -223,7 +231,15 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         let sawLeafBefore = false;
         for (let i = firstOperand; i < op.args.length; i++) {
           const argId = op.args[i];
-          if (arrayRefValues.has(argId)) continue; // 配列 ref は ref 型 local で後割り当て
+          if (arrayRefValues.has(argId)) {
+            // 配列 ref は ref 型 local で後割り当て。ただし emitLoadValue が
+            // 消費時に push する leaf である点は同じなので、後続の計算値の
+            // 順序判定 (b) には「leaf を見た」として効かせる
+            // (これを忘れると ArrayGet(x, i-1) で i-1 が inline のまま
+            //  x が上に積まれ、arr と index が逆転する)
+            sawLeafBefore = true;
+            continue;
+          }
           const rematerializable = isRematerializable(argId);
           if (!rematerializable && !opToLocal.has(argId)) {
             // (a) この計算値の定義が直前の op か?
@@ -318,6 +334,34 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     }
   }
   const refLocals = nextLocal - refLocalStart;
+
+  // クラスタ呼び出しの emit 用コンテキスト
+  let clusterCtx: ClusterCtx | null = null;
+  if (cluster && clusterFuncIndexBase >= 0) {
+    const extraBoxBase = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0)
+      + (globalsAsParams ? globalNames.length : 0);
+    const plans = new Map<number, ClusterCallee & { funcIndex: number }>();
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "Call" && op.clusterCallee !== undefined) {
+          const callee = cluster.callees[op.clusterCallee];
+          plans.set(op.id, { ...callee, funcIndex: clusterFuncIndexBase + op.clusterCallee });
+        }
+      }
+    }
+    clusterCtx = {
+      funcIndexBase: clusterFuncIndexBase,
+      plans,
+      srcToParam: (src) => src.kind === "callerUpvalue" ? irFunc.paramCount + src.i : extraBoxBase + src.j,
+    };
+  }
+
+  // 未使用の Call 結果は drop する必要がある (スタック残骸防止)
+  const usedIds = new Set<number>();
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) for (const a of op.args) usedIds.add(a);
+    for (const phi of block.phis) for (const [, vid] of phi.inputs) usedIds.add(vid);
+  }
 
   // growable 配列の emit 用コンテキスト (emitOp に渡す)
   const growCtx: GrowCtx = {
@@ -415,18 +459,33 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
       const wrapTarget = invertedDiamond ? trueTarget : falseTarget;
       // 完全ダイヤモンド (三項 / if-else 合流): then 側が join へ Jump で
       // 飛び越える場合は、join で閉じる外側 block も開く (then の Jump が
-      // br できる先を作る)。then が Return で終わる形 (fib 等) は不要
+      // br できる先を作る)。then が Return で終わる形 (fib 等) は不要。
+      // then 腕は複数ブロックのことがある (中にループ等) ので、topo 順で
+      // [trueTarget, falseTarget) にある全ブロックから「falseTarget 以降へ
+      // 飛ぶ前方 Jump」を探し、その先を join とする
       if (!invertedDiamond) {
-        const thenBlock = blockMap.get(trueTarget);
-        const thenLast = thenBlock?.ops[thenBlock.ops.length - 1];
-        if (thenLast?.opcode === "Jump") {
-          const join = thenBlock!.successors[0];
-          if (join !== undefined && join !== falseTarget && !cfg.backEdges.has(`${trueTarget}→${join}`)) {
-            body.push(WASM_OP.block, WASM_VOID);
-            controlStack.push({ kind: "block", targetBlockId: join });
-            wat(`block $join_${join}`);
-            watIndent++;
+        const topoIdx = new Map<number, number>();
+        cfg.topoOrder.forEach((b, i) => topoIdx.set(b, i));
+        const tFalse = topoIdx.get(falseTarget) ?? Infinity;
+        const tTrue = topoIdx.get(trueTarget) ?? Infinity;
+        let join: number | undefined;
+        for (const [bid, ti] of topoIdx) {
+          if (ti < tTrue || ti >= tFalse) continue; // then 腕の範囲外
+          const bb = blockMap.get(bid);
+          const last = bb?.ops[bb.ops.length - 1];
+          if (last?.opcode === "Jump") {
+            const tgt = bb!.successors[0];
+            if (tgt !== undefined && (topoIdx.get(tgt) ?? -1) >= tFalse && !cfg.backEdges.has(`${bid}→${tgt}`)) {
+              join = tgt;
+              break;
+            }
           }
+        }
+        if (join !== undefined && join !== falseTarget) {
+          body.push(WASM_OP.block, WASM_VOID);
+          controlStack.push({ kind: "block", targetBlockId: join });
+          wat(`block $join_${join}`);
+          watIndent++;
         }
       }
       body.push(WASM_OP.block, WASM_VOID);
@@ -450,7 +509,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
           for (const { phiLocal, valueId } of bwrites) {
             emitValueOrConst(valueId, body, opToLocal, opById);
             wat(`;; phi write (branch): local ${phiLocal} = v${valueId}`);
-            body.push(WASM_OP.local_set, phiLocal);
+            body.push(WASM_OP.local_set, ...u32ToLEB128(phiLocal));
             wat(`local.set ${phiLocal}`);
           }
         }
@@ -460,8 +519,14 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         // Branch は条件が true → successors[0], false → successors[1] (builder の規約に依存)
         // ループヘッダの Branch: false → exit (block 脱出)
         if (loopInfo) {
-          body.push(WASM_OP.i32_eqz);
-          wat("i32.eqz");
+          if (forceF64) {
+            body.push(WASM_OP.f64_const, ...f64ToBytes(0));
+            body.push(0x61); // f64.eq (= eqz 相当)
+            wat("f64.const 0 / f64.eq");
+          } else {
+            body.push(WASM_OP.i32_eqz);
+            wat("i32.eqz");
+          }
           const exitDepth = controlStack.length - 1 - controlStack.findLastIndex(
             e => e.kind === "block" && e.targetBlockId === loopInfo.exitBlock
           );
@@ -474,8 +539,19 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
           const nextEmit2 = topoNext.get(blockId);
           const inverted2 = block.successors[1] === nextEmit2 && block.successors[0] !== nextEmit2;
           if (!inverted2) {
-            body.push(WASM_OP.i32_eqz);
-            wat("i32.eqz");
+            if (forceF64) {
+              body.push(WASM_OP.f64_const, ...f64ToBytes(0));
+              body.push(0x61); // f64.eq (= eqz 相当)
+              wat("f64.const 0 / f64.eq");
+            } else {
+              body.push(WASM_OP.i32_eqz);
+              wat("i32.eqz");
+            }
+          } else if (forceF64) {
+            // inverted: 真値でジャンプ。f64 の truthiness を i32 に
+            body.push(WASM_OP.f64_const, ...f64ToBytes(0));
+            body.push(0x62); // f64.ne
+            wat("f64.const 0 / f64.ne");
           }
           const skipDepth = controlStack.length - 1 - controlStack.findLastIndex(
             e => e.kind === "block"
@@ -493,7 +569,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
           for (const { phiLocal, valueId } of writes) {
             emitValueOrConst(valueId, body, opToLocal, opById);
             wat(`;; phi write: local ${phiLocal} = v${valueId}`);
-            body.push(WASM_OP.local_set, phiLocal);
+            body.push(WASM_OP.local_set, ...u32ToLEB128(phiLocal));
             wat(`local.set ${phiLocal}`);
           }
         }
@@ -521,7 +597,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         wat("return");
       } else {
         const beforeLen = body.length;
-        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets, importIndices, importCount, growCtx);
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets, importIndices, importCount, growCtx, clusterCtx, usedIds);
         // emitOp が出力した命令を WAT に変換
         watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
       }
@@ -558,7 +634,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
       if (entryInput) {
         const [, valueId] = entryInput;
         emitValueOrConst(valueId, initCode, opToLocal, opById);
-        initCode.push(WASM_OP.local_set, phiLocal);
+        initCode.push(WASM_OP.local_set, ...u32ToLEB128(phiLocal));
       }
     }
   }
@@ -606,6 +682,8 @@ function emitOp(
   importIndices: Map<string, number> = new Map(),
   importCount = 0,
   growCtx?: GrowCtx,
+  clusterCtx?: ClusterCtx | null,
+  usedIds?: Set<number>,
 ): void {
   // forceF64 なら全演算を f64 として扱う
   const effectiveType = forceF64 ? "f64" : op.type;
@@ -635,8 +713,9 @@ function emitOp(
     }
 
     case "Undefined": {
-      // undefined → i32 0 として扱う
-      body.push(WASM_OP.i32_const, ...i32ToLEB128(0));
+      // undefined → 数値モデルでは 0 (f64 モードでは f64 の 0)
+      if (forceF64) body.push(WASM_OP.f64_const, ...f64ToBytes(0));
+      else body.push(WASM_OP.i32_const, ...i32ToLEB128(0));
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
@@ -655,7 +734,7 @@ function emitOp(
       }
       const gLocal = globalToLocal.get(op.globalName!);
       if (gLocal !== undefined) {
-        body.push(WASM_OP.local_get, gLocal);
+        body.push(WASM_OP.local_get, ...u32ToLEB128(gLocal));
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       }
       break;
@@ -664,7 +743,7 @@ function emitOp(
     case "ArrayGet": {
       if (arrayTypeIdx >= 0) {
         if (isGrowable(op.args[0])) {
-          body.push(WASM_OP.local_get, growCtx!.growableBackingLocal.get(op.args[0])!); // backing
+          body.push(WASM_OP.local_get, ...u32ToLEB128(growCtx!.growableBackingLocal.get(op.args[0])!)); // backing
         } else {
           emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
         }
@@ -687,26 +766,26 @@ function emitOp(
           if (forceF64) body.push(0xab); // i32.trunc_f64_s
         };
         // if (array.len(backing) <= i) backing = __grow(backing, i+1)
-        body.push(WASM_OP.local_get, backL, 0xfb, WASM_GC_OP.array_len);
+        body.push(WASM_OP.local_get, ...u32ToLEB128(backL), 0xfb, WASM_GC_OP.array_len);
         emitIdx();
         body.push(0x4c); // i32.le_s
         body.push(WASM_OP.if, 0x40);
-        body.push(WASM_OP.local_get, backL);
+        body.push(WASM_OP.local_get, ...u32ToLEB128(backL));
         emitIdx(); body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add); // mincap = i+1
-        body.push(WASM_OP.call, growCtx.growFnIndex);
-        body.push(WASM_OP.local_set, backL);
+        body.push(WASM_OP.call, ...u32ToLEB128(growCtx.growFnIndex));
+        body.push(WASM_OP.local_set, ...u32ToLEB128(backL));
         body.push(WASM_OP.end);
         // backing[i] = value
-        body.push(WASM_OP.local_get, backL);
+        body.push(WASM_OP.local_get, ...u32ToLEB128(backL));
         emitIdx();
         emitLoadValue(op.args[2], body, opToLocal, opById, forceF64);
         body.push(0xfb, WASM_GC_OP.array_set, arrayTypeIdx);
         // len = max(len, i+1)
         emitIdx(); body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add); // i+1
-        body.push(WASM_OP.local_get, lenL);
+        body.push(WASM_OP.local_get, ...u32ToLEB128(lenL));
         body.push(0x4a); // i32.gt_s : (i+1) > len
         body.push(WASM_OP.if, 0x40);
-        emitIdx(); body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add, WASM_OP.local_set, lenL);
+        emitIdx(); body.push(WASM_OP.i32_const, 1, WASM_OP.i32_add, WASM_OP.local_set, ...u32ToLEB128(lenL));
         body.push(WASM_OP.end);
       } else if (arrayTypeIdx >= 0) {
         emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
@@ -719,7 +798,7 @@ function emitOp(
     }
     case "ArrayLength": {
       if (isGrowable(op.args[0])) {
-        body.push(WASM_OP.local_get, growCtx!.growableLenLocal.get(op.args[0])!); // length (i32)
+        body.push(WASM_OP.local_get, ...u32ToLEB128(growCtx!.growableLenLocal.get(op.args[0])!)); // length (i32)
         if (forceF64) body.push(0xb7); // f64.convert_i32_s
       } else if (arrayTypeIdx >= 0) {
         emitLoadValue(op.args[0], body, opToLocal, opById, forceF64); // arr ref
@@ -734,8 +813,8 @@ function emitOp(
       if (growCtx && arrayTypeIdx >= 0) {
         const lenL = growCtx.growableLenLocal.get(op.id)!;
         const backL = growCtx.growableBackingLocal.get(op.id)!;
-        body.push(WASM_OP.i32_const, 0, WASM_OP.local_set, lenL);
-        body.push(WASM_OP.i32_const, 4, 0xfb, WASM_GC_OP.array_new_default, arrayTypeIdx, WASM_OP.local_set, backL);
+        body.push(WASM_OP.i32_const, 0, WASM_OP.local_set, ...u32ToLEB128(lenL));
+        body.push(WASM_OP.i32_const, 4, 0xfb, WASM_GC_OP.array_new_default, arrayTypeIdx, WASM_OP.local_set, ...u32ToLEB128(backL));
       }
       break;
     }
@@ -745,22 +824,22 @@ function emitOp(
         const lenL = growCtx.growableLenLocal.get(op.args[0])!;
         const backL = growCtx.growableBackingLocal.get(op.args[0])!;
         // if (array.len(backing) <= len) backing = __grow(backing, len+1)
-        body.push(WASM_OP.local_get, backL, 0xfb, WASM_GC_OP.array_len);
-        body.push(WASM_OP.local_get, lenL);
+        body.push(WASM_OP.local_get, ...u32ToLEB128(backL), 0xfb, WASM_GC_OP.array_len);
+        body.push(WASM_OP.local_get, ...u32ToLEB128(lenL));
         body.push(0x4c); // i32.le_s
         body.push(WASM_OP.if, 0x40); // if (void)
-        body.push(WASM_OP.local_get, backL);
-        body.push(WASM_OP.local_get, lenL, WASM_OP.i32_const, 1, WASM_OP.i32_add); // mincap = len+1
-        body.push(WASM_OP.call, growCtx.growFnIndex);
-        body.push(WASM_OP.local_set, backL);
+        body.push(WASM_OP.local_get, ...u32ToLEB128(backL));
+        body.push(WASM_OP.local_get, ...u32ToLEB128(lenL), WASM_OP.i32_const, 1, WASM_OP.i32_add); // mincap = len+1
+        body.push(WASM_OP.call, ...u32ToLEB128(growCtx.growFnIndex));
+        body.push(WASM_OP.local_set, ...u32ToLEB128(backL));
         body.push(WASM_OP.end);
         // backing[len] = value
-        body.push(WASM_OP.local_get, backL);
-        body.push(WASM_OP.local_get, lenL);
+        body.push(WASM_OP.local_get, ...u32ToLEB128(backL));
+        body.push(WASM_OP.local_get, ...u32ToLEB128(lenL));
         emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
         body.push(0xfb, WASM_GC_OP.array_set, arrayTypeIdx);
         // len = len + 1
-        body.push(WASM_OP.local_get, lenL, WASM_OP.i32_const, 1, WASM_OP.i32_add, WASM_OP.local_set, lenL);
+        body.push(WASM_OP.local_get, ...u32ToLEB128(lenL), WASM_OP.i32_const, 1, WASM_OP.i32_add, WASM_OP.local_set, ...u32ToLEB128(lenL));
       }
       break;
     }
@@ -773,7 +852,7 @@ function emitOp(
         if (forceF64) body.push(0xab); // i32.trunc_f64_s (length は i32)
         body.push(0xfb, WASM_GC_OP.array_new_default, arrayTypeIdx);
         const refLocal = opToLocal.get(op.id);
-        if (refLocal !== undefined) body.push(WASM_OP.local_set, refLocal);
+        if (refLocal !== undefined) body.push(WASM_OP.local_set, ...u32ToLEB128(refLocal));
       }
       break;
     }
@@ -782,7 +861,7 @@ function emitOp(
       const gLocal = globalToLocal.get(op.globalName!);
       if (gLocal !== undefined) {
         emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
-        body.push(WASM_OP.local_set, gLocal);
+        body.push(WASM_OP.local_set, ...u32ToLEB128(gLocal));
       }
       break;
     }
@@ -790,21 +869,21 @@ function emitOp(
     case "LoadUpvalue": {
       // upvalue は追加パラメータ: local index = irFunc.paramCount + upvalue index
       const uvLocal = irFunc.paramCount + op.index!;
-      body.push(WASM_OP.local_get, uvLocal);
+      body.push(WASM_OP.local_get, ...u32ToLEB128(uvLocal));
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
     case "StoreUpvalue": {
       const uvLocal = irFunc.paramCount + op.index!;
       emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
-      body.push(WASM_OP.local_set, uvLocal);
+      body.push(WASM_OP.local_set, ...u32ToLEB128(uvLocal));
       break;
     }
 
     case "LoadThis": {
       // this は upvalue の後の追加パラメータ
       const thisLocal = irFunc.paramCount + upvalueCount;
-      body.push(WASM_OP.local_get, thisLocal);
+      body.push(WASM_OP.local_get, ...u32ToLEB128(thisLocal));
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
@@ -846,6 +925,23 @@ function emitOp(
     }
 
     case "Call": {
+      // クラスタ呼び出し: 同一モジュール内の callee へ直接 call。
+      // args は実引数のみ (callee ref は jit.ts が除去済み)。
+      // 実引数 → callee の upvalue 供給 param の順に積む
+      if (op.clusterCallee !== undefined && clusterCtx) {
+        const plan = clusterCtx.plans.get(op.id)!;
+        for (const a of op.args) emitLoadValue(a, body, opToLocal, opById, forceF64);
+        for (const src of plan.upvalueSources) {
+          body.push(WASM_OP.local_get, ...u32ToLEB128(clusterCtx.srcToParam(src)));
+        }
+        body.push(WASM_OP.call, ...u32ToLEB128(plan.funcIndex));
+        if (usedIds && !usedIds.has(op.id) && !needsLocal.has(op.id)) {
+          body.push(0x1a); // drop (結果未使用: set_bnd(b,x); 等の文)
+        } else {
+          maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        }
+        break;
+      }
       const cname = op.calleeName;
       if (cname === "__await") {
         // JSPI: call import $__await(value) → suspend/resume
@@ -854,7 +950,7 @@ function emitOp(
           emitLoadValue(argId, body, opToLocal, opById, forceF64);
         }
         const idx = importIndices?.get("__await") ?? 0;
-        body.push(WASM_OP.call, idx);
+        body.push(WASM_OP.call, ...u32ToLEB128(idx));
       } else if (cname && cname.startsWith("Math.")) {
         // op.args = [calleeRef, arg0, arg1, ...]
         const argc = op.args.length - 1;
@@ -869,7 +965,7 @@ function emitOp(
         } else if (cls === "host") {
           const idx = importIndices?.get(cname);
           if (idx === undefined) throw new Error(`Math import not registered: ${cname}`);
-          body.push(WASM_OP.call, idx);
+          body.push(WASM_OP.call, ...u32ToLEB128(idx));
         } else {
           throw new Error(`Unsupported Math call: ${cname}/${argc}`);
         }
@@ -879,7 +975,7 @@ function emitOp(
         for (let i = 1; i < op.args.length; i++) {
           emitLoadValue(op.args[i], body, opToLocal, opById, forceF64);
         }
-        body.push(WASM_OP.call, importCount);
+        body.push(WASM_OP.call, ...u32ToLEB128(importCount));
       }
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
@@ -946,6 +1042,9 @@ function emitOp(
       emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
       body.push(getWasmCmpOp(op.opcode, forceF64 ? "f64" : (opById.get(op.args[0])?.type ?? "i32")));
+      // forceF64 では bool も f64 (0/1) に正規化する。比較結果 (i32) が
+      // f64 local/Phi を通ると型崩れするため (|| の stack Phi で顕在化)
+      if (forceF64) body.push(WASM_OP.f64_convert_i32_s);
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
@@ -972,9 +1071,15 @@ function emitOp(
       break;
     }
     case "Not": {
-      // !x = x == 0
+      // !x = x == 0 (forceF64 では f64 比較で受けて f64 0/1 を返す)
       emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
-      body.push(WASM_OP.i32_eqz);
+      if (forceF64) {
+        body.push(WASM_OP.f64_const, ...f64ToBytes(0));
+        body.push(0x61); // f64.eq → i32
+        body.push(WASM_OP.f64_convert_i32_s);
+      } else {
+        body.push(WASM_OP.i32_eqz);
+      }
       maybeStoreLocal(op.id, body, opToLocal, needsLocal);
       break;
     }
@@ -1056,7 +1161,7 @@ function watFromBytes(
 function emitLoadValue(opId: number, body: number[], opToLocal: Map<number, number>, opById?: Map<number, Op>, forceF64 = false): void {
   const local = opToLocal.get(opId);
   if (local !== undefined) {
-    body.push(WASM_OP.local_get, local);
+    body.push(WASM_OP.local_get, ...u32ToLEB128(local));
     return;
   }
   // local がない場合: Const なら直接出力
@@ -1082,7 +1187,7 @@ function emitLoadValue(opId: number, body: number[], opToLocal: Map<number, numb
 function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, number>, opById: Map<number, Op>): void {
   const local = opToLocal.get(opId);
   if (local !== undefined) {
-    body.push(WASM_OP.local_get, local);
+    body.push(WASM_OP.local_get, ...u32ToLEB128(local));
     return;
   }
   const op = opById.get(opId);
@@ -1095,7 +1200,7 @@ function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, n
     return;
   }
   if (op?.opcode === "Param" && op.index !== undefined) {
-    body.push(WASM_OP.local_get, op.index);
+    body.push(WASM_OP.local_get, ...u32ToLEB128(op.index));
     return;
   }
   // fallback: i32.const 0
@@ -1110,7 +1215,7 @@ function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, n
 function maybeStoreLocal(opId: number, body: number[], opToLocal: Map<number, number>, needsLocal: Set<number>): void {
   if (needsLocal.has(opId)) {
     const local = opToLocal.get(opId)!;
-    body.push(WASM_OP.local_set, local);
+    body.push(WASM_OP.local_set, ...u32ToLEB128(local));
   }
 }
 
@@ -1199,8 +1304,13 @@ function getReturnType(irFunc: IRFunction): IRType {
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
-export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; propNames?: string[]; writtenProps?: string[]; globalNames?: string[]; memory?: WebAssembly.Memory; hasAwait?: boolean; jspiWrapped?: (...args: number[]) => Promise<number> } | null {
+export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, cluster?: ClusterInfo | null): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; propNames?: string[]; writtenProps?: string[]; globalNames?: string[]; memory?: WebAssembly.Memory; hasAwait?: boolean; jspiWrapped?: (...args: number[]) => Promise<number> } | null {
   try {
+    // builder がスタック合流の深さ不一致を検出した関数は表現不能 → 拒否
+    if ((irFunc as { stackMismatch?: boolean }).stackMismatch) {
+      if (DEBUG_WASM) console.error("[compileIRToWasm] reject: stack depth mismatch at merge (unstructured stack flow)");
+      return null;
+    }
     // IR に Wasm 化できない Op が含まれてたらスキップ
     let hasArrayOps = false;
     let hasSelfRecursion = false;
@@ -1222,6 +1332,8 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
             }
             if (cls === "host") mathHostImports.add(op.calleeName);
             // native_unary / native_binary は import 不要
+          } else if (op.clusterCallee !== undefined) {
+            // クラスタ解決済み: 同一モジュール内 call になるので OK
           } else {
             if (DEBUG_WASM) console.error("[compileIRToWasm] reject: unknown call", op.calleeName, "args=", op.args.length);
             return null; // 他の関数 or 自己再帰+配列 → 未対応
@@ -1235,6 +1347,22 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
         if (op.opcode === "Const" && op.value !== undefined &&
             typeof op.value !== "number" && typeof op.value !== "boolean" &&
             op.value !== null) return null; // 非数値 Const (関数オブジェクト等)
+      }
+    }
+
+    // クラスタ callee 側の配列 op / Math import も module 全体の要件に含める
+    if (cluster) {
+      for (const c of cluster.callees) {
+        for (const block of c.ir.blocks) {
+          for (const op of block.ops) {
+            if (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength") hasArrayOps = true;
+            if (op.opcode === "Call" && op.calleeName?.startsWith("Math.")) {
+              const cls = classifyMathCall(op.calleeName, op.args.length - 1);
+              if (cls === "unsupported") return null;
+              if (cls === "host") mathHostImports.add(op.calleeName);
+            }
+          }
+        }
       }
     }
 
@@ -1257,8 +1385,9 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
       importIndices.set(name, idx);
     }
 
-    // Range Analysis: i32 で overflow するなら全体を f64 に昇格
-    const useF64 = functionNeedsF64(irFunc);
+    // Range Analysis: i32 で overflow するなら全体を f64 に昇格。
+    // クラスタは呼び出し規約を揃えるため 1 つでも f64 なら全員 f64
+    const useF64 = functionNeedsF64(irFunc) || (cluster?.callees.some(c => functionNeedsF64(c.ir)) ?? false);
     const wasmType = useF64 ? WASM_TYPE.f64 : WASM_TYPE.i32;
 
     // WasmGC array 型定義
@@ -1300,12 +1429,19 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
           }
         }
       }
-      // Phi 経由で伝播 (配列を運ぶ Phi の入力も配列 ref)
+      // Phi 経由で伝播 (双方向):
+      // 下り: 配列を運ぶ Phi の入力も配列 ref
+      // 上り: 入力に配列があれば Phi 自身も配列 ref (スタック Phi が配列を
+      //       乗せて合流し、使用が cluster call 引数だけのケースで必要)
       let changed = true;
       while (changed) {
         changed = false;
         for (const block of irFunc.blocks) {
           for (const phi of block.phis) {
+            if (!arrayRefValues.has(phi.id) && phi.inputs.some(([, vid]) => arrayRefValues.has(vid))) {
+              arrayRefValues.add(phi.id);
+              changed = true;
+            }
             if (arrayRefValues.has(phi.id)) {
               for (const [, vid] of phi.inputs) {
                 if (!arrayRefValues.has(vid)) { arrayRefValues.add(vid); changed = true; }
@@ -1335,7 +1471,9 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
             const argId = op.args[i];
             if (!arrayRefValues.has(argId)) continue;
             const isArrayOperand =
-              (op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "ArrayPush") && i === 0;
+              ((op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "ArrayPush") && i === 0)
+              // クラスタ呼び出しの引数は同一モジュール内の WasmGC ref 渡し (escape しない)
+              || (op.opcode === "Call" && op.clusterCallee !== undefined);
             if (!isArrayOperand) {
               if (DEBUG_WASM) console.error("[compileIRToWasm] reject: array ref escapes via", op.opcode, "arg", i);
               return null;
@@ -1451,18 +1589,22 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
 
     // growable 配列があれば __grow ヘルパを main の直後 (index importCount+1) に置く
     const hasGrowable = growableArrayValues.size > 0;
-    const growFnIndex = hasGrowable ? builder.importCount + 1 : -1;
+    const growFnIndex = hasGrowable ? builder.importCount + 1 + (cluster?.callees.length ?? 0) : -1;
     // tryCall 経路 (osrLocalCount 無し) ではグローバルを読み取り専用の追加
     // パラメータとして渡す。StoreGlobal を含む関数は VM 側へ書き戻す術が
     // 無いので reject (OSR は従来通り zero-init local で自己完結)
     const globalsAsParams = osrLocalCount === undefined;
-    const { body: bodyCode, extraLocals, lenLocals, refLocals, propNames, writtenProps, globalNames, hasStoreGlobal } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues, growableArrayValues, growFnIndex, globalsAsParams);
+    const { body: bodyCode, extraLocals, lenLocals, refLocals, propNames, writtenProps, globalNames, hasStoreGlobal, wat: mainWat } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues, growableArrayValues, growFnIndex, globalsAsParams, cluster ?? null, builder.importCount + 1);
     if (globalsAsParams && hasStoreGlobal) {
       if (DEBUG_WASM) console.error("[compileIRToWasm] reject: StoreGlobal in tryCall path (no write-back for globals)");
       return null;
     }
     if (globalsAsParams) {
       for (let i = 0; i < globalNames.length; i++) { params.push(wasmType); paramValTypeCount++; }
+    }
+    if (cluster) {
+      // callee 専用 upvalue box の値を受け取る追加パラメータ
+      for (let i = 0; i < cluster.extraBoxCount; i++) { params.push(wasmType); paramValTypeCount++; }
     }
 
     // OSR モード: extra locals もパラメータに含める (VM から全 locals を受け取る)
@@ -1485,9 +1627,66 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number): { i
     if (lenLocals > 0) groups.push({ count: lenLocals, type: [WASM_TYPE.i32] });
     if (refLocals > 0 && arrayTypeIdx >= 0) groups.push({ count: refLocals, type: refType(arrayTypeIdx) });
     const extraLocalGroups = groups.length > 0 ? groups : undefined;
+    if (typeof process !== "undefined" && process.env?.DEBUG_WAT) console.error(mainWat);
     builder.addFunction(irFunc.name, params, results, bodyCode,
       wasmExtraLocals + lenLocals + refLocals > 0 ? wasmExtraLocals + lenLocals + refLocals : 0,
       totalParamCount, 1, extraLocalGroups);
+
+    // クラスタ callee を main の直後 (importCount+1 から) に配置。
+    // callee の呼び出し規約: [params (配列は ref)..., upvalues (数値)...]
+    if (cluster) {
+      for (const callee of cluster.callees) {
+        const cir = callee.ir;
+        // callee の配列 param 検出 (main と同じ規則)
+        const cArrayParams = new Set<number>();
+        const cParamIdToIndex = new Map<number, number>();
+        for (const b of cir.blocks) {
+          for (const o of b.ops) {
+            if (o.opcode === "Param" && o.index !== undefined) cParamIdToIndex.set(o.id, o.index);
+          }
+        }
+        const cArrayRefValues = new Set<number>();
+        for (const b of cir.blocks) {
+          for (const o of b.ops) {
+            if ((o.opcode === "ArrayGet" || o.opcode === "ArraySet" || o.opcode === "ArrayLength") && o.args[0] !== undefined) {
+              const pIdx = cParamIdToIndex.get(o.args[0]);
+              if (pIdx === undefined) {
+                // 配列が param 以外から来る callee は jit 側で除外済みのはずだが安全側で bail
+                if (DEBUG_WASM) console.error("[compileIRToWasm] reject: cluster callee has non-param array");
+                return null;
+              }
+              cArrayParams.add(pIdx);
+              cArrayRefValues.add(o.args[0]);
+            }
+          }
+        }
+        let cUpvalueCount = 0;
+        for (const b of cir.blocks) {
+          for (const o of b.ops) {
+            if ((o.opcode === "LoadUpvalue" || o.opcode === "StoreUpvalue") && o.index !== undefined) {
+              cUpvalueCount = Math.max(cUpvalueCount, o.index + 1);
+            }
+          }
+        }
+        const cg = codegenIR(cir, useF64, arrayTypeIdx, importIndices, builder.importCount, cArrayRefValues, new Set(), growFnIndex, false);
+        const cParams: number[] = [];
+        let cParamValCount = 0;
+        for (let i = 0; i < cir.paramCount; i++) {
+          if (cArrayParams.has(i)) cParams.push(...refType(arrayTypeIdx));
+          else cParams.push(wasmType);
+          cParamValCount++;
+        }
+        for (let i = 0; i < cUpvalueCount; i++) { cParams.push(wasmType); cParamValCount++; }
+        const cGroups: LocalGroup[] = [];
+        const cLocalType = useF64 ? [WASM_TYPE.f64] : [wasmType];
+        if (cg.extraLocals > 0) cGroups.push({ count: cg.extraLocals, type: cLocalType });
+        if (cg.lenLocals > 0) cGroups.push({ count: cg.lenLocals, type: [WASM_TYPE.i32] });
+        if (cg.refLocals > 0 && arrayTypeIdx >= 0) cGroups.push({ count: cg.refLocals, type: refType(arrayTypeIdx) });
+        builder.addFunction(cir.name || "__cluster_callee", cParams, results, cg.body,
+          cg.extraLocals + cg.lenLocals + cg.refLocals,
+          cParamValCount, 1, cGroups.length > 0 ? cGroups : undefined);
+      }
+    }
     // __grow(old, mincap) → ref: 容量を max(mincap, oldcap*2) に拡張して
     // 旧要素をコピーした新しい backing array を返す (main の直後 = importCount+1)
     if (hasGrowable && arrayTypeIdx >= 0) {
