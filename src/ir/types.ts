@@ -107,6 +107,9 @@ export interface Op {
   // クラスタコンパイル: この Call の callee が同一モジュール内の関数 idx
   // (importCount + 1 + idx) に解決済み (Phase 32)
   clusterCallee?: number;
+  // callee の upvalue の供給元 (呼び出し元関数のパラメータ空間での位置)。
+  // own = 呼び出し元自身の upvalue i / extra = main の extraBox pool j
+  clusterSrcs?: Array<{ kind: "own" | "extra"; i: number }>;
 
   // Range Analysis 用
   range?: { min: number; max: number };

@@ -172,3 +172,62 @@ describe("Phase 32 — 過程で見つかったバグの回帰", () => {
     assert.ok((r.tierLog ?? []).some(l => /Wasm compiled/.test(l)), "loopy fn should compile on first call despite high threshold");
   });
 });
+
+describe("Phase 32 — 深さ 2 クラスタ (callee が callee を呼ぶ)", () => {
+  it("project → lin_solve → set_bnd 形が JIT される", () => {
+    const src = `
+      function Field() {
+        var width = 8;
+        function edge(x) { x[0] = x[1]; return 0; }
+        function solve(x, x0, c) {
+          var inv = 1 / c;
+          for (var i = 1; i < width - 1; i++) { x[i] = (x0[i] + x[i-1]) * inv; }
+          edge(x);
+          return 0;
+        }
+        function outer(x, x0) {
+          for (var i = 0; i < width; i++) { x0[i] = i * 0.5; }
+          solve(x, x0, 2.0);
+          edge(x0);
+          return x[3];
+        }
+        this.run = function(x, x0) { return outer(x, x0); };
+      }
+      var f = new Field();
+      var x = new Array(8), x0 = new Array(8);
+      for (var i = 0; i < 8; i++) { x[i] = 0; x0[i] = 0; }
+      var r = 0;
+      for (var k = 0; k < 4; k++) { r = f.run(x, x0); }
+      Math.round(r * 1000);
+    `;
+    const plain = vmEvaluate(src);
+    const r = vmEvaluate(src, { jit: true, jitThreshold: 2, useIR: true, traceTier: true }) as { value: unknown; tierLog?: string[] };
+    assert.equal(r.value, plain);
+    assert.ok((r.tierLog ?? []).some(l => /Wasm compiled/.test(l)), "depth-2 cluster should compile");
+  });
+
+  it("深さ 2 でも callee 差し替えで deopt して正しい", () => {
+    const src = `
+      function Field() {
+        var inner = function(x) { return x + 1; };
+        function mid(n) { return inner(n) * 2; }
+        function outer(n) {
+          var s = 0;
+          for (var i = 0; i < n; i++) { s = s + mid(i); }
+          return s;
+        }
+        this.run = function(n) { return outer(n); };
+        this.swap = function() { inner = function(x) { return x + 100; }; };
+      }
+      var f = new Field();
+      var a = 0;
+      for (var k = 0; k < 5; k++) { a = f.run(10); }
+      f.swap();
+      var b = f.run(10);
+      a * 100000 + b;
+    `;
+    const plain = vmEvaluate(src);
+    const jit = vmEvaluate(src, { jit: true, jitThreshold: 2, useIR: true });
+    assert.equal(jit, plain);
+  });
+});

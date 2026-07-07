@@ -11,10 +11,10 @@ const WASM_VOID = 0x40; // void block type
 
 // クラスタコンパイル (Phase 32): main と同一モジュールに入る callee と、
 // callee の upvalue の供給元 (caller の upvalue param か追加 box param)
-export type ClusterUpvalueSource = { kind: "callerUpvalue"; i: number } | { kind: "extraBox"; j: number };
-export type ClusterCallee = { ir: IRFunction; upvalueSources: ClusterUpvalueSource[] };
-export type ClusterInfo = { callees: ClusterCallee[]; extraBoxCount: number };
-type ClusterCtx = { funcIndexBase: number; plans: Map<number, ClusterCallee & { funcIndex: number }>; srcToParam: (src: ClusterUpvalueSource) => number };
+export type ClusterUpvalueSource = { kind: "own" | "extra"; i: number };
+export type ClusterCallee = { ir: IRFunction };
+export type ClusterInfo = { callees: ClusterCallee[]; extraBoxCount: number; deadCallees?: Set<number> };
+type ClusterCtx = { funcIndexBase: number; srcToParam: (src: ClusterUpvalueSource) => number };
 // ブラウザ (playground) には process が無いので安全にガード
 const DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
 import { analyzeCFG, type CFGAnalysis, type LoopInfo } from "./loop-analysis.js";
@@ -94,6 +94,12 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     for (const op of block.ops) {
       if ((op.opcode === "LoadUpvalue" || op.opcode === "StoreUpvalue") && op.index !== undefined) {
         upvalueCount = Math.max(upvalueCount, op.index + 1);
+      }
+      // クラスタ呼び出しが転送する own upvalue (LoadUpvalue が無くても param が要る)
+      if (op.clusterSrcs) {
+        for (const src of op.clusterSrcs) {
+          if (src.kind === "own") upvalueCount = Math.max(upvalueCount, src.i + 1);
+        }
       }
     }
   }
@@ -335,24 +341,15 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   }
   const refLocals = nextLocal - refLocalStart;
 
-  // クラスタ呼び出しの emit 用コンテキスト
+  // クラスタ呼び出しの emit 用コンテキスト。
+  // own = この関数自身の upvalue param / extra = main の extraBox pool param
   let clusterCtx: ClusterCtx | null = null;
   if (cluster && clusterFuncIndexBase >= 0) {
     const extraBoxBase = irFunc.paramCount + upvalueCount + (hasThis ? 1 : 0)
       + (globalsAsParams ? globalNames.length : 0);
-    const plans = new Map<number, ClusterCallee & { funcIndex: number }>();
-    for (const block of irFunc.blocks) {
-      for (const op of block.ops) {
-        if (op.opcode === "Call" && op.clusterCallee !== undefined) {
-          const callee = cluster.callees[op.clusterCallee];
-          plans.set(op.id, { ...callee, funcIndex: clusterFuncIndexBase + op.clusterCallee });
-        }
-      }
-    }
     clusterCtx = {
       funcIndexBase: clusterFuncIndexBase,
-      plans,
-      srcToParam: (src) => src.kind === "callerUpvalue" ? irFunc.paramCount + src.i : extraBoxBase + src.j,
+      srcToParam: (src) => src.kind === "own" ? irFunc.paramCount + src.i : extraBoxBase + src.i,
     };
   }
 
@@ -929,12 +926,11 @@ function emitOp(
       // args は実引数のみ (callee ref は jit.ts が除去済み)。
       // 実引数 → callee の upvalue 供給 param の順に積む
       if (op.clusterCallee !== undefined && clusterCtx) {
-        const plan = clusterCtx.plans.get(op.id)!;
         for (const a of op.args) emitLoadValue(a, body, opToLocal, opById, forceF64);
-        for (const src of plan.upvalueSources) {
+        for (const src of op.clusterSrcs ?? []) {
           body.push(WASM_OP.local_get, ...u32ToLEB128(clusterCtx.srcToParam(src)));
         }
-        body.push(WASM_OP.call, ...u32ToLEB128(plan.funcIndex));
+        body.push(WASM_OP.call, ...u32ToLEB128(clusterCtx.funcIndexBase + op.clusterCallee));
         if (usedIds && !usedIds.has(op.id) && !needsLocal.has(op.id)) {
           body.push(0x1a); // drop (結果未使用: set_bnd(b,x); 等の文)
         } else {
@@ -1635,7 +1631,17 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
     // クラスタ callee を main の直後 (importCount+1 から) に配置。
     // callee の呼び出し規約: [params (配列は ref)..., upvalues (数値)...]
     if (cluster) {
-      for (const callee of cluster.callees) {
+      for (let ci = 0; ci < cluster.callees.length; ci++) {
+        const callee = cluster.callees[ci];
+        // dead slot (純度チェックで取り消された callee): index を保つため
+        // 何もしないスタブ関数で埋める (どこからも呼ばれない)
+        if (cluster.deadCallees?.has(ci)) {
+          const stubBody = useF64
+            ? [WASM_OP.f64_const, ...f64ToBytes(0), WASM_OP.end]
+            : [WASM_OP.i32_const, 0, WASM_OP.end];
+          builder.addFunction("__dead", [], results, stubBody, 0, 0, 1);
+          continue;
+        }
         const cir = callee.ir;
         // callee の配列 param 検出 (main と同じ規則)
         const cArrayParams = new Set<number>();
@@ -1666,9 +1672,15 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
             if ((o.opcode === "LoadUpvalue" || o.opcode === "StoreUpvalue") && o.index !== undefined) {
               cUpvalueCount = Math.max(cUpvalueCount, o.index + 1);
             }
+            if (o.clusterSrcs) {
+              for (const src of o.clusterSrcs) {
+                if (src.kind === "own") cUpvalueCount = Math.max(cUpvalueCount, src.i + 1);
+              }
+            }
           }
         }
-        const cg = codegenIR(cir, useF64, arrayTypeIdx, importIndices, builder.importCount, cArrayRefValues, new Set(), growFnIndex, false);
+        // callee 自身も兄弟を呼びうる (深さ 2+) ので cluster ctx を渡す
+        const cg = codegenIR(cir, useF64, arrayTypeIdx, importIndices, builder.importCount, cArrayRefValues, new Set(), growFnIndex, false, cluster, builder.importCount + 1);
         const cParams: number[] = [];
         let cParamValCount = 0;
         for (let i = 0; i < cir.paramCount; i++) {
