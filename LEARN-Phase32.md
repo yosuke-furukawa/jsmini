@@ -4,12 +4,13 @@
 
 Phase 31 の宿題「navier-stokes のカーネルが 1 本も JIT されない」を解消。
 **兄弟クロージャを同一 Wasm モジュールにまとめる「クラスタコンパイル」**
-を実装し、NS が **JIT 283ms vs VM 2161ms (7.6x)** になった。
+を実装し、さらに深さ 2+ (callee が兄弟を呼ぶ形) を再帰解決して、
+NS が **JIT 123ms vs VM 2089ms (17x)** になった。
 spectral-norm も「ループ持ちは初回コンパイル」の副作用で 119ms → 13ms。
 
 | ベンチ | VM | JIT | Phase 31 時点の JIT |
 |---|---|---|---|
-| navier-stokes | 2161ms | **283ms** | 2133ms (VM 同等) |
+| navier-stokes | 2089ms | **123ms (17x)** | 2133ms (VM 同等) |
 | spectral-norm | 163ms | **13ms** | 119ms |
 | richards | 118ms | 113ms | 113ms |
 | splay | 2543ms | 2430ms | 2441ms |
@@ -94,10 +95,18 @@ guard による投機」という V8 の speculative optimization の骨格が�
 4. **「削る」二分探索が今回も最速**: lin_solve 縮小形 (A〜G の 7 変種) で
    f64 × 配列 × call の組み合わせから 3 バグを 1 つずつ剥がした
 
+## 深さ 2+ クラスタ (追記: 同フェーズ内で対応済み)
+
+project → lin_solve → set_bnd のような「callee が兄弟を呼ぶ」形も再帰
+解決するよう拡張した (7.6x → **17x**)。設計のポイント:
+- upvalue 供給元は **Call op ごと** (呼び出し元関数のパラメータ空間で
+  解決)。callee 内の呼び出しは callee 自身の box 空間限定 (無ければ bail)
+- guard を box 参照ベースに一般化 — 深さ 2 の box 差し替えも捕捉
+- 純度チェックで取り消した callee は **dead slot** (スタブ関数) で埋めて
+  関数 index の安定性を保つ (再帰登録後に pop すると index がずれる)
+
 ## 残課題 (次フェーズ候補)
 
-- **深さ 2 クラスタ**: project → lin_solve → set_bnd (callee が callee を
-  呼ぶ)。upvalue の転送を再帰化すれば NS はもう一段速くなる余地
-- reset (配列 StoreUpvalue) / queryUI は VM のまま (実害小)
+- reset (配列 StoreUpvalue) / queryUI / addPoints は VM のまま (実害小)
 - deltablue の残 -7% はメソッドクラスタ (this 持ち同士) への拡張で
   同じ機構が使える見込み
