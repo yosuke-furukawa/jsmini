@@ -185,6 +185,12 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
 
   const blockEntryStacks = new Map<number, AbstractStack>();
   const blockExitLocals = new Map<number, (number | undefined)[]>();
+  // 合流点 (preds >= 2) の「スタック上の値」用 Phi。
+  // `a || b` / `a && b` / 三項演算子は分岐した値をスタックに乗せたまま
+  // 合流するので、locals と同様に Phi で受けないと片方の辺の値が消える
+  // (実害: || の右辺が丸ごと IR から消えて JIT が誤コンパイルしていた)
+  const stackPhis = new Map<number, PhiOp[]>();          // 合流 blockId → スタック slot ごとの Phi
+  const stackContribs = new Map<number, Map<number, AbstractStack>>(); // 合流 blockId → predId → そのエッジのスタック
 
   // ブロック0 の初期状態
   const initLocals: (number | undefined)[] = new Array(localCount).fill(undefined);
@@ -293,14 +299,14 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
         case "Jump": {
           block.ops.push(registerOp(createOp(irFunc, "Jump", [], "any")));
           const t = pcToBlock.get(instr.operand!)!;
-          propagate(t, locals, stack); if (!visited.has(t)) queue.push(t);
+          propagate(t, locals, stack, blockId); if (!visited.has(t)) queue.push(t);
           break;
         }
         case "JumpIfFalse": case "JumpIfTrue": {
           const cond = stack.pop()!;
           block.ops.push(registerOp(createOp(irFunc, "Branch", [cond], "any")));
           const t = pcToBlock.get(instr.operand!)!, f = pcToBlock.get(pc + 1)!;
-          propagate(t, locals, stack); propagate(f, locals, stack);
+          propagate(t, locals, stack, blockId); propagate(f, locals, stack, blockId);
           if (!visited.has(t)) queue.push(t); if (!visited.has(f)) queue.push(f);
           break;
         }
@@ -499,7 +505,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
     if (!lastOp || (lastOp.opcode !== "Return" && lastOp.opcode !== "Jump" && lastOp.opcode !== "Branch")) {
       if (blockId + 1 < sortedBoundaries.length) {
         block.ops.push(registerOp(createOp(irFunc, "Jump", [], "any")));
-        propagate(blockId + 1, locals, stack);
+        propagate(blockId + 1, locals, stack, blockId);
         if (!visited.has(blockId + 1)) queue.push(blockId + 1);
       }
     }
@@ -524,14 +530,32 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
     }
   }
 
+  // ======== パス 3a': スタック Phi の inputs を埋める ========
+  // 各エッジ通過時のスタック (stackContribs) から slot ごとに接続。
+  // 片方の pred からしか値が来ない場合 (もう一方は空スタックで到達) は
+  // 3b の collapse (inputs < 2) がその値に畳む
+  for (const [blockId, phis] of stackPhis) {
+    const contribs = stackContribs.get(blockId)!;
+    for (let i = 0; i < phis.length; i++) {
+      const phi = phis[i];
+      phi.inputs = [];
+      for (const [predId, st] of contribs) {
+        if (st[i] !== undefined) phi.inputs.push([predId, st[i]]);
+      }
+    }
+  }
+
   // ======== パス 3b: 不要な Phi を collapse (fixpoint) ========
   // 全 inputs が充填済みなので、置換は全 Phi/Op に正しく伝播する。
   // chained collapse (Phi → Phi → 値) に対応するため変化が無くなるまで回す。
+  const allPhiList: PhiOp[] = [];
+  for (const [, phis] of phiMap) for (const [, phi] of phis) allPhiList.push(phi);
+  for (const [, phis] of stackPhis) for (const phi of phis) allPhiList.push(phi);
   let collapsed = true;
   while (collapsed) {
     collapsed = false;
-    for (const [, phis] of phiMap) {
-      for (const [, phi] of phis) {
+    for (const phi of allPhiList) {
+      {
         if (phi.inputs.length === 0) continue; // 既に collapse 済み
         const nonSelfInputs = phi.inputs.filter(([, vid]) => vid !== phi.id);
         const allSame = nonSelfInputs.length > 0 && nonSelfInputs.every(([, vid]) => vid === nonSelfInputs[0][1]);
@@ -561,10 +585,27 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
 
   return irFunc;
 
-  function propagate(targetBlockId: number, locals: (number | undefined)[], stack: AbstractStack): void {
+  function propagate(targetBlockId: number, locals: (number | undefined)[], stack: AbstractStack, fromBlockId: number): void {
+    const preds = blockEdges.get(targetBlockId)?.predecessors ?? [];
+    if (preds.length >= 2 && stack.length > 0) {
+      // 合流点にスタック値を持ち込む → slot ごとに Phi で受ける
+      if (!stackContribs.has(targetBlockId)) stackContribs.set(targetBlockId, new Map());
+      stackContribs.get(targetBlockId)!.set(fromBlockId, cloneStack(stack));
+      if (!stackPhis.has(targetBlockId)) {
+        const phis = stack.map(() => {
+          const p = createPhi(irFunc, "any");
+          registerOp(p);
+          blocks.get(targetBlockId)!.phis.push(p);
+          return p;
+        });
+        stackPhis.set(targetBlockId, phis);
+        blockEntryStacks.set(targetBlockId, phis.map(p => p.id));
+      }
+    } else if (!blockEntryStacks.has(targetBlockId)) {
+      blockEntryStacks.set(targetBlockId, cloneStack(stack));
+    }
     if (!blockEntryLocals.has(targetBlockId)) {
       blockEntryLocals.set(targetBlockId, [...locals]);
-      blockEntryStacks.set(targetBlockId, cloneStack(stack));
     }
   }
 }

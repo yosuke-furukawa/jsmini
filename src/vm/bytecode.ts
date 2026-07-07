@@ -143,6 +143,11 @@ export type BytecodeFunction = {
   handlers: ExceptionHandler[];
   icSlotCount: number;
   upvalues: UpvalueInfo[];  // キャプチャする外部変数の情報
+  // JIT の運命キャッシュ (undefined=未決定 / null=VM 行き / CachedWasm=コンパイル済み)。
+  // 生成時から shape に含めておく — 実行途中のプロパティ追加は host V8 側の
+  // hidden class 遷移を起こし、fn.prototype 読み等の IC を polymorphic 化して
+  // ベンチ全体が遅くなる (deltablue で判明)
+  __jitCached?: unknown;
 };
 
 // バイトコードを人間が読める形式にダンプ（ネスト関数も再帰的に表示）

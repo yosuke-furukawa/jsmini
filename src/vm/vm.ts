@@ -128,6 +128,13 @@ export class VM {
   // OSR: ホットループを検出して関数全体を Wasm にコンパイル、残りを Wasm で実行
   private attemptOSR(frame: CallFrame): unknown | null {
     const func = frame.func;
+    // OSR コンパイル結果は関数単位でキャッシュ (undefined=未試行 / null=失敗 / fn=成功)。
+    // 旧実装は __osrDone がフレーム単位だったため、ループ 100 回超の関数を
+    // 呼ぶたびに IR 構築 + Wasm コンパイルを丸ごと再試行していた
+    // (deltablue で呼び出しごとの隠れた常駐コストになっていた)
+    const osrCached = (func as { __osrFn?: ((...a: number[]) => number) | null }).__osrFn;
+    if (osrCached === null) return null;
+    if (osrCached) return this.runOSRCompiled(frame, osrCached);
     // 関連関数を収集 (LdaGlobal + Call で参照される関数 + constants のクロージャ)
     const relatedFuncs = [func];
     const seen = new Set<string>([func.name]);
@@ -196,11 +203,19 @@ export class VM {
       const result = compileMultiSync(relatedFuncs, "i32");
       if (!result) {
         (frame as any).__osrDone = true;
+        (func as { __osrFn?: unknown }).__osrFn = null;
         return null;
       }
       wasmFn = result.get(func.name);
-      if (!wasmFn) return null;
+      if (!wasmFn) { (func as { __osrFn?: unknown }).__osrFn = null; return null; }
     }
+    (func as { __osrFn?: unknown }).__osrFn = wasmFn;
+    return this.runOSRCompiled(frame, wasmFn);
+  }
+
+  // OSR コンパイル済み関数を現在のフレーム状態で実行 (args 構築は毎回)
+  private runOSRCompiled(frame: CallFrame, wasmFn: (...a: number[]) => number): unknown | null {
+    const func = frame.func;
 
     // Proper OSR: 全 locals を Wasm パラメータとして渡す
     // VM の locals (params + ローカル変数) をそのまま引き継ぎ、
@@ -1338,8 +1353,10 @@ export class VM {
             this.setArguments(fn, locals, args);
             if (fn.isAsync) {
               // Async: JIT (JSPI) を試みる
-              if (this.feedback) this.feedback.recordCall(fn, args);
-              if (this.jit) {
+              const __jc = (fn as { __jitCached?: unknown }).__jitCached;
+              if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
+              // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
+              if (this.jit && __jc !== null) {
                 const jitResult = this.jit.tryCall(fn, args, closureBoxes.map(b => b.value));
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
@@ -1350,8 +1367,10 @@ export class VM {
               const genObj = this.createGeneratorObject(fn, locals, closureBoxes);
               this.push(genObj);
             } else {
-              if (this.feedback) this.feedback.recordCall(fn, args);
-              if (this.jit) {
+              const __jc = (fn as { __jitCached?: unknown }).__jitCached;
+              if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
+              // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
+              if (this.jit && __jc !== null) {
                 const upvalueValues = closureBoxes.map(b => b.value);
                 const jitResult = this.jit.tryCall(fn, args, upvalueValues);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
@@ -1388,8 +1407,10 @@ export class VM {
             }
             this.setArguments(fn, locals, args);
             if (fn.isAsync) {
-              if (this.feedback) this.feedback.recordCall(fn, args);
-              if (this.jit) {
+              const __jc = (fn as { __jitCached?: unknown }).__jitCached;
+              if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
+              // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
+              if (this.jit && __jc !== null) {
                 const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
@@ -1399,8 +1420,10 @@ export class VM {
               const genObj = this.createGeneratorObject(fn, locals, closure.capturedBoxes);
               this.push(genObj);
             } else {
-              if (this.feedback) this.feedback.recordCall(fn, args);
-              if (this.jit) {
+              const __jc = (fn as { __jitCached?: unknown }).__jitCached;
+              if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
+              // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
+              if (this.jit && __jc !== null) {
                 const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
@@ -1414,8 +1437,10 @@ export class VM {
             }
             this.setArguments(fn, locals, args);
             if (fn.isAsync) {
-              if (this.feedback) this.feedback.recordCall(fn, args);
-              if (this.jit) {
+              const __jc = (fn as { __jitCached?: unknown }).__jitCached;
+              if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
+              // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
+              if (this.jit && __jc !== null) {
                 const jitResult = this.jit.tryCall(fn, args, [], thisObj);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
@@ -1425,8 +1450,10 @@ export class VM {
               const genObj = this.createGeneratorObject(fn, locals, []);
               this.push(genObj);
             } else {
-              if (this.feedback) this.feedback.recordCall(fn, args);
-              if (this.jit) {
+              const __jc = (fn as { __jitCached?: unknown }).__jitCached;
+              if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
+              // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
+              if (this.jit && __jc !== null) {
                 const jitResult = this.jit.tryCall(fn, args, [], thisObj);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
@@ -1524,8 +1551,10 @@ export class VM {
         // Return
         case "Return": {
           let returnValue = this.pop();
-          // 型フィードバック: 戻り値の型を記録
-          if (this.feedback) {
+          // 型フィードバック: 戻り値の型を記録 (JIT の運命が未決定の間だけ。
+          // 決定後も毎 Return で Map 引き + classifyType すると
+          // プロファイリング常駐コストがベンチ全体を数%遅くする)
+          if (this.feedback && (frame.func as { __jitCached?: unknown }).__jitCached === undefined) {
             this.feedback.recordReturn(frame.func, returnValue);
           }
           this.frames.pop();
