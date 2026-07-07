@@ -28,6 +28,23 @@ spectral-norm も「ループ持ちは初回コンパイル」の副作用で 11
 
 ## クラスタコンパイルの設計
 
+「クラスタコンパイル」は本リポジトリの造語で、**呼び出し合う関数の一群
+(main + それが呼ぶ兄弟クロージャ) を 1 つの Wasm モジュールにまとめて
+コンパイルし、間の呼び出しを Wasm の直接 `call` にする**方式のこと。
+ぴったり一致する既存名は無いが、分解すると 3 つの古典技法の合成になる:
+
+| 部品 | 古典技法 | 出典 |
+|---|---|---|
+| upvalue をパラメータ化して独立関数に | **Lambda Lifting** | Johnsson 1985 (関数型言語コンパイラの標準変換) |
+| callee を実行時の値で決め打ち + guard | **Speculative Devirtualization** (guarded direct call) | HotSpot / V8 の call site 最適化。クラスチェックの代わりにクロージャ identity を guard に使う変種 |
+| コンパイル単位を関数境界から切り離す | **Region-Based Compilation** | Hank, Hwu & Rau 1995 (HP Dynamo 等) |
+
+主流 JIT (V8/JVM) は境界消滅の手段にインライン展開を選ぶため、
+「展開せず同一単位内の別関数として置き直接 call」という形は珍しい。
+jsmini がこの形なのは Wasm という出力先の事情 — モジュールが複数関数の
+自然な入れ物で、モジュール内 call が最初から速い — による。いわば
+**Wasm ネイティブな region-based compilation**。
+
 - **コンパイル時特殊化**: tryCall が持つ upvalue box の「今の値」で
   callee (クロージャ) を解決し、call-free な callee を main と同じ
   モジュールの関数としてコンパイル。IR の Call は `call $idx` になる
