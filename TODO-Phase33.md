@@ -56,3 +56,26 @@ VM 差ほぼゼロ) を、tagged pointer (WasmGC i31ref + eq 階層) による
   対象が増え、ネスト import が熱いパスで VM インライン実行より高くつく
   疑い。per-関数の勝ち負け判定 (import 回数 × コスト) か、ネスト頻度が
   高い関数は tagged 降格、のどちらかが必要
+
+## 33-6 (WIP): tagged が本領を発揮できない真因と対策 (次セッション)
+
+「tagged 有利ベンチ」(token-ring: 参照 move + identity + null チェックのみの
+ホットループ) を作って計測した結果、**コンパイルされず JIT 0.8x** と判明。
+掘った真因の連鎖:
+
+1. **param 有界のループカウンタですら range 分析で i32 をわずかに超える**
+   (i < n の n が range 未知 → i+1 の max が i32max+α) → ループを含む
+   関数はほぼ全部 f64 昇格
+2. tagged は `!useF64` ゲートで無効化 → **ループ持ち関数で tagged が
+   実質使えない** (richards/deltablue の熱い関数は全部ループ持ち)
+3. f64 関数で tagged を有効にする試み (i32 local グループ追加 +
+   Load/Store/比較/Return の変換スキップ) は大半動いたが、
+   **LoadThis の spill と null 定数の phi 入力が f64 local に落ちて型崩れ**
+   が残った (要: LoadThis/null 定数も i32 リージョンへ + null-phi の扱い)
+
+対策候補 (優先順):
+- (a) LoadThis に i32 local リージョンを適用 (tagged と同じ機構) —
+  これは f64+this 関数の既存の silent CompileError も直す
+- (b) null/undefined 定数の needsLocal 化を tag 値 emit + i32 リージョンで
+- (c) range 分析の「param 有界ループ」の widen を i32 に丸める
+  (V8 の bounds check 的な仮定 + ガード)
