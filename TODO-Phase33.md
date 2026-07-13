@@ -13,26 +13,26 @@ VM 差ほぼゼロ) を、tagged pointer (WasmGC i31ref + eq 階層) による
 
 ### 33-1: spike (設計の分岐点を先に潰す)
 
-- [ ] 33-1a: host ref の `any.convert_extern` + `ref.eq` が V8 で
+- [x] 33-1a: host ref の `any.convert_extern` + `ref.eq` が V8 で
       動くか (validate / 実行 / 同一オブジェクトで true か)。
       不成立なら object table (i31 index) フォールバックを採用
-- [ ] 33-1b: untag 往復 (ループ内 tag/untag) vs local 保持の
+- [x] 33-1b: untag 往復 (ループ内 tag/untag) vs local 保持の
       マイクロベンチ — 表現選択パスの必要性を定量化
-- [ ] 33-1c: WasmGC array 経由の JS オブジェクト identity 保存確認
+- [x] 33-1c: WasmGC array 経由の JS オブジェクト identity 保存確認
       (入れて出したら同一オブジェクトか)
-- [ ] 33-1d: 結果を RESEARCH-TaggedSlots.md に記録し、設計を確定
+- [x] 33-1d: 結果を RESEARCH-TaggedSlots.md に記録し、設計を確定
 
-### 33-2: tagged this-model v2
+### 33-2: tagged this-model (spike の結果、案 C' = i32 Smi タグ + object table)
 
-- [ ] 33-2a: (ref eq) スロット (または spike 結果次第で object table)
-      への copy-in / write-back
-- [ ] 33-2b: 表現ガード (int31 / f64 / ref / null) を境界で検査 → deopt
+- [ ] 33-2a: copy-in で Smi タグ化 (value<<1) + object table 構築 (dedup、
+      奇数 tag = index) + write-back
+- [ ] 33-2b: 表現ガード (30bit 整数 / ref / null / undefined) を境界で検査 → deopt
 
 ### 33-3: codegen の tagged 対応
 
-- [ ] 33-3a: LoadProperty/StoreProperty の tagged emit
-      (表現選択: ループ内は untag した local、境界だけ tag)
-- [ ] 33-3b: 参照の identity / null 比較 (== / != / ===) を Wasm 内で
+- [ ] 33-3a: tagged スロットの LoadProperty/StoreProperty emit
+- [ ] 33-3b: 参照の identity / null 比較 (== / != / ===) と truthiness を Wasm 内で
+- [ ] 33-3c: ネストアクセス __load_slot(tableIdx, offset) import (schedule 系向け)
 
 ### 33-4: 計測と判断
 
