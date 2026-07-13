@@ -477,15 +477,18 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   const cfg = analyzeCFG(irFunc);
 
   // Phi の入力を書き込む: predecessor ブロックの末尾で local.set
-  // { blockId → [{ phiLocal, valueId }] }
-  const phiWrites = new Map<number, { phiLocal: number; valueId: number }[]>();
+  // { blockId → [{ phiLocal, valueId, phiTagged }] }
+  // phiTagged: 書き込み先が tagged ドメインの Phi (null/undefined 定数は
+  // タグ値 1/3 で書く。非 tagged Phi へは従来の 0 のまま — 無条件にタグ化
+  // すると数値関数の undefined-phi の truthiness が壊れる)
+  const phiWrites = new Map<number, { phiLocal: number; valueId: number; phiTagged: boolean }[]>();
   for (const block of irFunc.blocks) {
     for (const phi of block.phis) {
       const phiLocal = opToLocal.get(phi.id);
       if (phiLocal === undefined) continue;
       for (const [predId, valueId] of phi.inputs) {
         if (!phiWrites.has(predId)) phiWrites.set(predId, []);
-        phiWrites.get(predId)!.push({ phiLocal, valueId });
+        phiWrites.get(predId)!.push({ phiLocal, valueId, phiTagged: taggedValues.has(phi.id) });
       }
     }
   }
@@ -595,8 +598,8 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         // 既存パスの「条件 + eqz」を「falsy」に置き換える形で emit
         const bwrites0 = phiWrites.get(blockId);
         if (bwrites0) {
-          for (const { phiLocal, valueId } of bwrites0) {
-            emitValueOrConst(valueId, body, opToLocal, opById);
+          for (const { phiLocal, valueId, phiTagged } of bwrites0) {
+            emitValueOrConst(valueId, body, opToLocal, opById, phiTagged);
             body.push(WASM_OP.local_set, ...u32ToLEB128(phiLocal));
           }
         }
@@ -630,8 +633,8 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         // 属する) ので、br_if の前に無条件で書いてよい
         const bwrites = phiWrites.get(blockId);
         if (bwrites) {
-          for (const { phiLocal, valueId } of bwrites) {
-            emitValueOrConst(valueId, body, opToLocal, opById);
+          for (const { phiLocal, valueId, phiTagged } of bwrites) {
+            emitValueOrConst(valueId, body, opToLocal, opById, phiTagged);
             wat(`;; phi write (branch): local ${phiLocal} = v${valueId}`);
             body.push(WASM_OP.local_set, ...u32ToLEB128(phiLocal));
             wat(`local.set ${phiLocal}`);
@@ -690,8 +693,8 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         // Phi がある successor への Jump: phiWrites を出力
         const writes = phiWrites.get(blockId);
         if (writes) {
-          for (const { phiLocal, valueId } of writes) {
-            emitValueOrConst(valueId, body, opToLocal, opById);
+          for (const { phiLocal, valueId, phiTagged } of writes) {
+            emitValueOrConst(valueId, body, opToLocal, opById, phiTagged);
             wat(`;; phi write: local ${phiLocal} = v${valueId}`);
             body.push(WASM_OP.local_set, ...u32ToLEB128(phiLocal));
             wat(`local.set ${phiLocal}`);
@@ -757,7 +760,8 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
       const entryInput = phi.inputs.find(([predId]) => predId === 0);
       if (entryInput) {
         const [, valueId] = entryInput;
-        emitValueOrConst(valueId, initCode, opToLocal, opById);
+        const phiTagged = taggedValues.has(phi.id);
+        emitValueOrConst(valueId, initCode, opToLocal, opById, phiTagged);
         initCode.push(WASM_OP.local_set, ...u32ToLEB128(phiLocal));
       }
     }
@@ -1386,7 +1390,7 @@ function emitLoadValue(opId: number, body: number[], opToLocal: Map<number, numb
 }
 
 // Op の値を Wasm スタックにロード (Const なら直接出力)
-function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, number>, opById: Map<number, Op>): void {
+function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, number>, opById: Map<number, Op>, nullTagMode = false): void {
   const local = opToLocal.get(opId);
   if (local !== undefined) {
     body.push(WASM_OP.local_get, ...u32ToLEB128(local));
@@ -1395,9 +1399,9 @@ function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, n
   const op = opById.get(opId);
   if (op?.opcode === "Const") {
     if (op.value === null || op.value === undefined) {
-      // tagged 規約のタグ値 (null=1, undefined=3)。非 tagged 文脈での null は
-      // 元々未定義動作 (i32ToLEB128(null) 化け) だったのでタグ値に統一
-      body.push(WASM_OP.i32_const, op.value === null ? 1 : 3);
+      // tagged Phi への書き込みはタグ値 (null=1, undefined=3)。
+      // 非 tagged 文脈では従来どおり 0 (undefined の falsy を保つ)
+      body.push(WASM_OP.i32_const, nullTagMode ? (op.value === null ? 1 : 3) : 0);
     } else if (op.type === "f64") {
       body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
     } else {
@@ -1406,7 +1410,7 @@ function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, n
     return;
   }
   if (op?.opcode === "Undefined") {
-    body.push(WASM_OP.i32_const, 3);
+    body.push(WASM_OP.i32_const, nullTagMode ? 3 : 0);
     return;
   }
   if (op?.opcode === "Param" && op.index !== undefined) {
@@ -1982,8 +1986,6 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
     if (refLocals > 0 && arrayTypeIdx >= 0) groups.push({ count: refLocals, type: refType(arrayTypeIdx) });
     const extraLocalGroups = groups.length > 0 ? groups : undefined;
     if (typeof process !== "undefined" && process.env?.DEBUG_WAT) console.error(mainWat);
-    if (typeof process !== "undefined" && process.env?.DEBUG_LOCALS) console.error(`[locals] name=${irFunc.name} totalParam=${totalParamCount} extra=${wasmExtraLocals} len=${lenLocals} ref=${refLocals} declTotal=${totalParamCount + wasmExtraLocals + lenLocals + refLocals}`);
-    if (typeof process !== "undefined" && process.env?.DEBUG_BYTES) console.error("[bytes 70..110]", bodyCode.slice(70, 110).map(b => b.toString(16).padStart(2, "0")).join(" "));
     builder.addFunction(irFunc.name, params, results, bodyCode,
       wasmExtraLocals + lenLocals + refLocals > 0 ? wasmExtraLocals + lenLocals + refLocals : 0,
       totalParamCount, 1, extraLocalGroups);
