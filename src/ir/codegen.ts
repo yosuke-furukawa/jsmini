@@ -61,7 +61,7 @@ function classifyMathCall(name: string, argc: number): "native_unary" | "native_
   return "unsupported";
 }
 
-export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set(), growableArrayValues: Set<number> = new Set(), growFnIndex = -1, globalsAsParams = false, cluster: ClusterInfo | null = null, clusterFuncIndexBase = -1): { body: number[]; extraLocals: number; lenLocals: number; refLocals: number; wat: string; propNames: string[]; writtenProps: string[]; globalNames: string[]; hasStoreGlobal: boolean } {
+export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set(), growableArrayValues: Set<number> = new Set(), growFnIndex = -1, globalsAsParams = false, cluster: ClusterInfo | null = null, clusterFuncIndexBase = -1, taggedProps: Set<string> = new Set()): { body: number[]; extraLocals: number; lenLocals: number; refLocals: number; wat: string; propNames: string[]; writtenProps: string[]; globalNames: string[]; hasStoreGlobal: boolean; resultTagged: boolean } {
   const body: number[] = [];
   const watLines: string[] = [];
   let watIndent = 1;
@@ -360,6 +360,31 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     for (const phi of block.phis) for (const [, vid] of phi.inputs) usedIds.add(vid);
   }
 
+  // tagged スロット (Phase 33): tagged prop の LoadProperty 結果 id 集合。
+  // Branch の truthiness 判定で 2 回読むので local を強制する
+  const taggedValues = new Set<number>();
+  let resultTagged = false;
+  if (taggedProps.size > 0) {
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "LoadProperty" && op.globalName && taggedProps.has(op.globalName)) {
+          taggedValues.add(op.id);
+        }
+      }
+    }
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if ((op.opcode === "Branch" || op.opcode === "Not") && taggedValues.has(op.args[0])) {
+          if (!opToLocal.has(op.args[0])) {
+            needsLocal.add(op.args[0]);
+            opToLocal.set(op.args[0], nextLocal++);
+          }
+        }
+        if (op.opcode === "Return" && taggedValues.has(op.args[0])) resultTagged = true;
+      }
+    }
+  }
+
   // growable 配列の emit 用コンテキスト (emitOp に渡す)
   const growCtx: GrowCtx = {
     growableArrayValues,
@@ -496,6 +521,39 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
 
     // 通常の命令を出力
     for (const op of block.ops) {
+      if (op.opcode === "Branch" && taggedValues.has(op.args[0])) {
+        // tagged 値の truthiness 分岐: falsy = (v==0) | ((v|2)==3)。
+        // 既存パスの「条件 + eqz」を「falsy」に置き換える形で emit
+        const bwrites0 = phiWrites.get(blockId);
+        if (bwrites0) {
+          for (const { phiLocal, valueId } of bwrites0) {
+            emitValueOrConst(valueId, body, opToLocal, opById);
+            body.push(WASM_OP.local_set, ...u32ToLEB128(phiLocal));
+          }
+        }
+        emitLoadValue(op.args[0], body, opToLocal, opById, false);
+        body.push(WASM_OP.i32_eqz);
+        emitLoadValue(op.args[0], body, opToLocal, opById, false);
+        body.push(WASM_OP.i32_const, 2, 0x72, WASM_OP.i32_const, 3, 0x46);
+        body.push(0x72); // falsy がスタックに
+        if (loopInfo) {
+          const exitDepth = controlStack.length - 1 - controlStack.findLastIndex(
+            e => e.kind === "block" && e.targetBlockId === loopInfo.exitBlock
+          );
+          body.push(WASM_OP.br_if, exitDepth);
+          wat(`br_if ${exitDepth} ;; → exit (tagged falsy)`);
+        } else {
+          const nextEmitT = topoNext.get(blockId);
+          const invertedT = block.successors[1] === nextEmitT && block.successors[0] !== nextEmitT;
+          if (invertedT) { body.push(WASM_OP.i32_eqz); } // truthy で跳ぶ
+          const skipDepth = controlStack.length - 1 - controlStack.findLastIndex(
+            e => e.kind === "block"
+          );
+          body.push(WASM_OP.br_if, skipDepth);
+          wat(`br_if ${skipDepth} ;; (tagged truthiness)`);
+        }
+        continue;
+      }
       if (op.opcode === "Branch") {
         // Branch 経由のエッジにも Phi 書き込みが要る (|| / && / 三項の
         // スタック Phi は Branch の true 側から値を受ける)。同じ Phi が
@@ -594,7 +652,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         wat("return");
       } else {
         const beforeLen = body.length;
-        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets, importIndices, importCount, growCtx, clusterCtx, usedIds);
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets, importIndices, importCount, growCtx, clusterCtx, usedIds, taggedValues, taggedProps);
         // emitOp が出力した命令を WAT に変換
         watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
       }
@@ -647,7 +705,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   // propNames[offset] = プロパティ名 (executeWasm の copy-in/out 用)
   const propNames: string[] = [];
   for (const [name, off] of propOffsets) propNames[off] = name;
-  return { body: [...initCode, ...body], extraLocals, lenLocals, refLocals, wat: fullWat, propNames, writtenProps: [...writtenProps], globalNames, hasStoreGlobal };
+  return { body: [...initCode, ...body], extraLocals, lenLocals, refLocals, wat: fullWat, propNames, writtenProps: [...writtenProps], globalNames, hasStoreGlobal, resultTagged };
 }
 
 // ========== Op → Wasm 命令 ==========
@@ -681,6 +739,8 @@ function emitOp(
   growCtx?: GrowCtx,
   clusterCtx?: ClusterCtx | null,
   usedIds?: Set<number>,
+  taggedValues?: Set<number>,
+  taggedProps?: Set<string>,
 ): void {
   // forceF64 なら全演算を f64 として扱う
   const effectiveType = forceF64 ? "f64" : op.type;
@@ -914,8 +974,18 @@ function emitOp(
           body.push(WASM_OP.i32_const, ...i32ToLEB128(byteOffset));
           body.push(WASM_OP.i32_add);
         }
-        emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // value
-        if (forceF64) body.push(0xaa); // i32.trunc_f64_s (プロパティは i32 セル)
+        const vOp = opById.get(op.args[1]);
+        const vIsNull = vOp?.opcode === "Const" && vOp.value === null;
+        const vIsUndef = vOp?.opcode === "Undefined"
+          || (vOp?.opcode === "LoadGlobal" && vOp.globalName === "undefined")
+          || (vOp?.opcode === "Const" && vOp.value === undefined);
+        if ((vIsNull || vIsUndef) && op.globalName && taggedProps?.has(op.globalName)) {
+          // tagged スロットへの null/undefined 代入 (分類パスが保証)
+          body.push(WASM_OP.i32_const, vIsNull ? 1 : 3);
+        } else {
+          emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // value
+          if (forceF64) body.push(0xaa); // i32.trunc_f64_s (プロパティは i32 セル)
+        }
         body.push(WASM_OP.i32_store, 0x02, 0x00);
       }
       break;
@@ -1035,6 +1105,37 @@ function emitOp(
     case "GreaterThan": case "GreaterEqual":
     case "Equal": case "StrictEqual":
     case "NotEqual": case "StrictNotEqual": {
+      // tagged 値の比較 (Phase 33): identity は tagged i32 の生比較で正しい
+      // (同一オブジェクト = 同一 table index、数値 = v<<1)。
+      // null/undefined 定数との比較は tag 定数比較に変換する
+      {
+        const tIdx = taggedValues ? op.args.findIndex(a => taggedValues.has(a)) : -1;
+        if (tIdx >= 0) {
+          const other = op.args[1 - tIdx];
+          const isEq = op.opcode === "Equal" || op.opcode === "StrictEqual";
+          if (taggedValues!.has(other)) {
+            emitLoadValue(op.args[0], body, opToLocal, opById, false);
+            emitLoadValue(op.args[1], body, opToLocal, opById, false);
+            body.push(isEq ? 0x46 : 0x47); // i32.eq / i32.ne
+          } else {
+            // null/undefined 定数比較 (分類パスがそれ以外を降格済み)
+            const otherOp = opById.get(other);
+            const isUndef = otherOp?.opcode === "Undefined"
+              || (otherOp?.opcode === "LoadGlobal" && otherOp.globalName === "undefined")
+              || (otherOp?.opcode === "Const" && otherOp.value === undefined);
+            emitLoadValue(op.args[tIdx], body, opToLocal, opById, false);
+            if (op.opcode === "Equal" || op.opcode === "NotEqual") {
+              // 緩い比較: null == undefined なので (v|2) == 3 でまとめて判定
+              body.push(WASM_OP.i32_const, 2, 0x72 /* i32.or */, WASM_OP.i32_const, 3);
+            } else {
+              body.push(WASM_OP.i32_const, isUndef ? 3 : 1);
+            }
+            body.push(isEq ? 0x46 : 0x47);
+          }
+          maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+          break;
+        }
+      }
       emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       emitLoadValue(op.args[1], body, opToLocal, opById, forceF64);
       body.push(getWasmCmpOp(op.opcode, forceF64 ? "f64" : (opById.get(op.args[0])?.type ?? "i32")));
@@ -1067,6 +1168,16 @@ function emitOp(
       break;
     }
     case "Not": {
+      // tagged 値の否定: falsy = (v == 0) | ((v|2) == 3)  (0 / null / undefined)
+      if (taggedValues?.has(op.args[0])) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, false);
+        body.push(WASM_OP.i32_eqz);
+        emitLoadValue(op.args[0], body, opToLocal, opById, false);
+        body.push(WASM_OP.i32_const, 2, 0x72 /* or */, WASM_OP.i32_const, 3, 0x46 /* eq */);
+        body.push(0x72); // or
+        maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+        break;
+      }
       // !x = x == 0 (forceF64 では f64 比較で受けて f64 0/1 を返す)
       emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
       if (forceF64) {
@@ -1298,9 +1409,107 @@ function getReturnType(irFunc: IRFunction): IRType {
   return "i32";
 }
 
+// ========== tagged スロット分類 (Phase 33) ==========
+// this のプロパティを「numeric (現行: 生 i32/f64、算術可)」と
+// 「tagged (V8 Smi 流 1bit タグ: 参照/null/undefined も持てるが
+//  identity 比較・truthiness・move のみ)」に分類する。
+// tagged 値が算術や raw 数値と混ざる使い方が見つかったら numeric に降格し、
+// 降格の影響 (tagged load を numeric スロットに store 等) を fixpoint で伝播。
+export const TAG_NULL = 1;   // (0 << 1) | 1
+export const TAG_UNDEF = 3;  // (1 << 1) | 1
+export function classifyTaggedProps(irFunc: IRFunction): Set<string> {
+  const opById = new Map<number, Op>();
+  for (const b of irFunc.blocks) {
+    for (const ph of b.phis) opById.set(ph.id, ph as unknown as Op);
+    for (const o of b.ops) opById.set(o.id, o);
+  }
+  // 消費者マップ
+  const consumers = new Map<number, Array<{ op: Op; argIdx: number }>>();
+  for (const b of irFunc.blocks) {
+    for (const o of b.ops) {
+      o.args.forEach((a, i) => {
+        if (!consumers.has(a)) consumers.set(a, []);
+        consumers.get(a)!.push({ op: o, argIdx: i });
+      });
+    }
+    for (const ph of b.phis) {
+      for (const [, vid] of ph.inputs) {
+        if (!consumers.has(vid)) consumers.set(vid, []);
+        consumers.get(vid)!.push({ op: ph as unknown as Op, argIdx: -1 });
+      }
+    }
+  }
+  const loadsByProp = new Map<string, Op[]>();
+  const storesByProp = new Map<string, Op[]>();
+  const props = new Set<string>();
+  for (const b of irFunc.blocks) {
+    for (const o of b.ops) {
+      if (o.opcode === "LoadProperty" && o.globalName && !o.calleeName?.startsWith("Math.")) {
+        props.add(o.globalName);
+        (loadsByProp.get(o.globalName) ?? loadsByProp.set(o.globalName, []).get(o.globalName)!).push(o);
+      }
+      if (o.opcode === "StoreProperty" && o.globalName) {
+        props.add(o.globalName);
+        (storesByProp.get(o.globalName) ?? storesByProp.set(o.globalName, []).get(o.globalName)!).push(o);
+      }
+    }
+  }
+  const isNullOrUndef = (id: number): boolean => {
+    const o = opById.get(id);
+    if (!o) return false;
+    if (o.opcode === "Const" && (o.value === null || o.value === undefined)) return true;
+    if (o.opcode === "Undefined") return true;
+    if (o.opcode === "LoadGlobal" && o.globalName === "undefined") return true;
+    return false;
+  };
+  const CMP = new Set(["Equal", "NotEqual", "StrictEqual", "StrictNotEqual"]);
+  // 初期候補: 全プロパティ tagged。降格を fixpoint で回す
+  const tagged = new Set<string>(props);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const demote = (name: string) => {
+      if (tagged.has(name)) { tagged.delete(name); changed = true; }
+    };
+    for (const name of [...tagged]) {
+      // load の全消費者が許可リストに入っているか
+      for (const load of loadsByProp.get(name) ?? []) {
+        for (const { op: c, argIdx } of consumers.get(load.id) ?? []) {
+          if (CMP.has(c.opcode)) {
+            // 比較相手が tagged load / null / undefined でなければ降格
+            const other = c.args[argIdx === 0 ? 1 : 0];
+            const otherOp = opById.get(other);
+            const otherIsTaggedLoad = otherOp?.opcode === "LoadProperty" && otherOp.globalName !== undefined && tagged.has(otherOp.globalName);
+            if (!otherIsTaggedLoad && !isNullOrUndef(other)) { demote(name); break; }
+          } else if (c.opcode === "Branch" || c.opcode === "Not") {
+            // truthiness — OK
+          } else if (c.opcode === "StoreProperty" && argIdx === 1) {
+            // tagged 値を store できるのは tagged スロットだけ
+            if (!c.globalName || !tagged.has(c.globalName)) { demote(name); break; }
+          } else if (c.opcode === "Return") {
+            // OK (呼び出し側でデコード)
+          } else {
+            demote(name); break; // 算術・配列 index・Call 引数等 → 降格
+          }
+        }
+        if (!tagged.has(name)) break;
+      }
+      if (!tagged.has(name)) continue;
+      // store される値の供給元が tagged load / null / undefined か
+      for (const st of storesByProp.get(name) ?? []) {
+        const vid = st.args[1];
+        const vop = opById.get(vid);
+        const fromTaggedLoad = vop?.opcode === "LoadProperty" && vop.globalName !== undefined && tagged.has(vop.globalName);
+        if (!fromTaggedLoad && !isNullOrUndef(vid)) { demote(name); break; }
+      }
+    }
+  }
+  return tagged;
+}
+
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
-export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, cluster?: ClusterInfo | null): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; propNames?: string[]; writtenProps?: string[]; globalNames?: string[]; memory?: WebAssembly.Memory; hasAwait?: boolean; jspiWrapped?: (...args: number[]) => Promise<number> } | null {
+export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, cluster?: ClusterInfo | null): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; propNames?: string[]; writtenProps?: string[]; taggedProps?: string[]; resultTagged?: boolean; globalNames?: string[]; memory?: WebAssembly.Memory; hasAwait?: boolean; jspiWrapped?: (...args: number[]) => Promise<number> } | null {
   try {
     // builder がスタック合流の深さ不一致を検出した関数は表現不能 → 拒否
     if ((irFunc as { stackMismatch?: boolean }).stackMismatch) {
@@ -1590,7 +1799,11 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
     // パラメータとして渡す。StoreGlobal を含む関数は VM 側へ書き戻す術が
     // 無いので reject (OSR は従来通り zero-init local で自己完結)
     const globalsAsParams = osrLocalCount === undefined;
-    const { body: bodyCode, extraLocals, lenLocals, refLocals, propNames, writtenProps, globalNames, hasStoreGlobal, wat: mainWat } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues, growableArrayValues, growFnIndex, globalsAsParams, cluster ?? null, builder.importCount + 1);
+    // tagged スロット分類 (Phase 33): i32 モード + tryCall 経路のみ。
+    // f64 モードはタグと両立しない (課題 3) ので現行動作
+    const hasLoadThis = irFunc.blocks.some(b => b.ops.some(o => o.opcode === "LoadThis"));
+    const taggedProps = (hasLoadThis && !useF64 && globalsAsParams) ? classifyTaggedProps(irFunc) : new Set<string>();
+    const { body: bodyCode, extraLocals, lenLocals, refLocals, propNames, writtenProps, globalNames, hasStoreGlobal, wat: mainWat, resultTagged } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues, growableArrayValues, growFnIndex, globalsAsParams, cluster ?? null, builder.importCount + 1, taggedProps);
     if (globalsAsParams && hasStoreGlobal) {
       if (DEBUG_WASM) console.error("[compileIRToWasm] reject: StoreGlobal in tryCall path (no write-back for globals)");
       return null;
@@ -1797,6 +2010,8 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
       hasThis: hasThis || undefined,
       propNames: propNames.length > 0 ? propNames : undefined,
       writtenProps: writtenProps.length > 0 ? writtenProps : undefined,
+      taggedProps: taggedProps.size > 0 ? [...taggedProps] : undefined,
+      resultTagged: resultTagged || undefined,
       globalNames: globalsAsParams && globalNames.length > 0 ? globalNames : undefined,
       memory,
       hasAwait: hasAwait || undefined,

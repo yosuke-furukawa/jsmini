@@ -24,14 +24,14 @@ VM 差ほぼゼロ) を、tagged pointer (WasmGC i31ref + eq 階層) による
 
 ### 33-2: tagged this-model (spike の結果、案 C' = i32 Smi タグ + object table)
 
-- [ ] 33-2a: copy-in で Smi タグ化 (value<<1) + object table 構築 (dedup、
+- [x] 33-2a: copy-in で Smi タグ化 (value<<1) + object table 構築 (dedup、
       奇数 tag = index) + write-back
-- [ ] 33-2b: 表現ガード (30bit 整数 / ref / null / undefined) を境界で検査 → deopt
+- [x] 33-2b: 表現ガード (30bit 整数 / ref / null / undefined) を境界で検査 → deopt
 
 ### 33-3: codegen の tagged 対応
 
-- [ ] 33-3a: tagged スロットの LoadProperty/StoreProperty emit
-- [ ] 33-3b: 参照の identity / null 比較 (== / != / ===) と truthiness を Wasm 内で
+- [x] 33-3a: tagged スロットの LoadProperty/StoreProperty emit
+- [x] 33-3b: 参照の identity / null 比較 (== / != / ===) と truthiness を Wasm 内で
 - [ ] 33-3c: ネストアクセス __load_slot(tableIdx, offset) import (schedule 系向け)
 
 ### 33-4: 計測と判断

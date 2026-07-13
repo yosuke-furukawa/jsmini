@@ -48,6 +48,12 @@ type CachedWasm = {
   // idx は main の upvalue slot の場合のみ (ダミー 0 push 用)
   calleeGuards?: Array<{ idx?: number; box: { value: unknown }; expected: unknown }>;
   extraBoxes?: Array<{ value: unknown }>;
+  // tagged スロット (Phase 33): V8 Smi 流の 1bit タグ (偶数=数値<<1,
+  // 奇数=object table index)。null=1, undefined=3。参照は table で dedup
+  taggedProps?: Set<string>;
+  resultTagged?: boolean;
+  objTable?: unknown[];
+  objMap?: Map<unknown, number>;
   // Wasm 関数が実際に受け取る upvalue param 数 (IR 基準)。callee ref の
   // LoadUpvalue 除去で縮み得るので、これちょうどを push しないと
   // 後続の globals/extraBoxes が位置ズレする
@@ -366,6 +372,12 @@ export class JitManager {
       if (result.globalNames) cached.globalNames = result.globalNames;
       cached.hasThis = result.hasThis ?? false;
       cached.upvalueCount = result.upvalueCount ?? 0;
+      if (result.taggedProps) {
+        cached.taggedProps = new Set(result.taggedProps);
+        cached.resultTagged = result.resultTagged ?? false;
+        cached.objTable = [];
+        cached.objMap = new Map();
+      }
       if (resolved) {
         cached.calleeGuards = resolved.guards;
         cached.extraBoxes = resolved.extraBoxes;
@@ -574,9 +586,32 @@ export class JitManager {
           slotIdxs = cached.propNames.map(n => hc.properties.get(n));
           (cached.hcSlotCache ?? (cached.hcSlotCache = new Map())).set(hc, slotIdxs);
         }
+        // tagged スロット準備 (object table は呼び出しごとにリセットして再利用)
+        const tagged = cached.taggedProps;
+        if (tagged) { cached.objTable!.length = 2; cached.objMap!.clear(); }
         for (let i = 0; i < cached.propNames.length; i++) {
           const slotIdx = slotIdxs[i];
           const v = slotIdx !== undefined ? slots[slotIdx] : undefined;
+          if (tagged?.has(cached.propNames[i])) {
+            // tagged: 数値 (30bit 整数) は v<<1、null=1、undefined=3、
+            // 参照は table index を (idx<<1)|1 で (同一オブジェクト → 同一 index)
+            if (typeof v === "number" && Number.isInteger(v) && v < 536870912 && v > -536870912) {
+              view[i] = v << 1;
+            } else if (v === null) {
+              view[i] = 1;
+            } else if (v === undefined) {
+              view[i] = 3;
+            } else if (typeof v === "object") {
+              let idx = cached.objMap!.get(v);
+              if (idx === undefined) { idx = cached.objTable!.length; cached.objTable!.push(v); cached.objMap!.set(v, idx); }
+              view[i] = (idx << 1) | 1;
+            } else {
+              this.deoptimize(func, args);
+              this.logTier(func, "Bytecode VM (after deopt: untaggable prop)", callCount);
+              return null;
+            }
+            continue;
+          }
           if (typeof v !== "number" || !Number.isInteger(v) || v > 2147483647 || v < -2147483648) {
             this.deoptimize(func, args);
             this.logTier(func, "Bytecode VM (after deopt: non-i32 used prop)", callCount);
@@ -645,7 +680,15 @@ export class JitManager {
 
     this.logTier(func, "Wasm", callCount);
     try {
-      const result = fn(...wasmArgs);
+      let result: unknown = fn(...wasmArgs);
+      // 戻り値が tagged (return this.currentTcb 等) ならデコード
+      if (cached.resultTagged && typeof result === "number") {
+        const t = result;
+        if (t === 1) result = null;
+        else if (t === 3) result = undefined;
+        else if (t & 1) result = cached.objTable![t >> 1];
+        else result = t >> 1;
+      }
       // this の StoreProperty write-back: JIT 内で書き換えたプロパティを
       // linear memory から VM の HiddenClass オブジェクトへ反映する。
       // (これが無いと this.state = x 等の変更が VM 側から見えない)
@@ -658,9 +701,17 @@ export class JitManager {
         for (const name of cached.writtenProps) {
           const off = cached.propNames.indexOf(name);
           if (off < 0) continue;
+          let val: unknown = view[off];
+          if (cached.taggedProps?.has(name)) {
+            const t = view[off];
+            if (t === 1) val = null;
+            else if (t === 3) val = undefined;
+            else if (t & 1) val = cached.objTable![t >> 1];
+            else val = t >> 1;
+          }
           const slotIdx = slotIdxs ? slotIdxs[off] : hc.properties.get(name);
-          if (slotIdx !== undefined) slots[slotIdx] = view[off];
-          else jsObjSet(thisObj as any, name, view[off]);
+          if (slotIdx !== undefined) slots[slotIdx] = val;
+          else jsObjSet(thisObj as any, name, val);
         }
       }
       return { result };
