@@ -190,7 +190,7 @@ function computePhiRange(phi: PhiOp, ranges: Map<number, Range>): Range {
 // ========== 関数全体の overflow 判定 ==========
 
 // 関数内の全演算が i32 に収まるか判定
-export function functionNeedsF64(irFunc: IRFunction): boolean {
+export function functionNeedsF64(irFunc: IRFunction, excludeIds?: Set<number>): boolean {
   for (const block of irFunc.blocks) {
     for (const op of block.ops) {
       // Math.X 呼び出しは f64 in/out → 関数全体を f64 に格上げ
@@ -202,7 +202,14 @@ export function functionNeedsF64(irFunc: IRFunction): boolean {
     }
   }
   const ranges = analyzeRanges(irFunc);
-  for (const [, range] of ranges) {
+  const opById = new Map<number, { opcode: string; value?: unknown }>();
+  for (const b of irFunc.blocks) for (const o of b.ops) opById.set(o.id, o);
+  for (const [id, range] of ranges) {
+    // tagged スロット値 (参照タグ等) は数値 range の対象外 (Phase 33)
+    if (excludeIds?.has(id)) continue;
+    // null/undefined 定数は数値 range を持たない (tagged 比較/代入用)
+    const o = opById.get(id);
+    if (o && (o.opcode === "Undefined" || (o.opcode === "Const" && (o.value === null || o.value === undefined)))) continue;
     if (!canFitI32(range)) return true;
   }
   return false;

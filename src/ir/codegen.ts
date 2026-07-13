@@ -316,7 +316,75 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     }
   }
 
-  const extraLocals = nextLocal - irFunc.paramCount;
+  // tagged スロット (Phase 33): tagged prop の LoadProperty 結果 id 集合。
+  // Branch の truthiness 判定で 2 回読むので local を強制する
+  const taggedValues = new Set<number>();
+  let resultTagged = false;
+  if (taggedProps.size > 0) {
+    // this 直下の tagged load から始め、ネスト load (args[0] が tagged 値) を
+    // fixpoint でチェーンに含める
+    const thisIdsT = new Set<number>();
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) if (op.opcode === "LoadThis") thisIdsT.add(op.id);
+    }
+    const isThisRootedT = (id: number) => thisIdsT.has(id);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if (op.opcode !== "LoadProperty" || taggedValues.has(op.id)) continue;
+          if (op.globalName && taggedProps.has(op.globalName) && isThisRootedT(op.args[0])) {
+            taggedValues.add(op.id); grew = true;
+          } else if (taggedValues.has(op.args[0])) {
+            taggedValues.add(op.id); grew = true;
+          }
+        }
+      }
+    }
+    // 入力が全て tagged 値 / null / undefined 定数の Phi も tagged ドメイン
+    // (SetPropertyAssign が push する null がスタック Phi で合流する形など)
+    {
+      const nullishIds = new Set<number>();
+      for (const block of irFunc.blocks) {
+        for (const o of block.ops) {
+          if (o.opcode === "Undefined" || (o.opcode === "Const" && (o.value === null || o.value === undefined))) nullishIds.add(o.id);
+        }
+      }
+      const isNullish = (id: number) => nullishIds.has(id);
+      let grewP = true;
+      while (grewP) {
+        grewP = false;
+        for (const block of irFunc.blocks) {
+          for (const phi of block.phis) {
+            if (taggedValues.has(phi.id) || phi.inputs.length === 0) continue;
+            if (phi.inputs.every(([, vid]) => taggedValues.has(vid) || isNullish(vid))) {
+              taggedValues.add(phi.id);
+              grewP = true;
+            }
+          }
+        }
+      }
+    }
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if ((op.opcode === "Branch" || op.opcode === "Not") && taggedValues.has(op.args[0])) {
+          if (!opToLocal.has(op.args[0])) {
+            needsLocal.add(op.args[0]);
+            opToLocal.set(op.args[0], nextLocal++);
+          }
+        }
+        if (op.opcode === "Return" && taggedValues.has(op.args[0])) resultTagged = true;
+      }
+    }
+  }
+
+
+  // scalar local 数。params は upvalue/this/globals/extraBox を含む
+  // totalParamCount で数える (irFunc.paramCount だと this 持ち関数で
+  // scalar group が過大になり、後続の i32/ref group の型がズレる潜在バグ
+  // — 単一型のときは無害で潜伏していた。Phase 33-6 で顕在化)
+  const extraLocals = nextLocal - totalParamCount;
 
   // local 群の順序: [scalar, len(i32), backing/ref]。
   // growable 配列は len local (i32) と backing local (ref) の 2 本で表現する。
@@ -325,8 +393,24 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   const growableLenLocal = new Map<number, number>();
   const growableBackingLocal = new Map<number, number>();
 
-  // (1) len local (i32 group): growable 配列ごとに 1 本
+  // (1) len local (i32 group): growable 配列ごとに 1 本。
+  // tagged 値 / LoadThis / null・undefined 定数の local もこの i32 group に
+  // 相乗りさせる (f64 関数でも生の i32 で持つ必要がある。Phase 33-6)
   const scalarLocalEnd = nextLocal;
+  if (taggedProps.size > 0) {
+    const i32RegionIds = new Set<number>();
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "LoadThis" && opToLocal.has(op.id)) i32RegionIds.add(op.id);
+        if ((op.opcode === "Undefined" || (op.opcode === "Const" && (op.value === null || op.value === undefined))) && opToLocal.has(op.id)) i32RegionIds.add(op.id);
+      }
+      for (const phi of block.phis) {
+        if (taggedValues.has(phi.id) && opToLocal.has(phi.id)) i32RegionIds.add(phi.id);
+      }
+    }
+    for (const tid of taggedValues) if (opToLocal.has(tid)) i32RegionIds.add(tid);
+    for (const id of i32RegionIds) opToLocal.set(id, nextLocal++);
+  }
   for (const block of irFunc.blocks) {
     for (const op of block.ops) {
       if (op.opcode === "AllocGrowableArray" && !growableLenLocal.has(op.id)) {
@@ -368,45 +452,6 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   for (const block of irFunc.blocks) {
     for (const op of block.ops) for (const a of op.args) usedIds.add(a);
     for (const phi of block.phis) for (const [, vid] of phi.inputs) usedIds.add(vid);
-  }
-
-  // tagged スロット (Phase 33): tagged prop の LoadProperty 結果 id 集合。
-  // Branch の truthiness 判定で 2 回読むので local を強制する
-  const taggedValues = new Set<number>();
-  let resultTagged = false;
-  if (taggedProps.size > 0) {
-    // this 直下の tagged load から始め、ネスト load (args[0] が tagged 値) を
-    // fixpoint でチェーンに含める
-    const thisIdsT = new Set<number>();
-    for (const block of irFunc.blocks) {
-      for (const op of block.ops) if (op.opcode === "LoadThis") thisIdsT.add(op.id);
-    }
-    const isThisRootedT = (id: number) => thisIdsT.has(id);
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (const block of irFunc.blocks) {
-        for (const op of block.ops) {
-          if (op.opcode !== "LoadProperty" || taggedValues.has(op.id)) continue;
-          if (op.globalName && taggedProps.has(op.globalName) && isThisRootedT(op.args[0])) {
-            taggedValues.add(op.id); grew = true;
-          } else if (taggedValues.has(op.args[0])) {
-            taggedValues.add(op.id); grew = true;
-          }
-        }
-      }
-    }
-    for (const block of irFunc.blocks) {
-      for (const op of block.ops) {
-        if ((op.opcode === "Branch" || op.opcode === "Not") && taggedValues.has(op.args[0])) {
-          if (!opToLocal.has(op.args[0])) {
-            needsLocal.add(op.args[0]);
-            opToLocal.set(op.args[0], nextLocal++);
-          }
-        }
-        if (op.opcode === "Return" && taggedValues.has(op.args[0])) resultTagged = true;
-      }
-    }
   }
 
   // growable 配列の emit 用コンテキスト (emitOp に渡す)
@@ -776,7 +821,10 @@ function emitOp(
       // needsLocal に入ってる場合だけ出力して local に保存
       // そうでなければ使用時に emitLoadValue/emitValueOrConst で直接出力
       if (needsLocal.has(op.id)) {
-        if (effectiveType === "f64" && typeof op.value === "number") {
+        if (taggedProps && taggedProps.size > 0 && (op.value === null || op.value === undefined)) {
+          // tagged 関数内の null/undefined 定数はタグ値 (i32 リージョンの local へ)
+          body.push(WASM_OP.i32_const, op.value === null ? 1 : 3);
+        } else if (effectiveType === "f64" && typeof op.value === "number") {
           body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
         } else if (op.type === "bool") {
           body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value ? 1 : 0));
@@ -994,7 +1042,7 @@ function emitOp(
           body.push(WASM_OP.i32_add);
         }
         body.push(WASM_OP.i32_load, 0x02, 0x00); // alignment=4, offset=0
-        if (forceF64) {
+        if (forceF64 && !(op.globalName && taggedProps?.has(op.globalName))) {
           body.push(WASM_OP.f64_convert_i32_s);
         }
       }
@@ -1019,6 +1067,9 @@ function emitOp(
         if ((vIsNull || vIsUndef) && op.globalName && taggedProps?.has(op.globalName)) {
           // tagged スロットへの null/undefined 代入 (分類パスが保証)
           body.push(WASM_OP.i32_const, vIsNull ? 1 : 3);
+        } else if (op.globalName && taggedProps?.has(op.globalName)) {
+          // tagged スロットへの store: 値は tagged チェーン由来の生 i32
+          emitLoadValue(op.args[1], body, opToLocal, opById, false);
         } else {
           emitLoadValue(op.args[1], body, opToLocal, opById, forceF64); // value
           if (forceF64) body.push(0xaa); // i32.trunc_f64_s (プロパティは i32 セル)
@@ -1169,6 +1220,7 @@ function emitOp(
             }
             body.push(isEq ? 0x46 : 0x47);
           }
+          if (forceF64) body.push(WASM_OP.f64_convert_i32_s); // bool は f64 正規化 (Phase 32 規約)
           maybeStoreLocal(op.id, body, opToLocal, needsLocal);
           break;
         }
@@ -1212,6 +1264,7 @@ function emitOp(
         emitLoadValue(op.args[0], body, opToLocal, opById, false);
         body.push(WASM_OP.i32_const, 2, 0x72 /* or */, WASM_OP.i32_const, 3, 0x46 /* eq */);
         body.push(0x72); // or
+        if (forceF64) body.push(WASM_OP.f64_convert_i32_s);
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
       }
@@ -1230,7 +1283,12 @@ function emitOp(
 
     // 制御フロー
     case "Return": {
-      emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+      if (taggedValues?.has(op.args[0])) {
+        emitLoadValue(op.args[0], body, opToLocal, opById, false);
+        if (forceF64) body.push(WASM_OP.f64_convert_i32_s); // 整数タグは f64 で正確
+      } else {
+        emitLoadValue(op.args[0], body, opToLocal, opById, forceF64);
+      }
       body.push(WASM_OP.return);
       break;
     }
@@ -1336,11 +1394,19 @@ function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, n
   }
   const op = opById.get(opId);
   if (op?.opcode === "Const") {
-    if (op.type === "f64") {
+    if (op.value === null || op.value === undefined) {
+      // tagged 規約のタグ値 (null=1, undefined=3)。非 tagged 文脈での null は
+      // 元々未定義動作 (i32ToLEB128(null) 化け) だったのでタグ値に統一
+      body.push(WASM_OP.i32_const, op.value === null ? 1 : 3);
+    } else if (op.type === "f64") {
       body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
     } else {
       body.push(WASM_OP.i32_const, ...i32ToLEB128(op.value as number));
     }
+    return;
+  }
+  if (op?.opcode === "Undefined") {
+    body.push(WASM_OP.i32_const, 3);
     return;
   }
   if (op?.opcode === "Param" && op.index !== undefined) {
@@ -1634,8 +1700,28 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
     }
 
     // Range Analysis: i32 で overflow するなら全体を f64 に昇格。
-    // クラスタは呼び出し規約を揃えるため 1 つでも f64 なら全員 f64
-    const useF64 = functionNeedsF64(irFunc) || (cluster?.callees.some(c => functionNeedsF64(c.ir)) ?? false);
+    // クラスタは呼び出し規約を揃えるため 1 つでも f64 なら全員 f64。
+    // tagged 候補チェーンは数値 range の対象外 (「参照 load の range 未知」で
+    // 関数全体が f64 昇格し tagged が無効化される共倒れを防ぐ、Phase 33)
+    const preTagged = classifyTaggedProps(irFunc);
+    const taggedChainIds = new Set<number>();
+    {
+      const thisIds0 = new Set<number>();
+      for (const b of irFunc.blocks) for (const o of b.ops) if (o.opcode === "LoadThis") thisIds0.add(o.id);
+      let grew0 = true;
+      while (grew0) {
+        grew0 = false;
+        for (const b of irFunc.blocks) {
+          for (const o of b.ops) {
+            if (o.opcode !== "LoadProperty" || taggedChainIds.has(o.id)) continue;
+            if ((o.globalName && preTagged.taggedProps.has(o.globalName) && thisIds0.has(o.args[0])) || taggedChainIds.has(o.args[0])) {
+              taggedChainIds.add(o.id); grew0 = true;
+            }
+          }
+        }
+      }
+    }
+    const useF64 = functionNeedsF64(irFunc, taggedChainIds) || (cluster?.callees.some(c => functionNeedsF64(c.ir)) ?? false);
     const wasmType = useF64 ? WASM_TYPE.f64 : WASM_TYPE.i32;
 
     // WasmGC array 型定義
@@ -1777,6 +1863,13 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
         if ((op.opcode === "LoadUpvalue" || op.opcode === "StoreUpvalue") && op.index !== undefined) {
           upvalueCount = Math.max(upvalueCount, op.index + 1);
         }
+        // クラスタ呼び出しが転送する own upvalue も param が要る
+        // (codegenIR 側の数え方と一致させないと local 添字が 1 ずれる)
+        if (op.clusterSrcs) {
+          for (const src of op.clusterSrcs) {
+            if (src.kind === "own") upvalueCount = Math.max(upvalueCount, src.i + 1);
+          }
+        }
       }
     }
 
@@ -1845,7 +1938,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
     // tagged スロット分類 (Phase 33): i32 モード + tryCall 経路のみ。
     // f64 モードはタグと両立しない (課題 3) ので現行動作
     const hasLoadThis = irFunc.blocks.some(b => b.ops.some(o => o.opcode === "LoadThis"));
-    const taggedInfo = (hasLoadThis && !useF64 && globalsAsParams) ? classifyTaggedProps(irFunc) : { taggedProps: new Set<string>(), nestedNames: [] as string[] };
+    const taggedInfo = (hasLoadThis && globalsAsParams) ? preTagged : { taggedProps: new Set<string>(), nestedNames: [] as string[] };
     const taggedProps = taggedInfo.taggedProps;
     // ネストアクセス (this.cur.link 等) 用の import。実装は jit 側が
     // slotHolder.fn に注入する (objTable を共有するため)
@@ -1889,6 +1982,8 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
     if (refLocals > 0 && arrayTypeIdx >= 0) groups.push({ count: refLocals, type: refType(arrayTypeIdx) });
     const extraLocalGroups = groups.length > 0 ? groups : undefined;
     if (typeof process !== "undefined" && process.env?.DEBUG_WAT) console.error(mainWat);
+    if (typeof process !== "undefined" && process.env?.DEBUG_LOCALS) console.error(`[locals] name=${irFunc.name} totalParam=${totalParamCount} extra=${wasmExtraLocals} len=${lenLocals} ref=${refLocals} declTotal=${totalParamCount + wasmExtraLocals + lenLocals + refLocals}`);
+    if (typeof process !== "undefined" && process.env?.DEBUG_BYTES) console.error("[bytes 70..110]", bodyCode.slice(70, 110).map(b => b.toString(16).padStart(2, "0")).join(" "));
     builder.addFunction(irFunc.name, params, results, bodyCode,
       wasmExtraLocals + lenLocals + refLocals > 0 ? wasmExtraLocals + lenLocals + refLocals : 0,
       totalParamCount, 1, extraLocalGroups);
@@ -1945,7 +2040,9 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
           }
         }
         // callee 自身も兄弟を呼びうる (深さ 2+) ので cluster ctx を渡す
-        const cg = codegenIR(cir, useF64, arrayTypeIdx, importIndices, builder.importCount, cArrayRefValues, new Set(), growFnIndex, false, cluster, builder.importCount + 1);
+        // extraBox param は main 専用 (callee の own-box 供給は param 転送)。
+        // callee の totalParamCount に混ぜると local 添字がずれる
+        const cg = codegenIR(cir, useF64, arrayTypeIdx, importIndices, builder.importCount, cArrayRefValues, new Set(), growFnIndex, false, { ...cluster, extraBoxCount: 0 }, builder.importCount + 1);
         const cParams: number[] = [];
         let cParamValCount = 0;
         for (let i = 0; i < cir.paramCount; i++) {
