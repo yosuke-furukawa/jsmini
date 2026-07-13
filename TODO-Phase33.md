@@ -36,14 +36,14 @@ VM 差ほぼゼロ) を、tagged pointer (WasmGC i31ref + eq 階層) による
 
 ### 33-4: 計測と判断
 
-- [ ] 33-4a: richards / deltablue / splay で計測
-- [ ] 33-4b: 「参照を持ち回るだけ」の解放範囲を実測 → 案 A
+- [x] 33-4a: richards / deltablue / splay で計測
+- [x] 33-4b: 「参照を持ち回るだけ」の解放範囲を実測 → 案 A
       (struct 移住) への投資判断を記録
 
 ### 33-5: まとめ
 
-- [ ] 33-5a: LEARN-Phase33.md
-- [ ] 33-5b: PR を Ready for review に
+- [x] 33-5a: LEARN-Phase33.md
+- [x] 33-5b: PR を Ready for review に
 
 ## 33-3 完了時メモ
 
