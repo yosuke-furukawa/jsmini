@@ -23,12 +23,12 @@ function isFunctionLike(v: any): boolean {
 
 function isErrorLike(v: any): { name: string } | null {
   if (v instanceof Error) return { name: v.name };
-  if (v === null || typeof v !== "object") return null;
-  // jsmini が生成する Error オブジェクト (name プロパティ + message を持つ)
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return null;
   const name = v.name ?? v.constructor?.name;
-  if (typeof name === "string" && /Error$/.test(name) && ("message" in v || "stack" in v)) {
-    return { name };
-  }
+  if (typeof name === "string" && /Error$/.test(name)) return { name };
+  // jsmini の Error は name を持たない plain object ({ message } のみ) の場合がある。
+  // message を持つオブジェクトは Error 相当として種別 "Error" に畳む。
+  if ("message" in v) return { name: typeof v.name === "string" ? v.name : "Error" };
   return null;
 }
 
@@ -95,10 +95,13 @@ export function canonValue(v: unknown, depth = 0, seen = new WeakSet<object>()):
 // throw された値 → canonical 文字列。
 // エラー種別 (ReferenceError 等) が主要な比較キー。message はエンジン/host 依存なので使わない。
 export function canonThrow(thrown: unknown): string {
-  // TW の user throw は ThrowSignal(value) でラップされる
-  let val: unknown = thrown;
-  if (val && typeof val === "object" && val.constructor && val.constructor.name === "ThrowSignal") {
-    val = (val as any).value;
+  // throw の内部ラッパを剥がす:
+  //   TW user throw → ThrowSignal(value)
+  //   VM throw      → { __thrown: true, value }
+  let val: any = thrown;
+  if (val && typeof val === "object") {
+    if (val.constructor && val.constructor.name === "ThrowSignal") val = val.value;
+    else if (val.__thrown === true && "value" in val) val = val.value;
   }
   const err = isErrorLike(val);
   if (err) return `Error:${err.name}`;
