@@ -12,6 +12,10 @@ import type { IRFunction } from "../ir/types.js";
 
 // ブラウザ (playground) には process が無いので安全にガード
 const DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
+// ネストアクセス import が「VM に返すべき状況」(数値の deref 等) を検出した
+// ときに投げる sentinel。executeWasm が捕まえて deopt → VM 再実行する
+// (ネスト load は純粋読みで write-back 前なので再実行は安全)
+const DEOPT_SENTINEL = new Error("__jsmini_jit_deopt__");
 // デバッグ用: JIT_SKIP=name1,name2 で特定関数の JIT を無効化 (犯人の二分探索用)
 const JIT_SKIP = new Set((typeof process !== "undefined" && process.env?.JIT_SKIP ? process.env.JIT_SKIP.split(",") : []));
 
@@ -377,6 +381,32 @@ export class JitManager {
         cached.resultTagged = result.resultTagged ?? false;
         cached.objTable = [];
         cached.objMap = new Map();
+        if (result.slotHolder && result.nestedPropNames) {
+          // ネストアクセス (this.cur.link 等): tagged 参照の 1 段先を VM の
+          // HiddenClass から読み、同じタグ規則で返す。own プロパティ以外
+          // (プロトタイプ上のメソッド等) や数値の deref は deopt に倒す
+          const table = cached.objTable;
+          const map = cached.objMap;
+          const names = result.nestedPropNames;
+          result.slotHolder.fn = (tagged: number, propId: number): number => {
+            if (!(tagged & 1) || tagged === 1 || tagged === 3) throw DEOPT_SENTINEL;
+            const obj = table[tagged >> 1];
+            if (!isJSObject(obj)) throw DEOPT_SENTINEL;
+            const hcN = getHiddenClass(obj as any);
+            const si = hcN.properties.get(names[propId]);
+            if (si === undefined) throw DEOPT_SENTINEL;
+            const v = getSlots(obj as any)[si];
+            if (typeof v === "number" && Number.isInteger(v) && v < 536870912 && v > -536870912) return v << 1;
+            if (v === null) return 1;
+            if (v === undefined) return 3;
+            if (typeof v === "object") {
+              let idx = map.get(v);
+              if (idx === undefined) { idx = table.length; table.push(v); map.set(v, idx); }
+              return (idx << 1) | 1;
+            }
+            throw DEOPT_SENTINEL;
+          };
+        }
       }
       if (resolved) {
         cached.calleeGuards = resolved.guards;
@@ -716,6 +746,13 @@ export class JitManager {
       }
       return { result };
     } catch (e) {
+      // ネストアクセス import からの deopt 要求 (数値 deref / own に無い
+      // プロパティ等)。副作用 (write-back) 前なので VM 再実行で正しい
+      if (e === DEOPT_SENTINEL) {
+        this.deoptimize(func, args);
+        this.logTier(func, "Bytecode VM (after deopt: nested slot access)", callCount);
+        return null;
+      }
       // Wasm 自己再帰が深くなると実行スタックが溢れる
       // (RangeError: Maximum call stack size exceeded)。VM はヒープ上の
       // frames 配列なので同じ深さでも溢れない。deopt して VM で再実行する。

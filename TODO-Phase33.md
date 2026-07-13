@@ -32,7 +32,7 @@ VM 差ほぼゼロ) を、tagged pointer (WasmGC i31ref + eq 階層) による
 
 - [x] 33-3a: tagged スロットの LoadProperty/StoreProperty emit
 - [x] 33-3b: 参照の identity / null 比較 (== / != / ===) と truthiness を Wasm 内で
-- [ ] 33-3c: ネストアクセス __load_slot(tableIdx, offset) import (schedule 系向け)
+- [x] 33-3c: ネストアクセス __load_slot(tableIdx, offset) import (schedule 系向け)
 
 ### 33-4: 計測と判断
 
@@ -44,3 +44,15 @@ VM 差ほぼゼロ) を、tagged pointer (WasmGC i31ref + eq 階層) による
 
 - [ ] 33-5a: LEARN-Phase33.md
 - [ ] 33-5b: PR を Ready for review に
+
+## 33-3 完了時メモ
+
+- ネストアクセス (__load_slot import) 実装済み: 2 段ネスト読み・ネスト値の
+  identity 比較・prototype プロパティの deopt が動作 (回帰テスト 10 ケース)
+- 既知制約 (v1): range 分析で f64 昇格する関数 (ループ内 n+1 等) は tagged
+  無効 → 連結リスト走査形はまだ VM。対策候補: tagged 値専用の i32 local
+  グループ (f64 関数内でも tagged を i32 で持つ)
+- 33-4 で要調査: deltablue が 327ms (以前 ~200ms) — tagged 化で compile
+  対象が増え、ネスト import が熱いパスで VM インライン実行より高くつく
+  疑い。per-関数の勝ち負け判定 (import 回数 × コスト) か、ネスト頻度が
+  高い関数は tagged 降格、のどちらかが必要

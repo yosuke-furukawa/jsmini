@@ -61,7 +61,7 @@ function classifyMathCall(name: string, argc: number): "native_unary" | "native_
   return "unsupported";
 }
 
-export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set(), growableArrayValues: Set<number> = new Set(), growFnIndex = -1, globalsAsParams = false, cluster: ClusterInfo | null = null, clusterFuncIndexBase = -1, taggedProps: Set<string> = new Set()): { body: number[]; extraLocals: number; lenLocals: number; refLocals: number; wat: string; propNames: string[]; writtenProps: string[]; globalNames: string[]; hasStoreGlobal: boolean; resultTagged: boolean } {
+export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set(), growableArrayValues: Set<number> = new Set(), growFnIndex = -1, globalsAsParams = false, cluster: ClusterInfo | null = null, clusterFuncIndexBase = -1, taggedProps: Set<string> = new Set(), nestedPropNames: string[] = []): { body: number[]; extraLocals: number; lenLocals: number; refLocals: number; wat: string; propNames: string[]; writtenProps: string[]; globalNames: string[]; hasStoreGlobal: boolean; resultTagged: boolean } {
   const body: number[] = [];
   const watLines: string[] = [];
   let watIndent = 1;
@@ -110,15 +110,25 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   const propOffsets = new Map<string, number>();
   const writtenProps = new Set<string>();
   let propCounter = 0;
-  for (const block of irFunc.blocks) {
-    for (const op of block.ops) {
-      if (op.opcode === "LoadThis") hasThis = true;
-      if ((op.opcode === "LoadProperty" || op.opcode === "StoreProperty") && op.globalName) {
-        if (op.opcode === "LoadProperty" && op.calleeName?.startsWith("Math.")) continue;
-        if (!propOffsets.has(op.globalName)) {
-          propOffsets.set(op.globalName, propCounter++);
+  {
+    const thisIds = new Set<number>();
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) if (op.opcode === "LoadThis") thisIds.add(op.id);
+    }
+    for (const block of irFunc.blocks) {
+      for (const op of block.ops) {
+        if (op.opcode === "LoadThis") hasThis = true;
+        if ((op.opcode === "LoadProperty" || op.opcode === "StoreProperty") && op.globalName) {
+          if (op.opcode === "LoadProperty" && op.calleeName?.startsWith("Math.")) continue;
+          // ネスト load (this 直下でない) は propOffsets (this のメモリ配置) に
+          // 含めない — __load_slot import で解決する (含めると copy-in が
+          // this に無いプロパティを探して deopt してしまう)
+          if (op.opcode === "LoadProperty" && !thisIds.has(op.args[0]) && taggedProps.size > 0) continue;
+          if (!propOffsets.has(op.globalName)) {
+            propOffsets.set(op.globalName, propCounter++);
+          }
+          if (op.opcode === "StoreProperty") writtenProps.add(op.globalName);
         }
-        if (op.opcode === "StoreProperty") writtenProps.add(op.globalName);
       }
     }
   }
@@ -365,10 +375,24 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   const taggedValues = new Set<number>();
   let resultTagged = false;
   if (taggedProps.size > 0) {
+    // this 直下の tagged load から始め、ネスト load (args[0] が tagged 値) を
+    // fixpoint でチェーンに含める
+    const thisIdsT = new Set<number>();
     for (const block of irFunc.blocks) {
-      for (const op of block.ops) {
-        if (op.opcode === "LoadProperty" && op.globalName && taggedProps.has(op.globalName)) {
-          taggedValues.add(op.id);
+      for (const op of block.ops) if (op.opcode === "LoadThis") thisIdsT.add(op.id);
+    }
+    const isThisRootedT = (id: number) => thisIdsT.has(id);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if (op.opcode !== "LoadProperty" || taggedValues.has(op.id)) continue;
+          if (op.globalName && taggedProps.has(op.globalName) && isThisRootedT(op.args[0])) {
+            taggedValues.add(op.id); grew = true;
+          } else if (taggedValues.has(op.args[0])) {
+            taggedValues.add(op.id); grew = true;
+          }
         }
       }
     }
@@ -652,7 +676,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         wat("return");
       } else {
         const beforeLen = body.length;
-        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets, importIndices, importCount, growCtx, clusterCtx, usedIds, taggedValues, taggedProps);
+        emitOp(op, body, opToLocal, irFunc, needsLocal, [], [], new Set(), opById, globalToLocal, forceF64, arrayTypeIdx, upvalueCount, propOffsets, importIndices, importCount, growCtx, clusterCtx, usedIds, taggedValues, taggedProps, nestedPropNames);
         // emitOp が出力した命令を WAT に変換
         watFromBytes(body, beforeLen, op, opToLocal, opById, opNames, wat);
       }
@@ -741,6 +765,7 @@ function emitOp(
   usedIds?: Set<number>,
   taggedValues?: Set<number>,
   taggedProps?: Set<string>,
+  nestedPropNames?: string[],
 ): void {
   // forceF64 なら全演算を f64 として扱う
   const effectiveType = forceF64 ? "f64" : op.type;
@@ -947,6 +972,18 @@ function emitOp(
     case "LoadProperty": {
       // Math.X の参照: Call dispatch で消費されるので emit 不要
       if (op.calleeName?.startsWith("Math.")) break;
+      // ネスト tagged load (this.cur.link 等): __load_slot import に委譲
+      if (taggedValues?.has(op.args[0]) && nestedPropNames && op.globalName) {
+        const pid = nestedPropNames.indexOf(op.globalName);
+        const importIdx = importIndices?.get("__load_slot");
+        if (pid >= 0 && importIdx !== undefined) {
+          emitLoadValue(op.args[0], body, opToLocal, opById, false);
+          body.push(WASM_OP.i32_const, ...i32ToLEB128(pid));
+          body.push(WASM_OP.call, ...u32ToLEB128(importIdx));
+          maybeStoreLocal(op.id, body, opToLocal, needsLocal);
+          break;
+        }
+      }
       // obj.name → i32.load(obj + propOffset * 4)
       const offset = propOffsets.get(op.globalName!);
       if (offset !== undefined) {
@@ -1417,13 +1454,12 @@ function getReturnType(irFunc: IRFunction): IRType {
 // 降格の影響 (tagged load を numeric スロットに store 等) を fixpoint で伝播。
 export const TAG_NULL = 1;   // (0 << 1) | 1
 export const TAG_UNDEF = 3;  // (1 << 1) | 1
-export function classifyTaggedProps(irFunc: IRFunction): Set<string> {
+export function classifyTaggedProps(irFunc: IRFunction): { taggedProps: Set<string>; nestedNames: string[] } {
   const opById = new Map<number, Op>();
   for (const b of irFunc.blocks) {
     for (const ph of b.phis) opById.set(ph.id, ph as unknown as Op);
     for (const o of b.ops) opById.set(o.id, o);
   }
-  // 消費者マップ
   const consumers = new Map<number, Array<{ op: Op; argIdx: number }>>();
   for (const b of irFunc.blocks) {
     for (const o of b.ops) {
@@ -1439,16 +1475,13 @@ export function classifyTaggedProps(irFunc: IRFunction): Set<string> {
       }
     }
   }
-  const loadsByProp = new Map<string, Op[]>();
-  const storesByProp = new Map<string, Op[]>();
+  const isThisRooted = (id: number) => opById.get(id)?.opcode === "LoadThis";
   const props = new Set<string>();
+  const storesByProp = new Map<string, Op[]>();
   for (const b of irFunc.blocks) {
     for (const o of b.ops) {
-      if (o.opcode === "LoadProperty" && o.globalName && !o.calleeName?.startsWith("Math.")) {
-        props.add(o.globalName);
-        (loadsByProp.get(o.globalName) ?? loadsByProp.set(o.globalName, []).get(o.globalName)!).push(o);
-      }
-      if (o.opcode === "StoreProperty" && o.globalName) {
+      if (o.opcode === "LoadProperty" && o.globalName && !o.calleeName?.startsWith("Math.") && isThisRooted(o.args[0])) props.add(o.globalName);
+      if (o.opcode === "StoreProperty" && o.globalName && isThisRooted(o.args[0])) {
         props.add(o.globalName);
         (storesByProp.get(o.globalName) ?? storesByProp.set(o.globalName, []).get(o.globalName)!).push(o);
       }
@@ -1457,59 +1490,69 @@ export function classifyTaggedProps(irFunc: IRFunction): Set<string> {
   const isNullOrUndef = (id: number): boolean => {
     const o = opById.get(id);
     if (!o) return false;
-    if (o.opcode === "Const" && (o.value === null || o.value === undefined)) return true;
-    if (o.opcode === "Undefined") return true;
-    if (o.opcode === "LoadGlobal" && o.globalName === "undefined") return true;
-    return false;
+    return (o.opcode === "Const" && (o.value === null || o.value === undefined))
+      || o.opcode === "Undefined"
+      || (o.opcode === "LoadGlobal" && o.globalName === "undefined");
   };
   const CMP = new Set(["Equal", "NotEqual", "StrictEqual", "StrictNotEqual"]);
-  // 初期候補: 全プロパティ tagged。降格を fixpoint で回す
   const tagged = new Set<string>(props);
+  const nestedNames = new Set<string>();
+  // fixpoint: tagged な this-prop の load から始まる「tagged 値チェーン」
+  // (ネスト load 含む) を辿り、許可外の使い方があれば根の prop を降格
   let changed = true;
   while (changed) {
     changed = false;
-    const demote = (name: string) => {
-      if (tagged.has(name)) { tagged.delete(name); changed = true; }
-    };
-    for (const name of [...tagged]) {
-      // load の全消費者が許可リストに入っているか
-      for (const load of loadsByProp.get(name) ?? []) {
-        for (const { op: c, argIdx } of consumers.get(load.id) ?? []) {
-          if (CMP.has(c.opcode)) {
-            // 比較相手が tagged load / null / undefined でなければ降格
-            const other = c.args[argIdx === 0 ? 1 : 0];
-            const otherOp = opById.get(other);
-            const otherIsTaggedLoad = otherOp?.opcode === "LoadProperty" && otherOp.globalName !== undefined && tagged.has(otherOp.globalName);
-            if (!otherIsTaggedLoad && !isNullOrUndef(other)) { demote(name); break; }
-          } else if (c.opcode === "Branch" || c.opcode === "Not") {
-            // truthiness — OK
-          } else if (c.opcode === "StoreProperty" && argIdx === 1) {
-            // tagged 値を store できるのは tagged スロットだけ
-            if (!c.globalName || !tagged.has(c.globalName)) { demote(name); break; }
-          } else if (c.opcode === "Return") {
-            // OK (呼び出し側でデコード)
-          } else {
-            demote(name); break; // 算術・配列 index・Call 引数等 → 降格
-          }
+    nestedNames.clear();
+    // チェーン構築: valueId → 根の prop 名
+    const rootOf = new Map<number, string>();
+    const queue: number[] = [];
+    for (const b of irFunc.blocks) {
+      for (const o of b.ops) {
+        if (o.opcode === "LoadProperty" && o.globalName && tagged.has(o.globalName) && isThisRooted(o.args[0])) {
+          rootOf.set(o.id, o.globalName);
+          queue.push(o.id);
         }
-        if (!tagged.has(name)) break;
-      }
-      if (!tagged.has(name)) continue;
-      // store される値の供給元が tagged load / null / undefined か
-      for (const st of storesByProp.get(name) ?? []) {
-        const vid = st.args[1];
-        const vop = opById.get(vid);
-        const fromTaggedLoad = vop?.opcode === "LoadProperty" && vop.globalName !== undefined && tagged.has(vop.globalName);
-        if (!fromTaggedLoad && !isNullOrUndef(vid)) { demote(name); break; }
       }
     }
+    while (queue.length > 0) {
+      const vid = queue.pop()!;
+      const root = rootOf.get(vid)!;
+      for (const { op: c, argIdx } of consumers.get(vid) ?? []) {
+        if (c.opcode === "LoadProperty" && argIdx === 0 && c.globalName) {
+          // ネスト load: 結果もチェーンに入る (__load_slot import で解決)
+          if (!rootOf.has(c.id)) { rootOf.set(c.id, root); queue.push(c.id); }
+          nestedNames.add(c.globalName);
+          continue;
+        }
+        let ok = false;
+        if (CMP.has(c.opcode)) {
+          const other = c.args[argIdx === 0 ? 1 : 0];
+          ok = rootOf.has(other) || isNullOrUndef(other);
+        } else if (c.opcode === "Branch" || c.opcode === "Not" || c.opcode === "Return") {
+          ok = true;
+        } else if (c.opcode === "StoreProperty" && argIdx === 1 && c.globalName && tagged.has(c.globalName) && isThisRooted(c.args[0])) {
+          ok = true;
+        }
+        if (!ok && tagged.has(root)) { tagged.delete(root); changed = true; }
+      }
+    }
+    // store の供給元チェック
+    for (const name of [...tagged]) {
+      for (const st of storesByProp.get(name) ?? []) {
+        const vid = st.args[1];
+        if (!rootOf.has(vid) && !isNullOrUndef(vid)) {
+          tagged.delete(name); changed = true; break;
+        }
+      }
+    }
+    if (changed) continue;
   }
-  return tagged;
+  return { taggedProps: tagged, nestedNames: [...nestedNames] };
 }
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
-export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, cluster?: ClusterInfo | null): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; propNames?: string[]; writtenProps?: string[]; taggedProps?: string[]; resultTagged?: boolean; globalNames?: string[]; memory?: WebAssembly.Memory; hasAwait?: boolean; jspiWrapped?: (...args: number[]) => Promise<number> } | null {
+export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, cluster?: ClusterInfo | null): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; propNames?: string[]; writtenProps?: string[]; taggedProps?: string[]; resultTagged?: boolean; nestedPropNames?: string[]; slotHolder?: { fn: ((tagged: number, propId: number) => number) | null }; globalNames?: string[]; memory?: WebAssembly.Memory; hasAwait?: boolean; jspiWrapped?: (...args: number[]) => Promise<number> } | null {
   try {
     // builder がスタック合流の深さ不一致を検出した関数は表現不能 → 拒否
     if ((irFunc as { stackMismatch?: boolean }).stackMismatch) {
@@ -1802,8 +1845,17 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
     // tagged スロット分類 (Phase 33): i32 モード + tryCall 経路のみ。
     // f64 モードはタグと両立しない (課題 3) ので現行動作
     const hasLoadThis = irFunc.blocks.some(b => b.ops.some(o => o.opcode === "LoadThis"));
-    const taggedProps = (hasLoadThis && !useF64 && globalsAsParams) ? classifyTaggedProps(irFunc) : new Set<string>();
-    const { body: bodyCode, extraLocals, lenLocals, refLocals, propNames, writtenProps, globalNames, hasStoreGlobal, wat: mainWat, resultTagged } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues, growableArrayValues, growFnIndex, globalsAsParams, cluster ?? null, builder.importCount + 1, taggedProps);
+    const taggedInfo = (hasLoadThis && !useF64 && globalsAsParams) ? classifyTaggedProps(irFunc) : { taggedProps: new Set<string>(), nestedNames: [] as string[] };
+    const taggedProps = taggedInfo.taggedProps;
+    // ネストアクセス (this.cur.link 等) 用の import。実装は jit 側が
+    // slotHolder.fn に注入する (objTable を共有するため)
+    const nestedPropNames = taggedProps.size > 0 ? taggedInfo.nestedNames : [];
+    const slotHolder: { fn: ((tagged: number, propId: number) => number) | null } = { fn: null };
+    if (nestedPropNames.length > 0) {
+      const idx = builder.addImport("env", "__load_slot", [WASM_TYPE.i32, WASM_TYPE.i32], [WASM_TYPE.i32]);
+      importIndices.set("__load_slot", idx);
+    }
+    const { body: bodyCode, extraLocals, lenLocals, refLocals, propNames, writtenProps, globalNames, hasStoreGlobal, wat: mainWat, resultTagged } = codegenIR(irFunc, useF64, arrayTypeIdx, importIndices, builder.importCount, arrayRefValues, growableArrayValues, growFnIndex, globalsAsParams, cluster ?? null, builder.importCount + 1, taggedProps, nestedPropNames);
     if (globalsAsParams && hasStoreGlobal) {
       if (DEBUG_WASM) console.error("[compileIRToWasm] reject: StoreGlobal in tryCall path (no write-back for globals)");
       return null;
@@ -1988,11 +2040,16 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
       const methodName = name.slice(5); // strip "Math."
       env[name] = (Math as any)[methodName];
     }
-    if (hasAwait || mathHostImports.size > 0) {
+    if (nestedPropNames.length > 0) {
+      // ネストアクセス: 実装は jit 側が後から slotHolder.fn に注入する
+      env.__load_slot = (tagged: number, propId: number): number => slotHolder.fn!(tagged, propId);
+    }
+    const needsEnv = hasAwait || mathHostImports.size > 0 || nestedPropNames.length > 0;
+    if (needsEnv) {
       importObject.env = env;
     }
 
-    const instance = new WebAssembly.Instance(module, (hasAwait || mathHostImports.size > 0) ? importObject : undefined);
+    const instance = new WebAssembly.Instance(module, needsEnv ? importObject : undefined);
     const memory = hasPropertyOps ? (instance.exports as any).memory as WebAssembly.Memory : undefined;
 
     // JSPI: export を promising でラップ
@@ -2012,6 +2069,8 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
       writtenProps: writtenProps.length > 0 ? writtenProps : undefined,
       taggedProps: taggedProps.size > 0 ? [...taggedProps] : undefined,
       resultTagged: resultTagged || undefined,
+      nestedPropNames: nestedPropNames.length > 0 ? nestedPropNames : undefined,
+      slotHolder: nestedPropNames.length > 0 ? slotHolder : undefined,
       globalNames: globalsAsParams && globalNames.length > 0 ? globalNames : undefined,
       memory,
       hasAwait: hasAwait || undefined,

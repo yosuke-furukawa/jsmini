@@ -108,3 +108,43 @@ describe("Phase 33 — tagged slots", () => {
     `, 19030, false);
   });
 });
+
+describe("Phase 33 — ネストアクセス (__load_slot import)", () => {
+  it("2 段ネスト読み (this.cur.link.id)", () => {
+    jitEq(`
+      function P(o) { this.cur = o; }
+      P.prototype.deepId = function() { if (this.cur != null && this.cur.link != null) return this.cur.link.id; return -1; };
+      var o = { link: { id: 99, link: null }, id: 1 };
+      var p = new P(o);
+      var r = 0;
+      for (var i = 0; i < 20; i++) { r = p.deepId(); }
+      r;
+    `, 99);
+  });
+
+  it("ネスト値同士の identity 比較", () => {
+    jitEq(`
+      function Q(a, b) { this.a = a; this.b = b; }
+      Q.prototype.sameTarget = function() { return this.a.target == this.b.target ? 1 : 0; };
+      var shared = { v: 1 };
+      var q1 = new Q({ target: shared }, { target: shared });
+      var q2 = new Q({ target: shared }, { target: { v: 1 } });
+      var r = 0;
+      for (var i = 0; i < 20; i++) { r = q1.sameTarget() * 10 + q2.sameTarget(); }
+      r;
+    `, 10);
+  });
+
+  it("prototype 上のプロパティは deopt して正しい", () => {
+    jitEq(`
+      function R(o) { this.cur = o; }
+      R.prototype.f = function() { return this.cur.onProto == null ? 0 : 1; };
+      function Base() {}
+      Base.prototype.onProto = { x: 1 };
+      var r = new R(new Base());
+      var v = 0;
+      for (var i = 0; i < 20; i++) { v = r.f(); }
+      v;
+    `, 1, false); // own に無い → __load_slot が deopt → VM で正しい
+  });
+});
