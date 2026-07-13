@@ -37,17 +37,45 @@ return、そして **__load_slot import によるネスト読み** (this.cur.lin
 
 | ベンチ | VM | JIT | 前フェーズ比 |
 |---|---|---|---|
-| richards | 126ms | 119ms | 維持 (勝ち) |
-| deltablue | 170ms | 194ms | **-14% (軽い退行)** |
-| splay | 2622ms | 2668ms | ほぼ同等 |
-| navier-stokes | 2132ms | **127ms** | 17x 維持 |
+| **token-ring (tagged 有利ベンチ)** | 2474ms | **4.2ms (594x)** | 新設 |
+| richards | 121ms | 120ms | 維持 (勝ち) |
+| deltablue | 163ms | 171ms | 軽退行のまま |
+| splay | 2570ms | 2551ms | 同等 |
+| navier-stokes | 2128ms | 297ms → 204ms 単発 | 維持 |
 
-deltablue の退行は「tagged で compile 対象が増えたが、小関数のネスト
-import コストが VM インライン実行に勝てない」構造。「ループ無し ×
-ネスト持ちを弾く」ヒューリスティックも試したが**差はノイズの範囲**で、
-単発計測の外れ値 (563ms) に騙されかけた — 中央値で測る教訓の再演。
+token-ring は「参照の move + identity + null チェックだけのホット
+ループ」= tagged の得意技そのもの。**594x は jsmini 史上最大の倍率**で、
+参照の付け替えが「VM の dispatch + HiddenClass lookup」から
+「linear memory の i32 load/store」になった効果の直接測定になっている。
 
-## 教訓
+Octane が動かない理由は変わらない (メソッド呼び出し・オブジェクト引数・
+ネスト書き込みが未対応)。「機構の実力」と「実ベンチの構造」は別物 —
+これも Octane retire の教訓 (ベンチは測りたいものを測る) の実地。
+
+## 33-6: tagged×f64 の共倒れ解消で掘り出した潜在バグ 3 件
+
+当初 token-ring は**コンパイルすらされなかった** (JIT 0.8x)。真因は
+「param 有界のループカウンタですら range 分析で i32 をわずかに超え、
+ループ持ち関数がほぼ全部 f64 昇格 → `!useF64` ゲートが tagged を無効化」
+という共倒れ。f64 関数内で tagged 値を生 i32 で持つ対応 (len(i32)
+グループへの相乗り + Load/Store/比較/Not/Return の変換スキップ +
+null 入力 stack Phi の tagged ドメイン化) を入れる過程で、
+**「local 添字ズレ」同族の潜在バグを 3 件**掘り出した:
+
+1. **extraLocals が `irFunc.paramCount` 基準** (totalParamCount でなく):
+   this/upvalue/globals パラメータを数えず scalar グループが過大宣言。
+   全 local が同一型の時代は「余分な宣言」で無害に潜伏し、
+   i32/f64 混在で初めて型ズレとして顕在化
+2. compileIRToWasm (params 組立) と codegenIR (添字割当) で
+   **upvalue 数の数え方が不一致** (clusterSrcs 転送分の有無)
+3. cluster callee の totalParamCount に **main 専用の extraBoxCount が
+   誤伝播**
+
+教訓: 「宣言は過大でも動く」系の緩みは、型が単一なうちは絶対に
+見つからない。mixed 型の導入は機能追加であると同時に、
+**局所配置の整合性テスト**として働いた。
+
+## 教訓## 教訓
 
 1. **spike の価値は「早く間違える」こと**: ref.eq の 1 点で案 B が崩れ、
    より単純な案 C' に着地。設計書の「要検証」を放置しないこと
@@ -62,7 +90,6 @@ import コストが VM インライン実行に勝てない」構造。「ルー
 
 - **メソッド呼び出しの投機的直接化** (`this.cur.task.run()`): HC guard +
   クラスタ機構の合流。richards/deltablue の本丸
-- f64 昇格関数での tagged 有効化 (tagged 値専用の i32 local グループ)
 - deltablue 退行の解消: per-関数の勝敗判定 or ネスト頻度による降格
 - 案 A (WasmGC struct へのヒープ移住) は「ネスト読みが import で足りるか」
   の実測が出た今も保留が妥当 (import 1 回 ≈ 数十 ns、struct 移住は

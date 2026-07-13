@@ -43,7 +43,7 @@ VM 差ほぼゼロ) を、tagged pointer (WasmGC i31ref + eq 階層) による
 ### 33-5: まとめ
 
 - [x] 33-5a: LEARN-Phase33.md
-- [ ] 33-5b: PR を Ready for review に (33-6 完了後に改めて)
+- [x] 33-5b: PR を Ready for review に (33-6 完了後に改めて)
 
 ## 33-3 完了時メモ
 
@@ -65,12 +65,12 @@ VM 差ほぼゼロ) を、tagged pointer (WasmGC i31ref + eq 階層) による
 ループ持ち関数がほぼ全部 f64 昇格 → (2) tagged は `!useF64` ゲートで無効 →
 (3) ループ持ち関数 (richards/deltablue の熱い所は全部) で tagged が使えない。
 
-- [ ] 33-6a: f64 関数内で tagged 値を生 i32 で持つ (専用 i32 local
+- [x] 33-6a: f64 関数内で tagged 値を生 i32 で持つ (専用 i32 local
       グループ + Load/Store/比較/Not/Return の f64 変換スキップ)
-- [ ] 33-6b: LoadThis (i32 base addr) も i32 リージョンへ
+- [x] 33-6b: LoadThis (i32 base addr) も i32 リージョンへ
       (f64+this 関数の既存 silent CompileError も直る)
-- [ ] 33-6c: null/undefined 定数の needsLocal 化をタグ値 emit + i32
+- [x] 33-6c: null/undefined 定数の needsLocal 化をタグ値 emit + i32
       リージョンで対応
-- [ ] 33-6d: range 分析から tagged チェーンと null/undefined 定数を除外
-- [ ] 33-6e: token-ring で tagged の実力値を計測 (JIT > VM を確認)、
+- [x] 33-6d: range 分析から tagged チェーンと null/undefined 定数を除外
+- [x] 33-6e: token-ring で tagged の実力値を計測 (JIT > VM を確認)、
       Octane / 全テスト回帰なし
