@@ -12,6 +12,10 @@ import type { IRFunction } from "../ir/types.js";
 
 // ブラウザ (playground) には process が無いので安全にガード
 const DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
+// ネストアクセス import が「VM に返すべき状況」(数値の deref 等) を検出した
+// ときに投げる sentinel。executeWasm が捕まえて deopt → VM 再実行する
+// (ネスト load は純粋読みで write-back 前なので再実行は安全)
+const DEOPT_SENTINEL = new Error("__jsmini_jit_deopt__");
 // デバッグ用: JIT_SKIP=name1,name2 で特定関数の JIT を無効化 (犯人の二分探索用)
 const JIT_SKIP = new Set((typeof process !== "undefined" && process.env?.JIT_SKIP ? process.env.JIT_SKIP.split(",") : []));
 
@@ -48,6 +52,12 @@ type CachedWasm = {
   // idx は main の upvalue slot の場合のみ (ダミー 0 push 用)
   calleeGuards?: Array<{ idx?: number; box: { value: unknown }; expected: unknown }>;
   extraBoxes?: Array<{ value: unknown }>;
+  // tagged スロット (Phase 33): V8 Smi 流の 1bit タグ (偶数=数値<<1,
+  // 奇数=object table index)。null=1, undefined=3。参照は table で dedup
+  taggedProps?: Set<string>;
+  resultTagged?: boolean;
+  objTable?: unknown[];
+  objMap?: Map<unknown, number>;
   // Wasm 関数が実際に受け取る upvalue param 数 (IR 基準)。callee ref の
   // LoadUpvalue 除去で縮み得るので、これちょうどを push しないと
   // 後続の globals/extraBoxes が位置ズレする
@@ -366,6 +376,38 @@ export class JitManager {
       if (result.globalNames) cached.globalNames = result.globalNames;
       cached.hasThis = result.hasThis ?? false;
       cached.upvalueCount = result.upvalueCount ?? 0;
+      if (result.taggedProps) {
+        cached.taggedProps = new Set(result.taggedProps);
+        cached.resultTagged = result.resultTagged ?? false;
+        cached.objTable = [];
+        cached.objMap = new Map();
+        if (result.slotHolder && result.nestedPropNames) {
+          // ネストアクセス (this.cur.link 等): tagged 参照の 1 段先を VM の
+          // HiddenClass から読み、同じタグ規則で返す。own プロパティ以外
+          // (プロトタイプ上のメソッド等) や数値の deref は deopt に倒す
+          const table = cached.objTable;
+          const map = cached.objMap;
+          const names = result.nestedPropNames;
+          result.slotHolder.fn = (tagged: number, propId: number): number => {
+            if (!(tagged & 1) || tagged === 1 || tagged === 3) throw DEOPT_SENTINEL;
+            const obj = table[tagged >> 1];
+            if (!isJSObject(obj)) throw DEOPT_SENTINEL;
+            const hcN = getHiddenClass(obj as any);
+            const si = hcN.properties.get(names[propId]);
+            if (si === undefined) throw DEOPT_SENTINEL;
+            const v = getSlots(obj as any)[si];
+            if (typeof v === "number" && Number.isInteger(v) && v < 536870912 && v > -536870912) return v << 1;
+            if (v === null) return 1;
+            if (v === undefined) return 3;
+            if (typeof v === "object") {
+              let idx = map.get(v);
+              if (idx === undefined) { idx = table.length; table.push(v); map.set(v, idx); }
+              return (idx << 1) | 1;
+            }
+            throw DEOPT_SENTINEL;
+          };
+        }
+      }
       if (resolved) {
         cached.calleeGuards = resolved.guards;
         cached.extraBoxes = resolved.extraBoxes;
@@ -574,9 +616,32 @@ export class JitManager {
           slotIdxs = cached.propNames.map(n => hc.properties.get(n));
           (cached.hcSlotCache ?? (cached.hcSlotCache = new Map())).set(hc, slotIdxs);
         }
+        // tagged スロット準備 (object table は呼び出しごとにリセットして再利用)
+        const tagged = cached.taggedProps;
+        if (tagged) { cached.objTable!.length = 2; cached.objMap!.clear(); }
         for (let i = 0; i < cached.propNames.length; i++) {
           const slotIdx = slotIdxs[i];
           const v = slotIdx !== undefined ? slots[slotIdx] : undefined;
+          if (tagged?.has(cached.propNames[i])) {
+            // tagged: 数値 (30bit 整数) は v<<1、null=1、undefined=3、
+            // 参照は table index を (idx<<1)|1 で (同一オブジェクト → 同一 index)
+            if (typeof v === "number" && Number.isInteger(v) && v < 536870912 && v > -536870912) {
+              view[i] = v << 1;
+            } else if (v === null) {
+              view[i] = 1;
+            } else if (v === undefined) {
+              view[i] = 3;
+            } else if (typeof v === "object") {
+              let idx = cached.objMap!.get(v);
+              if (idx === undefined) { idx = cached.objTable!.length; cached.objTable!.push(v); cached.objMap!.set(v, idx); }
+              view[i] = (idx << 1) | 1;
+            } else {
+              this.deoptimize(func, args);
+              this.logTier(func, "Bytecode VM (after deopt: untaggable prop)", callCount);
+              return null;
+            }
+            continue;
+          }
           if (typeof v !== "number" || !Number.isInteger(v) || v > 2147483647 || v < -2147483648) {
             this.deoptimize(func, args);
             this.logTier(func, "Bytecode VM (after deopt: non-i32 used prop)", callCount);
@@ -645,7 +710,15 @@ export class JitManager {
 
     this.logTier(func, "Wasm", callCount);
     try {
-      const result = fn(...wasmArgs);
+      let result: unknown = fn(...wasmArgs);
+      // 戻り値が tagged (return this.currentTcb 等) ならデコード
+      if (cached.resultTagged && typeof result === "number") {
+        const t = result;
+        if (t === 1) result = null;
+        else if (t === 3) result = undefined;
+        else if (t & 1) result = cached.objTable![t >> 1];
+        else result = t >> 1;
+      }
       // this の StoreProperty write-back: JIT 内で書き換えたプロパティを
       // linear memory から VM の HiddenClass オブジェクトへ反映する。
       // (これが無いと this.state = x 等の変更が VM 側から見えない)
@@ -658,13 +731,28 @@ export class JitManager {
         for (const name of cached.writtenProps) {
           const off = cached.propNames.indexOf(name);
           if (off < 0) continue;
+          let val: unknown = view[off];
+          if (cached.taggedProps?.has(name)) {
+            const t = view[off];
+            if (t === 1) val = null;
+            else if (t === 3) val = undefined;
+            else if (t & 1) val = cached.objTable![t >> 1];
+            else val = t >> 1;
+          }
           const slotIdx = slotIdxs ? slotIdxs[off] : hc.properties.get(name);
-          if (slotIdx !== undefined) slots[slotIdx] = view[off];
-          else jsObjSet(thisObj as any, name, view[off]);
+          if (slotIdx !== undefined) slots[slotIdx] = val;
+          else jsObjSet(thisObj as any, name, val);
         }
       }
       return { result };
     } catch (e) {
+      // ネストアクセス import からの deopt 要求 (数値 deref / own に無い
+      // プロパティ等)。副作用 (write-back) 前なので VM 再実行で正しい
+      if (e === DEOPT_SENTINEL) {
+        this.deoptimize(func, args);
+        this.logTier(func, "Bytecode VM (after deopt: nested slot access)", callCount);
+        return null;
+      }
       // Wasm 自己再帰が深くなると実行スタックが溢れる
       // (RangeError: Maximum call stack size exceeded)。VM はヒープ上の
       // frames 配列なので同じ深さでも溢れない。deopt して VM で再実行する。

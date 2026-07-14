@@ -235,22 +235,62 @@ eq ドメインの中で JS の特殊値をどう表すか:
 - **文字列**: interned string id (i32) は i31 にそのまま乗るが、
   「参照としての文字列」(identity でなく値比較) は別問題 → bail 継続
 
-## 推奨: Phase 33 スコープ
+## spike 結果 (33-1, 2026-07-13, Node/V8)
 
-**案 B を主軸**に、二本立て (数値専用関数は現行モデル維持) で進める:
+| 項目 | 結果 |
+|---|---|
+| (a1) anyref を直接 ref.eq | **validate FAIL** (予想通り: anyref ⊄ eqref) |
+| (a2) `ref.cast (ref null eq)` を挟む | validate は通るが **実行時 `illegal cast` trap** — V8 では JS オブジェクト (internalized host ref) は **eq 階層に入らない** |
+| (c) `(array (ref null any))` round-trip | **同一オブジェクト保存 OK** (identity は JS 境界を往復しても保たれる)。数値 42 → 42 も OK |
+| (b) i31 tag/untag をループ内で毎回 vs 素の i32 | 1 億回ループで **251ms vs 237ms (+6%)** — V8 の TurboFan が tag/untag をほぼ消す。untag コストの恐怖は杞憂 |
+
+### 結論: 設計を 案 C' (Smi 流タグを i32 に埋める) へピボット
+
+**課題 1 の答えは「不成立」** — host オブジェクトを Wasm 内で ref.eq
+できない以上、(ref eq) スロットの主目的 (参照をそのまま持つ) が
+成立しない。フォールバックとして用意していた **object table (index
+参照)** を主軸に格上げする。すると気づく: 参照が「整数 index」なら
+**WasmGC の型は不要で、既存の linear memory の i32 スロットに
+V8 の Smi と同じビットタグを埋めれば足りる**:
 
 ```
-33-1  spike (課題 1/2/4 の分岐点を先に潰す):
-      (a) host ref の any.convert_extern + ref.eq が V8 で動くか
-      (b) untag 往復 vs local 保持のマイクロベンチ
-      (c) WasmGC array 経由の JS オブジェクト identity 保存確認
-33-2  (ref eq) スロットの this-model v2: tagged copy-in/out + write-back
-33-3  emitOp: LoadProperty/StoreProperty の tagged 対応
-      (i31 投機 + ref.test guard + deopt)
-33-4  参照の identity 比較 (== / != / null 比較) を Wasm 内で
-33-5  richards / deltablue / splay で計測 — 「参照を持ち回るだけ」で
-      どこまで解放されるかの実測が案 A へ進む判断材料
-33-6  LEARN-Phase33 (Smi/NaN boxing/i31ref の教材化)
+i32 スロット:
+  偶数 = 数値 (value << 1)          ← V8 の Smi そのもの (30bit 範囲)
+  奇数 = 参照 (tableIdx << 1) | 1   ← object table の index
+  予約 = null / undefined 用の固定タグ値
+```
+
+- identity 比較 = i32 比較 (copy-in 時に同一オブジェクト → 同一 index に
+  dedup するので正しい)
+- null チェック = 定数比較
+- object table は JS 側の配列 (呼び出しごとに length リセットで再利用、
+  アロケーション無し)
+- **ネストアクセス** (`a.link.id`) は import 関数
+  `__load_slot(tableIdx, offset) → tagged i32` で VM に聞く
+  (関数まるごと VM 落ちより桁違いに安い; 案 C の合流)
+- f64 が要る関数はタグと両立しないので現行どおり bail
+  (数値専用関数は現行モデル維持 — 二本立ての方針は不変)
+
+教育的な皮肉: WasmGC の i31ref を調べに行って、**V8 が 30 年前から
+やっている「i32 に 1 bit タグ」に戻ってきた**。ただし (b) の計測で
+「タグ操作は最適化コンパイラがほぼ消す」ことを実証できたのは収穫
+(V8 内部で Smi が速い理由の裏取り)。
+
+## 推奨: Phase 33 スコープ
+
+spike の結果を受けて **案 C' (i32 Smi タグ + object table)** で進める:
+
+```
+33-1  spike — 完了 (上記)
+33-2  tagged this-model: copy-in で Smi タグ化 + object table 構築
+      (dedup) + write-back (奇数 → table 引き、偶数 → >>1)
+33-3  codegen: tagged スロットの LoadProperty/StoreProperty、
+      identity / null 比較、Branch (truthiness)。数値演算に流れる
+      tagged 値は copy-in ガードで Smi と検証して untag
+33-4  ネストアクセス: __load_slot(tableIdx, offset) import
+      (richards の schedule 系が real target)
+33-5  richards / deltablue / splay で計測 → 案 A (struct 移住) の判断
+33-6  LEARN-Phase33 (Smi/NaN boxing/i31ref/spike の教材化)
 ```
 
 **期待値の管理**: 案 B ではネストアクセス (`tcb.link.id`) とメソッド
