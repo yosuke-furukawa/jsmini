@@ -2,6 +2,68 @@
 //
 // 最適化済み SSA IR を Wasm バイナリ (function body) に変換する。
 // CFG → Wasm の structured control flow 変換を行う。
+//
+// ============================================================================
+// 全体アーキテクチャ (Phase 29-33 で増築された各モデルの見取り図)
+// ============================================================================
+//
+// ■ エントリポイント
+//   compileIRToWasm(ir)            — モジュール全体の組み立てと instantiate
+//     └ codegenIR(ir)              — 1 関数分の local 割り当てと body 生成
+//         └ emitOp(op)             — opcode 1 個 → Wasm バイト列
+//   classifyTaggedProps(ir)        — this プロパティの numeric/tagged 分類
+//
+// ■ 値の表現は 3 モデル併用
+//   1. 数値 (基本):   i32、Range 分析が溢れると判断したら関数ごと f64 昇格
+//   2. 配列:          WasmGC array (ref 型 local / param)。host 配列とは
+//                     呼び出し境界で copy-in/out (executeWithArrayArgs)
+//   3. tagged (参照): i32 に V8 Smi 流の 1bit タグ (Phase 33)
+//                       偶数 = 数値 << 1 (30bit)
+//                       奇数 = object table index << 1 | 1
+//                       null = 1 / undefined = 3 (TAG_NULL / TAG_UNDEF)
+//                     identity 比較は生 i32 比較 (copy-in が同一オブジェクト
+//                     → 同一 index に dedup するため)。ネスト読み
+//                     (this.a.b) は __load_slot import で VM に問い合わせ
+//
+// ■ Wasm 関数のパラメータ配置 (この順序。executeWasm の push 順と一致必須)
+//   [ユーザ引数 (配列は ref 型)]
+//   [upvalue (数値。cluster 転送専用スロット含む)]
+//   [this (i32 base addr、hasThis のみ)]
+//   [読み取り専用グローバル (tryCall 経路のみ。StoreGlobal 持ちは reject)]
+//   [cluster extraBox (main のみ。callee 専用 upvalue box の現在値)]
+//
+// ■ local の配置 (この順序。グループごとに型宣言される)
+//   [scalar (wasmType = i32 or f64)]     ... 通常の一時値・spill
+//   [i32 グループ]                        ... growable 配列の length +
+//                                            tagged 値 / LoadThis /
+//                                            null・undefined 定数 (f64 関数
+//                                            でも生 i32 で持つ必要がある)
+//   [ref グループ]                        ... WasmGC 配列の参照
+//   ※ グループ境界の計数は codegenIR と compileIRToWasm で 1 バイトでも
+//     ずれると「型は合うが別の変数を読む」事故になる (Phase 33-6 で
+//     この同族バグを 3 件修正した。数え方は totalParamCount 基準で統一)
+//
+// ■ クラスタコンパイル (Phase 32)
+//   upvalue 経由で呼ばれる兄弟クロージャを同一モジュールの関数として
+//   一緒にコンパイルし、呼び出しを直接 call にする。関数 index は
+//   [imports][main][callee0..N][__grow][配列ヘルパ] の順。callee の
+//   upvalue は「呼び出し元の param 転送 (own)」か「main の extraBox param
+//   (extra)」で供給する (op.clusterSrcs に呼び出しサイトごとに記録)
+//
+// ■ 正しさの哲学: 型チェックは呼び出し境界に集約
+//   copy-in (executeWasm) が「コンパイル時の仮定」と実際の値を突き合わせ、
+//   外れたら deopt → VM。Wasm 内は無検査で全速。唯一の実行時例外は
+//   ネスト読みの __load_slot で、危険を検出すると DEOPT_SENTINEL を throw
+//   し、executeWasm が捕捉して VM 再実行する (読みは純粋 + write-back 前
+//   なので再実行安全)
+//
+// ■ このファイルを触るときの心得
+//   - emitOp は「スタック効果」が命。値を積んだら必ず消費者が拾う配置か、
+//     drop するか、local に退避する (Phase 29/30 のバグの大半はここ)
+//   - 新しい op を無視する default は禁忌 (silent no-emit + Pop で
+//     スタック破壊した前科あり)。最低でも reject に倒す
+//   - local/param の計数を変えるときは codegenIR と compileIRToWasm の
+//     両方を必ず同時に見る
 
 import type { IRFunction, Block, Op, PhiOp, IRType } from "./types.js";
 import { isPhi } from "./types.js";
@@ -61,6 +123,96 @@ function classifyMathCall(name: string, argc: number): "native_unary" | "native_
   return "unsupported";
 }
 
+// ============================================================================
+// 配列の安全性解析 (compileIRToWasm の reject 判定用ヘルパ)
+// ============================================================================
+
+// escape 解析: 配列 ref が「配列オペランド (args[0]) / Phi 入力 / クラスタ
+// 呼び出しの引数」以外で使われたら、その使い方 (Return / 未解決 Call 引数 /
+// ArraySet の value 等) では WasmGC ref を外に出せないので reject する。
+// 戻り値: 違反の説明文字列 (reject 理由)、問題なければ null
+function findArrayEscape(irFunc: IRFunction, arrayRefValues: Set<number>): string | null {
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      for (let i = 0; i < op.args.length; i++) {
+        const argId = op.args[i];
+        if (!arrayRefValues.has(argId)) continue;
+        const isArrayOperand =
+          ((op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "ArrayPush") && i === 0)
+          // クラスタ呼び出しの引数は同一モジュール内の WasmGC ref 渡し (escape しない)
+          || (op.opcode === "Call" && op.clusterCallee !== undefined);
+        if (!isArrayOperand) {
+          return `array ref escapes via ${op.opcode} arg ${i}`;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// 要素の型チェック: WasmGC array は i32/f64 のみ。配列に格納する値が
+// object (Alloc — base address は i32 だが意味的には非数値) だと、数値配列
+// として誤コンパイルされる (a[0]+a[1] が文字列連結でなくアドレスの加算に
+// なる)。「数値を生む opcode」のホワイトリストで store 値を検査する。
+// 戻り値: 違反があれば reject 理由、なければ null
+function findNonNumericArrayStore(irFunc: IRFunction): string | null {
+  const opByIdForElem = new Map<number, Op>();
+  for (const block of irFunc.blocks) {
+    for (const phi of block.phis) opByIdForElem.set(phi.id, phi);
+    for (const op of block.ops) opByIdForElem.set(op.id, op);
+  }
+  const NUMERIC_OPCODES = new Set<string>([
+    "Param", "Add", "Sub", "Mul", "Div", "Mod", "Negate",
+    "BitAnd", "BitOr", "BitXor", "BitNot", "ShiftLeft", "ShiftRight",
+    "LessThan", "LessEqual", "GreaterThan", "GreaterEqual",
+    "Equal", "StrictEqual", "NotEqual", "StrictNotEqual", "Not",
+    "ArrayGet", "ArrayLength", "Call", "TypeGuard", "LoadUpvalue", "LoadThis",
+  ]);
+  const isNumericValue = (id: number | undefined): boolean => {
+    if (id === undefined) return false; // 引数欠落 (object リテラル等を落とした)
+    const o = opByIdForElem.get(id);
+    if (!o) return false;
+    if (o.opcode === "Const") return typeof o.value === "number" || typeof o.value === "boolean";
+    if (o.opcode === "Phi") return (o as PhiOp).inputs.every(([, vid]) => isNumericValue(vid));
+    return NUMERIC_OPCODES.has(o.opcode);
+  };
+  for (const block of irFunc.blocks) {
+    for (const op of block.ops) {
+      // ArrayPush(arr, value) の value、ArraySet(arr, idx, value) の value
+      const isPush = op.opcode === "ArrayPush";
+      const isSet = op.opcode === "ArraySet";
+      if (!isPush && !isSet) continue;
+      const valId = isPush ? op.args[1] : op.args[2];
+      if (!isNumericValue(valId)) {
+        return "non-numeric value stored in array";
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 1 関数分の IR → Wasm body 生成。
+ *
+ * 処理は大きく 2 段:
+ *   フェーズ A (local 割り当て): 全 op に「スタックに残す/ local に退避」を
+ *     決め、退避するものに local index を振る。順序が命 (ファイル冒頭の
+ *     「local の配置」参照)
+ *   フェーズ B (emission): CFG をトポロジカル順に structured control flow
+ *     (block/loop/br) へ変換しつつ、emitOp で opcode を吐く
+ *
+ * @param forceF64        Range 分析の結果、関数全体を f64 で計算するか
+ * @param arrayTypeIdx    WasmGC 配列型の type index (-1 = 配列なし)
+ * @param importIndices   import 名 → 関数 index (Math host / __load_slot 等)
+ * @param arrayRefValues  「配列 ref を運ぶ」op id 集合 (ref local を割り当てる)
+ * @param growableArrayValues  [] 由来の動的成長配列の op id 集合
+ * @param growFnIndex     __grow ヘルパの関数 index (-1 = 不要)
+ * @param globalsAsParams tryCall 経路 (グローバル = 読み取り専用 param) か
+ *                        OSR 経路 (グローバル = zero-init local) か
+ * @param cluster / clusterFuncIndexBase  クラスタ情報と callee の index 起点
+ * @param taggedProps     tagged (Smi タグ) 扱いする this プロパティ名
+ * @param nestedPropNames __load_slot の propId 表 (index がそのまま id)
+ */
 export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -1, importIndices?: Map<string, number>, importCount = 0, arrayRefValues: Set<number> = new Set(), growableArrayValues: Set<number> = new Set(), growFnIndex = -1, globalsAsParams = false, cluster: ClusterInfo | null = null, clusterFuncIndexBase = -1, taggedProps: Set<string> = new Set(), nestedPropNames: string[] = []): { body: number[]; extraLocals: number; lenLocals: number; refLocals: number; wat: string; propNames: string[]; writtenProps: string[]; globalNames: string[]; hasStoreGlobal: boolean; resultTagged: boolean } {
   const body: number[] = [];
   const watLines: string[] = [];
@@ -154,6 +306,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     + (globalsAsParams ? globalNames.length : 0)
     + (cluster ? cluster.extraBoxCount : 0);
 
+  // ======== フェーズ A: local 割り当て ========
   // Op ID → Wasm local index のマッピング
   // Wasm locals: [params..., upvalue params..., this param..., global params...,
   //               phi locals..., temp locals...]
@@ -217,6 +370,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     }
   }
 
+  // ---- A-2: インライン値の安全判定 (Phase 29 の 2 大罠のガード) ----
   // 計算値 (Const/Param 以外) を local に入れず「スタックに残したまま」消費する
   // 最適化は、次の 2 条件が両方成り立つときだけ正しい:
   //   (a) 消費する op が定義の *直後* にある (間に別の push が挟まらない)。
@@ -303,6 +457,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     }
   }
 
+  // ---- A-3: Phi 入力の local 化 ----
   // Phi の入力値も local に格納する必要がある (back edge の local.set で使うため)
   for (const block of irFunc.blocks) {
     for (const phi of block.phis) {
@@ -316,6 +471,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     }
   }
 
+  // ---- A-4: tagged 値の集合構築 (Phase 33) ----
   // tagged スロット (Phase 33): tagged prop の LoadProperty 結果 id 集合。
   // Branch の truthiness 判定で 2 回読むので local を強制する
   const taggedValues = new Set<number>();
@@ -393,6 +549,9 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   const growableLenLocal = new Map<number, number>();
   const growableBackingLocal = new Map<number, number>();
 
+  // ---- A-5: i32 グループ (scalar 境界の確定) ----
+  // ここまでが scalar (wasmType) local。以降は型の違う local を
+  // グループ単位で追加していく (宣言順 = index 順に一致させること)。
   // (1) len local (i32 group): growable 配列ごとに 1 本。
   // tagged 値 / LoadThis / null・undefined 定数の local もこの i32 group に
   // 相乗りさせる (f64 関数でも生の i32 で持つ必要がある。Phase 33-6)
@@ -420,6 +579,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   }
   const lenLocals = nextLocal - scalarLocalEnd;
 
+  // ---- A-6: ref グループ (WasmGC 配列参照) ----
   // (2) ref group: 固定配列 (AllocArray) + 配列 Phi + growable の backing
   const refLocalStart = nextLocal;
   for (const block of irFunc.blocks) {
@@ -477,6 +637,8 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   const cfg = analyzeCFG(irFunc);
 
   // Phi の入力を書き込む: predecessor ブロックの末尾で local.set
+  // ======== フェーズ B: emission ========
+  // ---- B-1: Phi 書き込み表 (エッジ → local.set のリスト) ----
   // { blockId → [{ phiLocal, valueId, phiTagged }] }
   // phiTagged: 書き込み先が tagged ドメインの Phi (null/undefined 定数は
   // タグ値 1/3 で書く。非 tagged Phi へは従来の 0 のまま — 無条件にタグ化
@@ -501,6 +663,10 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
   const topoNext = new Map<number, number>();
   for (let i = 0; i + 1 < cfg.topoOrder.length; i++) topoNext.set(cfg.topoOrder[i], cfg.topoOrder[i + 1]);
 
+  // ---- B-2: CFG → structured control flow (メインループ) ----
+  // ブロックを topo 順に出力しながら block/loop を開閉する。
+  // ダイヤモンド (if-else/||/三項) の向きと join の扱いは Phase 31/32 の
+  // LEARN 参照。ここが本ファイルで一番壊れやすい
   // トポロジカル順にブロックを処理
   for (const blockId of cfg.topoOrder) {
     const block = blockMap.get(blockId);
@@ -792,6 +958,110 @@ type GrowCtx = {
   arrayTypeIdx: number;
 };
 
+
+// クラスタ callee 群を main の直後 (importCount+1 から) の関数として追加する。
+// 呼び出し規約: [params (配列は ref)..., upvalues (数値。clusterSrcs の
+// own 転送スロット含む)...]。dead slot (純度チェックで取り消された callee)
+// は何もしないスタブで埋め、関数 index の安定性を保つ。
+// ※ callee の local グループ構成 (scalar/len/ref) は main と同じ規約。
+//   ここの計数が codegenIR とずれると local 添字ズレ事故になる (Phase 33-6)
+function addClusterCalleeFunctions(
+  builder: WasmBuilder,
+  cluster: ClusterInfo,
+  useF64: boolean,
+  wasmType: number,
+  arrayTypeIdx: number,
+  importIndices: Map<string, number>,
+  growFnIndex: number,
+  results: number[],
+): boolean {
+  for (let ci = 0; ci < cluster.callees.length; ci++) {
+    const callee = cluster.callees[ci];
+    // dead slot: index を保つためスタブ関数で埋める (どこからも呼ばれない)
+    if (cluster.deadCallees?.has(ci)) {
+      const stubBody = useF64
+        ? [WASM_OP.f64_const, ...f64ToBytes(0), WASM_OP.end]
+        : [WASM_OP.i32_const, 0, WASM_OP.end];
+      builder.addFunction("__dead", [], results, stubBody, 0, 0, 1);
+      continue;
+    }
+    const cir = callee.ir;
+    // callee の配列 param 検出 (main と同じ規則)
+    const cArrayParams = new Set<number>();
+    const cParamIdToIndex = new Map<number, number>();
+    for (const b of cir.blocks) {
+      for (const o of b.ops) {
+        if (o.opcode === "Param" && o.index !== undefined) cParamIdToIndex.set(o.id, o.index);
+      }
+    }
+    const cArrayRefValues = new Set<number>();
+    for (const b of cir.blocks) {
+      for (const o of b.ops) {
+        if ((o.opcode === "ArrayGet" || o.opcode === "ArraySet" || o.opcode === "ArrayLength") && o.args[0] !== undefined) {
+          const pIdx = cParamIdToIndex.get(o.args[0]);
+          if (pIdx === undefined) {
+            // 配列が param 以外から来る callee は jit 側で除外済みのはずだが安全側で bail
+            if (DEBUG_WASM) console.error("[compileIRToWasm] reject: cluster callee has non-param array");
+            return false;
+          }
+          cArrayParams.add(pIdx);
+          cArrayRefValues.add(o.args[0]);
+        }
+      }
+    }
+    let cUpvalueCount = 0;
+    for (const b of cir.blocks) {
+      for (const o of b.ops) {
+        if ((o.opcode === "LoadUpvalue" || o.opcode === "StoreUpvalue") && o.index !== undefined) {
+          cUpvalueCount = Math.max(cUpvalueCount, o.index + 1);
+        }
+        if (o.clusterSrcs) {
+          for (const src of o.clusterSrcs) {
+            if (src.kind === "own") cUpvalueCount = Math.max(cUpvalueCount, src.i + 1);
+          }
+        }
+      }
+    }
+    // callee 自身も兄弟を呼びうる (深さ 2+) ので cluster ctx を渡す。
+    // extraBox param は main 専用 (callee の totalParamCount に混ぜると
+    // local 添字がずれる) ので extraBoxCount=0 のビューを渡す
+    const cg = codegenIR(cir, useF64, arrayTypeIdx, importIndices, builder.importCount, cArrayRefValues, new Set(), growFnIndex, false, { ...cluster, extraBoxCount: 0 }, builder.importCount + 1);
+    const cParams: number[] = [];
+    let cParamValCount = 0;
+    for (let i = 0; i < cir.paramCount; i++) {
+      if (cArrayParams.has(i)) cParams.push(...refType(arrayTypeIdx));
+      else cParams.push(wasmType);
+      cParamValCount++;
+    }
+    for (let i = 0; i < cUpvalueCount; i++) { cParams.push(wasmType); cParamValCount++; }
+    const cGroups: LocalGroup[] = [];
+    const cLocalType = useF64 ? [WASM_TYPE.f64] : [wasmType];
+    if (cg.extraLocals > 0) cGroups.push({ count: cg.extraLocals, type: cLocalType });
+    if (cg.lenLocals > 0) cGroups.push({ count: cg.lenLocals, type: [WASM_TYPE.i32] });
+    if (cg.refLocals > 0 && arrayTypeIdx >= 0) cGroups.push({ count: cg.refLocals, type: refType(arrayTypeIdx) });
+    builder.addFunction(cir.name || "__cluster_callee", cParams, results, cg.body,
+      cg.extraLocals + cg.lenLocals + cg.refLocals,
+      cParamValCount, 1, cGroups.length > 0 ? cGroups : undefined);
+  }
+  return true;
+}
+
+/**
+ * opcode 1 個 → Wasm バイト列。
+ *
+ * 【スタック規律 — このファイルで一番大事なルール】
+ * 各 case は「オペランドを emitLoadValue で積み、結果を 1 個残すか、
+ * maybeStoreLocal で退避するか、値を残さないなら何も積まない」を厳守する。
+ * - 値を積んだのに誰も消費しない → スタック破壊 (validation error なら
+ *   まだ幸運。黙って別の値を壊すのが最悪パターン)
+ * - 新しい opcode を無視する default 追加は禁忌 (Phase 30 の richards
+ *   無限ループの真因)
+ *
+ * ctx 系の末尾引数 (growCtx / clusterCtx / usedIds / taggedValues /
+ * taggedProps / nestedPropNames) は codegenIR が組み立てて渡す。
+ * それぞれ growable 配列 / クラスタ直接 call / Call 結果の drop 判定 /
+ * tagged 値の emit 分岐に使う。
+ */
 function emitOp(
   op: Op,
   body: number[],
@@ -1622,6 +1892,20 @@ export function classifyTaggedProps(irFunc: IRFunction): { taggedProps: Set<stri
 
 // ========== 完全なパイプライン: IR → Wasm module ==========
 
+/**
+ * IR → Wasm モジュールの組み立てと instantiate。
+ *
+ * 大まかな流れ (バナーコメント参照):
+ *   1. reject スキャン (Wasm 化できない op があれば null → VM フォールバック)
+ *   2. tagged 分類 → f64 判定 (tagged チェーンは range 対象外)
+ *   3. 配列パラメータ検出 / arrayRefValues / escape 解析 / 要素型チェック
+ *   4. codegenIR で main の body 生成 → パラメータ組立 → addFunction
+ *   5. クラスタ callee / __grow / 配列ヘルパを同一モジュールに追加
+ *   6. instantiate して実行情報 (propNames/taggedProps/guards 素材等) を返す
+ *
+ * 戻り値のフィールドは executeWasm (jit.ts) の copy-in/out 契約そのもの。
+ * ここを変えるときは jit.ts 側の対応する読み手を必ず確認すること。
+ */
 export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, cluster?: ClusterInfo | null): { instance: WebAssembly.Instance; funcName: string; hasArrayOps?: boolean; arrayParams?: number[]; upvalueCount?: number; hasThis?: boolean; propNames?: string[]; writtenProps?: string[]; taggedProps?: string[]; resultTagged?: boolean; nestedPropNames?: string[]; slotHolder?: { fn: ((tagged: number, propId: number) => number) | null }; globalNames?: string[]; memory?: WebAssembly.Memory; hasAwait?: boolean; jspiWrapped?: (...args: number[]) => Promise<number> } | null {
   try {
     // builder がスタック合流の深さ不一致を検出した関数は表現不能 → 拒否
@@ -1629,6 +1913,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
       if (DEBUG_WASM) console.error("[compileIRToWasm] reject: stack depth mismatch at merge (unstructured stack flow)");
       return null;
     }
+    // ======== 1. reject スキャン ========
     // IR に Wasm 化できない Op が含まれてたらスキップ
     let hasArrayOps = false;
     let hasSelfRecursion = false;
@@ -1684,6 +1969,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
       }
     }
 
+    // ======== 2. モジュール骨格と import ========
     const builder = new WasmBuilder();
     const importIndices = new Map<string, number>();
 
@@ -1734,6 +2020,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
       arrayTypeIdx = builder.addArray(wasmType);
     }
 
+    // ======== 3. 配列まわりの解析 ========
     // 配列パラメータの特定: IR の ArrayGet/ArraySet の args[0] が Param なら配列パラメータ
     const arrayParams = new Set<number>(); // Param index
     if (hasArrayOps) {
@@ -1800,63 +2087,16 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
           }
         }
       }
-      // escape 解析: 配列 ref が 配列オペランド (args[0]) か Phi 入力以外で
-      // 使われたら (Return / Call 引数 / ArraySet の value 等) VM フォールバック。
-      // growable は ArrayPush の args[0] も許可。
-      for (const block of irFunc.blocks) {
-        for (const op of block.ops) {
-          for (let i = 0; i < op.args.length; i++) {
-            const argId = op.args[i];
-            if (!arrayRefValues.has(argId)) continue;
-            const isArrayOperand =
-              ((op.opcode === "ArrayGet" || op.opcode === "ArraySet" || op.opcode === "ArrayLength" || op.opcode === "ArrayPush") && i === 0)
-              // クラスタ呼び出しの引数は同一モジュール内の WasmGC ref 渡し (escape しない)
-              || (op.opcode === "Call" && op.clusterCallee !== undefined);
-            if (!isArrayOperand) {
-              if (DEBUG_WASM) console.error("[compileIRToWasm] reject: array ref escapes via", op.opcode, "arg", i);
-              return null;
-            }
-          }
-        }
+      // escape 解析と要素型チェック (詳細はヘルパのコメント参照)
+      const escapeReason = findArrayEscape(irFunc, arrayRefValues);
+      if (escapeReason) {
+        if (DEBUG_WASM) console.error("[compileIRToWasm] reject:", escapeReason);
+        return null;
       }
-      // 要素の型チェック: WasmGC array は i32/f64 のみ。配列に格納する値が
-      // object (Alloc — base address は i32 だが意味的には非数値) だと、
-      // 数値配列として誤コンパイルされる (a[0]+a[1] が文字列連結でなく
-      // アドレスの加算になる)。Alloc を格納する配列は VM フォールバック。
-      const opByIdForElem = new Map<number, Op>();
-      for (const block of irFunc.blocks) {
-        for (const phi of block.phis) opByIdForElem.set(phi.id, phi);
-        for (const op of block.ops) opByIdForElem.set(op.id, op);
-      }
-      // 数値を生む opcode のホワイトリスト (これ以外を配列に格納したら bail)。
-      // LoadGlobal("undefined") / Alloc(object) / LoadProperty 等は非数値。
-      const NUMERIC_OPCODES = new Set<string>([
-        "Param", "Add", "Sub", "Mul", "Div", "Mod", "Negate",
-        "BitAnd", "BitOr", "BitXor", "BitNot", "ShiftLeft", "ShiftRight",
-        "LessThan", "LessEqual", "GreaterThan", "GreaterEqual",
-        "Equal", "StrictEqual", "NotEqual", "StrictNotEqual", "Not",
-        "ArrayGet", "ArrayLength", "Call", "TypeGuard", "LoadUpvalue", "LoadThis",
-      ]);
-      const isNumericValue = (id: number | undefined): boolean => {
-        if (id === undefined) return false; // 引数欠落 (object リテラル等を落とした)
-        const o = opByIdForElem.get(id);
-        if (!o) return false;
-        if (o.opcode === "Const") return typeof o.value === "number" || typeof o.value === "boolean";
-        if (o.opcode === "Phi") return (o as PhiOp).inputs.every(([, vid]) => isNumericValue(vid));
-        return NUMERIC_OPCODES.has(o.opcode);
-      };
-      for (const block of irFunc.blocks) {
-        for (const op of block.ops) {
-          // ArrayPush(arr, value) の value、ArraySet(arr, idx, value) の value
-          const isPush = op.opcode === "ArrayPush";
-          const isSet = op.opcode === "ArraySet";
-          if (!isPush && !isSet) continue;
-          const valId = isPush ? op.args[1] : op.args[2];
-          if (!isNumericValue(valId)) {
-            if (DEBUG_WASM) console.error("[compileIRToWasm] reject: non-numeric value stored in array");
-            return null;
-          }
-        }
+      const elemReason = findNonNumericArrayStore(irFunc);
+      if (elemReason) {
+        if (DEBUG_WASM) console.error("[compileIRToWasm] reject:", elemReason);
+        return null;
       }
     }
 
@@ -1907,6 +2147,8 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
       builder.addGlobal(WASM_TYPE.i32, true, 0); // global 0 = heapPtr, mutable, init=0
     }
 
+    // ======== 4. main のパラメータ組立と addFunction ========
+    // (順序はファイル冒頭「パラメータ配置」と executeWasm の push 順に一致)
     // パラメータ: 配列は ref $array、他は i32/f64、upvalue も追加。
     // params はエンコード済みバイト列。ref 型は 2 バイトなので、Wasm の型
     // セクションが要求する「値型の個数」は別途 paramValTypeCount で数える。
@@ -1990,77 +2232,10 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
       wasmExtraLocals + lenLocals + refLocals > 0 ? wasmExtraLocals + lenLocals + refLocals : 0,
       totalParamCount, 1, extraLocalGroups);
 
-    // クラスタ callee を main の直後 (importCount+1 から) に配置。
-    // callee の呼び出し規約: [params (配列は ref)..., upvalues (数値)...]
+    // ======== 5. クラスタ callee / ヘルパ関数 ========
     if (cluster) {
-      for (let ci = 0; ci < cluster.callees.length; ci++) {
-        const callee = cluster.callees[ci];
-        // dead slot (純度チェックで取り消された callee): index を保つため
-        // 何もしないスタブ関数で埋める (どこからも呼ばれない)
-        if (cluster.deadCallees?.has(ci)) {
-          const stubBody = useF64
-            ? [WASM_OP.f64_const, ...f64ToBytes(0), WASM_OP.end]
-            : [WASM_OP.i32_const, 0, WASM_OP.end];
-          builder.addFunction("__dead", [], results, stubBody, 0, 0, 1);
-          continue;
-        }
-        const cir = callee.ir;
-        // callee の配列 param 検出 (main と同じ規則)
-        const cArrayParams = new Set<number>();
-        const cParamIdToIndex = new Map<number, number>();
-        for (const b of cir.blocks) {
-          for (const o of b.ops) {
-            if (o.opcode === "Param" && o.index !== undefined) cParamIdToIndex.set(o.id, o.index);
-          }
-        }
-        const cArrayRefValues = new Set<number>();
-        for (const b of cir.blocks) {
-          for (const o of b.ops) {
-            if ((o.opcode === "ArrayGet" || o.opcode === "ArraySet" || o.opcode === "ArrayLength") && o.args[0] !== undefined) {
-              const pIdx = cParamIdToIndex.get(o.args[0]);
-              if (pIdx === undefined) {
-                // 配列が param 以外から来る callee は jit 側で除外済みのはずだが安全側で bail
-                if (DEBUG_WASM) console.error("[compileIRToWasm] reject: cluster callee has non-param array");
-                return null;
-              }
-              cArrayParams.add(pIdx);
-              cArrayRefValues.add(o.args[0]);
-            }
-          }
-        }
-        let cUpvalueCount = 0;
-        for (const b of cir.blocks) {
-          for (const o of b.ops) {
-            if ((o.opcode === "LoadUpvalue" || o.opcode === "StoreUpvalue") && o.index !== undefined) {
-              cUpvalueCount = Math.max(cUpvalueCount, o.index + 1);
-            }
-            if (o.clusterSrcs) {
-              for (const src of o.clusterSrcs) {
-                if (src.kind === "own") cUpvalueCount = Math.max(cUpvalueCount, src.i + 1);
-              }
-            }
-          }
-        }
-        // callee 自身も兄弟を呼びうる (深さ 2+) ので cluster ctx を渡す
-        // extraBox param は main 専用 (callee の own-box 供給は param 転送)。
-        // callee の totalParamCount に混ぜると local 添字がずれる
-        const cg = codegenIR(cir, useF64, arrayTypeIdx, importIndices, builder.importCount, cArrayRefValues, new Set(), growFnIndex, false, { ...cluster, extraBoxCount: 0 }, builder.importCount + 1);
-        const cParams: number[] = [];
-        let cParamValCount = 0;
-        for (let i = 0; i < cir.paramCount; i++) {
-          if (cArrayParams.has(i)) cParams.push(...refType(arrayTypeIdx));
-          else cParams.push(wasmType);
-          cParamValCount++;
-        }
-        for (let i = 0; i < cUpvalueCount; i++) { cParams.push(wasmType); cParamValCount++; }
-        const cGroups: LocalGroup[] = [];
-        const cLocalType = useF64 ? [WASM_TYPE.f64] : [wasmType];
-        if (cg.extraLocals > 0) cGroups.push({ count: cg.extraLocals, type: cLocalType });
-        if (cg.lenLocals > 0) cGroups.push({ count: cg.lenLocals, type: [WASM_TYPE.i32] });
-        if (cg.refLocals > 0 && arrayTypeIdx >= 0) cGroups.push({ count: cg.refLocals, type: refType(arrayTypeIdx) });
-        builder.addFunction(cir.name || "__cluster_callee", cParams, results, cg.body,
-          cg.extraLocals + cg.lenLocals + cg.refLocals,
-          cParamValCount, 1, cGroups.length > 0 ? cGroups : undefined);
+      if (!addClusterCalleeFunctions(builder, cluster, useF64, wasmType, arrayTypeIdx, importIndices, growFnIndex, results)) {
+        return null;
       }
     }
     // __grow(old, mincap) → ref: 容量を max(mincap, oldcap*2) に拡張して
@@ -2125,6 +2300,7 @@ export function compileIRToWasm(irFunc: IRFunction, osrLocalCount?: number, clus
 
     const module = new WebAssembly.Module(wasmBytes);
 
+    // ======== 6. instantiate と実行情報の返却 ========
     // imports: JSPI __await + Math host imports
     const importObject: Record<string, Record<string, unknown>> = {};
     const env: Record<string, unknown> = {};
