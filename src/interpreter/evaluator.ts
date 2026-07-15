@@ -165,8 +165,18 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   // (host の ToNumber に任せると JSString が "[object Object]" 経由で NaN になる)
   const twNumArg = (v: unknown): unknown => {
     if (isJSString(v)) return Number(jsStringToString(v));
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) return NaN;
+    // 配列は安全 join 経由で数値化 (JSString 要素を host join に掛けると
+    // "[object Object]" になる)
+    if (Array.isArray(v)) return Number(arrayToPrimitiveString(v));
+    if (v !== null && typeof v === "object") return NaN;
     return v;
+  };
+  // 文字列ビルトイン (String/parseInt/parseFloat) 用の前処理 (VM 側 strConv と同一規則)
+  const twStrConv = (v: unknown): string => {
+    if (isJSString(v)) return jsStringToString(v);
+    if (Array.isArray(v)) return arrayToPrimitiveString(v);
+    if (v !== null && typeof v === "object") return "[object Object]";
+    return String(v);
   };
   // Number: JSString を受け取れるカスタムコンストラクタ (host Number の statics は引き継ぐ)
   const NumberCtor = function(this: any, v?: unknown) {
@@ -186,7 +196,7 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   // String: JSString を受け取れるカスタムコンストラクタ。
   // String() 無引数は "" だが String(undefined) は "undefined" (arguments.length で判別)
   const StringCtor = function(this: any, v?: unknown) {
-    const s = isJSString(v) ? jsStringToString(v) : (arguments.length === 0 ? "" : String(v));
+    const s = arguments.length === 0 ? "" : twStrConv(v);
     if (new.target) return new String(s);
     return internString(s);
   } as unknown as StringConstructor;
@@ -199,8 +209,8 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   // グローバル関数
   env.defineReadOnly("isNaN", (v: unknown) => Number.isNaN(Number(twNumArg(v))));
   env.defineReadOnly("isFinite", (v: unknown) => Number.isFinite(Number(twNumArg(v))));
-  env.defineReadOnly("parseInt", (s: unknown, radix?: number) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
-  env.defineReadOnly("parseFloat", (s: unknown) => parseFloat(isJSString(s) ? jsStringToString(s) : String(s)));
+  env.defineReadOnly("parseInt", (s: unknown, radix?: number) => parseInt(twStrConv(s), radix));
+  env.defineReadOnly("parseFloat", (s: unknown) => parseFloat(twStrConv(s)));
 
   // Math — 数値メソッドは引数を twNumArg で前処理してから host に渡す
   // (JSString の "5" が NaN になる・プレーンオブジェクトの挙動が VM とズレるのを防ぐ)

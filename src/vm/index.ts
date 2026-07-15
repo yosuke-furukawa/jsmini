@@ -331,7 +331,10 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   // (配列は host Array.prototype 経由で正しく数値化できるので host に委ねる)
   const numArg = (v: unknown): unknown => {
     if (isJSString(v)) return Number(jsStringToString(v));
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) return NaN;
+    // 配列は安全 join 経由で数値化 (host に渡すと jsmini オブジェクト要素の
+    // null proto で join が throw する)
+    if (Array.isArray(v)) return Number(arrayToPrimitiveString(v));
+    if (v !== null && typeof v === "object") return NaN;
     return v;
   };
   // host の文字列ビルトイン (String/parseInt/parseFloat) 用の前処理。
