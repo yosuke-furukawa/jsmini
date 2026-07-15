@@ -772,16 +772,24 @@ class BytecodeCompiler {
         this.emit("StaLocal", discSlot);
         this.emit("Pop");
 
-        // case 内の function 宣言は switch ブロックに block-scoped (strict)。
-        // BlockStatement と同じ scopeStack シャドウイングで、全 case の宣言を
-        // 比較フェーズより前に巻き上げる (case の test からも呼べるため)
+        // case 内の function 宣言と let/const は switch ブロックに block-scoped
+        // (strict)。BlockStatement と同じ scopeStack シャドウイングで、
+        // function 宣言は比較フェーズより前に巻き上げる (case の test からも
+        // 呼べるため)。let/const は外に漏らさない (pop で不可視に戻る)
         const switchFnDecls = stmt.cases.flatMap((c: any) =>
           (c.consequent ?? []).filter((s: any) => s.type === "FunctionDeclaration"));
-        const hasSwitchScoped = switchFnDecls.length > 0;
+        const switchLexicals = stmt.cases.flatMap((c: any) =>
+          (c.consequent ?? []).filter((s: any) => s.type === "VariableDeclaration" && s.kind !== "var"));
+        const hasSwitchScoped = switchFnDecls.length > 0 || switchLexicals.length > 0;
         if (hasSwitchScoped) {
           this.scopeStack.push(new Map(this.locals));
           for (const s of switchFnDecls) {
             if ((s as any).id?.name) this.locals.delete((s as any).id.name);
+          }
+          for (const s of switchLexicals) {
+            for (const decl of (s as any).declarations) {
+              if (decl.id.type === "Identifier") this.locals.delete(decl.id.name);
+            }
           }
         }
         this.blockDepth++;
