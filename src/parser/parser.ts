@@ -946,6 +946,10 @@ export function parse(source: string): Program {
     if (current().type === "PlusPlus" || current().type === "MinusMinus") {
       const operator = eat(current().type).value as "++" | "--";
       const argument = parseUnary();
+      // ++/-- の対象は変数かプロパティのみ (strict では early SyntaxError)
+      if (argument.type !== "Identifier" && argument.type !== "MemberExpression") {
+        throw new SyntaxError("Invalid left-hand side expression in prefix operation");
+      }
       return { type: "UpdateExpression", operator, argument: argument as any, prefix: true };
     }
     if (current().type === "Typeof" || current().type === "Delete" || current().type === "Void") {
@@ -1076,6 +1080,9 @@ export function parse(source: string): Program {
     // postfix ++/--
     if (current().type === "PlusPlus" || current().type === "MinusMinus") {
       const operator = eat(current().type).value as "++" | "--";
+      if (expr.type !== "Identifier" && expr.type !== "MemberExpression") {
+        throw new SyntaxError("Invalid left-hand side expression in postfix operation");
+      }
       return { type: "UpdateExpression", operator, argument: expr as any, prefix: false };
     }
     return expr;

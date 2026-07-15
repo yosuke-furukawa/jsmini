@@ -170,6 +170,7 @@ function translateGCBytecode(
       case "LdaConst": {
         const val = constants[instr.operand!];
         if (typeof val !== "number") return null;
+        if ((val | 0) !== val) return null; // i32 で表現不能な定数は誤 wrap になるので compile 失敗
         out.push(WASM_OP.i32_const, ...i32ToLEB128(val | 0));
         break;
       }
@@ -226,6 +227,9 @@ function translateGCBytecode(
           break;
         }
         out.push(WASM_OP.i32_const, 0x00);
+        break;
+
+      case "CheckGlobal": // callee 存在チェック専用 (スタック効果なし) — compile 時に解決済みなので skip
         break;
 
       case "LdaGlobal": {
@@ -304,6 +308,7 @@ function translateGCSingle(
     case "LdaConst": {
       const val = constants[instr.operand!];
       if (typeof val !== "number") return null;
+      if ((val | 0) !== val) return null; // i32 で表現不能な定数は誤 wrap になるので compile 失敗
       out.push(WASM_OP.i32_const, ...i32ToLEB128(val | 0));
       return out;
     }

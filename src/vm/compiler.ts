@@ -27,6 +27,8 @@ class BytecodeCompiler {
   private isGenerator = false;
   private isAsync = false;
   private lexicalLocals = new Set<string>(); // let/const で宣言されたローカル変数名
+  private constLocals = new Set<string>(); // const で宣言された変数名 (再代入を禁止するため)
+  private blockDepth = 0; // BlockStatement のネスト深さ (ブロック内 function 宣言の判定用)
   private upvalues: { name: string; parentSlot: number }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
@@ -117,6 +119,20 @@ class BytecodeCompiler {
     return -1;
   }
 
+  // emitLoad が最終的に LdaGlobal に落とすか (= グローバル参照になるか) の
+  // 事前判定。emitLoad と同じ解決順 (local → 親 var の global 優先 → upvalue)。
+  // resolveUpvalue は名前で dedup されるので先に呼んでも副作用は重複しない
+  private resolvesToGlobal(name: string): boolean {
+    if (this.resolveLocal(name) !== null) return false;
+    if (this.isFunction) {
+      if (this.parent && !this.parent.isFunction && this.parent.resolveLocal(name) !== null && !this.parent.lexicalLocals.has(name)) {
+        return true; // トップレベル var は global 優先 (emitLoad と同じ)
+      }
+      if (this.resolveUpvalue(name) >= 0) return false;
+    }
+    return true;
+  }
+
   // 変数のロード: ローカル → upvalue → グローバル の優先順で解決
   emitLoad(name: string): void {
     const slot = this.resolveLocal(name);
@@ -145,8 +161,24 @@ class BytecodeCompiler {
     this.emit("LdaGlobal", nameIdx);
   }
 
-  // 変数のストア
+  // name が (自スコープまたは外側スコープの) const バインディングか。
+  // 最初に name をローカルとして宣言しているスコープの const 判定を返す (内側のシャドウ優先)。
+  private isConstBinding(name: string): boolean {
+    let c: BytecodeCompiler | null = this;
+    while (c) {
+      if (c.locals.has(name)) return c.constLocals.has(name);
+      c = c.parent;
+    }
+    return false;
+  }
+
+  // 変数のストア (代入)。const 再代入は TypeError、未宣言グローバル代入は strict の ReferenceError。
   emitStore(name: string): void {
+    if (this.isConstBinding(name)) {
+      // const への再代入 → 実行時 TypeError (初期化は compileBindingTarget が別途 StaLocal で行う)
+      this.emit("ThrowConstAssign", this.addConstant(name));
+      return;
+    }
     const slot = this.resolveLocal(name);
     if (slot !== null) {
       this.emit("StaLocal", slot);
@@ -159,8 +191,9 @@ class BytecodeCompiler {
         return;
       }
     }
+    // どのスコープにも束縛が無い代入。strict では暗黙グローバルを作らず ReferenceError。
     const nameIdx = this.addConstant(name);
-    this.emit("StaGlobal", nameIdx);
+    this.emit("StaGlobalStrict", nameIdx);
   }
 
   finish(name: string): BytecodeFunction {
@@ -196,6 +229,16 @@ class BytecodeCompiler {
         if (elem) this.preDeclareBindingNames(elem);
       }
     }
+  }
+
+  // バインディングパターンから全 Identifier 名を out に集める (const 名の収集用)
+  private collectPatternNames(id: any, out: Set<string>): void {
+    if (!id) return;
+    if (id.type === "Identifier") out.add(id.name);
+    else if (id.type === "ObjectPattern") for (const p of id.properties) this.collectPatternNames(p.type === "RestElement" ? p.argument : p.value, out);
+    else if (id.type === "ArrayPattern") for (const e of id.elements) this.collectPatternNames(e, out);
+    else if (id.type === "RestElement") this.collectPatternNames(id.argument, out);
+    else if (id.type === "AssignmentPattern") this.collectPatternNames(id.left, out);
   }
 
   compileBindingTarget(id: any): void {
@@ -290,17 +333,15 @@ class BytecodeCompiler {
         this.compileStatement(stmt);
       }
     }
-    // var hoisting: var 宣言を事前に undefined でグローバルに登録
-    for (const stmt of program.body) {
-      if (stmt.type === "VariableDeclaration" && (stmt as any).kind === "var") {
-        for (const decl of (stmt as any).declarations) {
-          if (decl.id.type === "Identifier") {
-            this.emit("LdaUndefined");
-            this.emit("StaGlobal", this.addConstant(decl.id.name));
-            this.emit("Pop");
-          }
-        }
-      }
+    // var hoisting: var 宣言を事前に undefined でグローバルに登録。
+    // ネストしたブロック (非実行の if 分岐や 0 回の for 本体) 内の var も
+    // 巻き上げ対象なので再帰的に収集する
+    const hoistedVars = new Set<string>();
+    this.hoistVarNames(program.body, (id) => this.collectPatternNames(id, hoistedVars));
+    for (const name of hoistedVars) {
+      this.emit("LdaUndefined");
+      this.emit("StaGlobal", this.addConstant(name));
+      this.emit("Pop");
     }
     for (let i = 0; i < program.body.length; i++) {
       const stmt = program.body[i];
@@ -383,45 +424,47 @@ class BytecodeCompiler {
     this.emit("Return");
   }
 
-  // 関数本体の var 束縛名を再帰的に集めて declareLocal する (var hoisting)。
+  // 関数本体の var 束縛名を再帰的に集めて declare する (var hoisting)。
   // ネスト関数 (FunctionDeclaration/FunctionExpression) の中は走査しない。
-  hoistVarNames(stmts: Statement[]): void {
+  // declare 省略時は declareLocal (関数本体用)。compileProgram はグローバル
+  // 登録用に名前収集コールバックを渡す。
+  hoistVarNames(stmts: Statement[], declare: (id: unknown) => void = (id) => this.preDeclareBindingNames(id)): void {
     for (const stmt of stmts) {
       const s = stmt as any;
       switch (s.type) {
         case "VariableDeclaration":
           if (s.kind === "var") {
-            for (const decl of s.declarations) this.preDeclareBindingNames(decl.id);
+            for (const decl of s.declarations) declare(decl.id);
           }
           break;
-        case "BlockStatement": this.hoistVarNames(s.body); break;
+        case "BlockStatement": this.hoistVarNames(s.body, declare); break;
         case "IfStatement":
-          this.hoistVarNames([s.consequent]);
-          if (s.alternate) this.hoistVarNames([s.alternate]);
+          this.hoistVarNames([s.consequent], declare);
+          if (s.alternate) this.hoistVarNames([s.alternate], declare);
           break;
         case "WhileStatement": case "DoWhileStatement":
-          this.hoistVarNames([s.body]); break;
+          this.hoistVarNames([s.body], declare); break;
         case "ForStatement":
           if (s.init && s.init.type === "VariableDeclaration" && s.init.kind === "var") {
-            for (const decl of s.init.declarations) this.preDeclareBindingNames(decl.id);
+            for (const decl of s.init.declarations) declare(decl.id);
           }
-          this.hoistVarNames([s.body]);
+          this.hoistVarNames([s.body], declare);
           break;
         case "ForInStatement": case "ForOfStatement":
           if (s.left && s.left.type === "VariableDeclaration" && s.left.kind === "var") {
-            for (const decl of s.left.declarations) this.preDeclareBindingNames(decl.id);
+            for (const decl of s.left.declarations) declare(decl.id);
           }
-          this.hoistVarNames([s.body]);
+          this.hoistVarNames([s.body], declare);
           break;
         case "TryStatement":
-          if (s.block) this.hoistVarNames(s.block.body);
-          if (s.handler?.body) this.hoistVarNames(s.handler.body.body);
-          if (s.finalizer) this.hoistVarNames(s.finalizer.body);
+          if (s.block) this.hoistVarNames(s.block.body, declare);
+          if (s.handler?.body) this.hoistVarNames(s.handler.body.body, declare);
+          if (s.finalizer) this.hoistVarNames(s.finalizer.body, declare);
           break;
         case "SwitchStatement":
-          for (const c of s.cases ?? []) this.hoistVarNames(c.consequent ?? []);
+          for (const c of s.cases ?? []) this.hoistVarNames(c.consequent ?? [], declare);
           break;
-        case "LabeledStatement": this.hoistVarNames([s.body]); break;
+        case "LabeledStatement": this.hoistVarNames([s.body], declare); break;
         default: break;
       }
     }
@@ -435,6 +478,12 @@ class BytecodeCompiler {
         break;
 
       case "VariableDeclaration": {
+        // const 宣言名を記録 (再代入禁止のため; トップレベル・関数内どちらも)
+        if (stmt.kind === "const") {
+          for (const decl of stmt.declarations) {
+            this.collectPatternNames(decl.id, this.constLocals);
+          }
+        }
         // let/const はトップレベルでもローカルスロットを使う (ブロックスコープ)
         if (!this.isFunction && stmt.kind !== "var") {
           for (const decl of stmt.declarations) {
@@ -471,8 +520,9 @@ class BytecodeCompiler {
         this.emit("LdaConst", fnIndex);
         const fnSlot = this.resolveLocal(stmt.id.name) ?? this.declareLocal(stmt.id.name);
         this.emit("StaLocal", fnSlot);
-        // トップレベル関数はグローバルにも登録 (再帰呼び出し + JIT 用)
-        if (!this.isFunction) {
+        // トップレベル関数はグローバルにも登録 (再帰呼び出し + JIT 用)。
+        // ブロック内 function 宣言は block-scoped なのでグローバルへ漏らさない
+        if (!this.isFunction && this.blockDepth === 0) {
           this.emit("Dup");
           const nameIdx = this.addConstant(stmt.id.name);
           this.emit("StaGlobal", nameIdx);
@@ -693,13 +743,14 @@ class BytecodeCompiler {
       }
 
       case "BlockStatement": {
+        // let/const とブロック内 function 宣言は block-scoped (strict)
         const hasBlockScoped = stmt.body.some(
-          (s: any) => s.type === "VariableDeclaration" && s.kind !== "var"
+          (s: any) => (s.type === "VariableDeclaration" && s.kind !== "var") || s.type === "FunctionDeclaration"
         );
         if (hasBlockScoped) {
           // スコープを push — 同名変数は新しいスロットに割り当てられる
           this.scopeStack.push(new Map(this.locals));
-          // ブロック内の let/const 変数を強制的に新スロットに割り当て
+          // ブロック内の let/const/function を強制的に新スロットに割り当て
           for (const s of stmt.body) {
             if ((s as any).type === "VariableDeclaration" && (s as any).kind !== "var") {
               for (const decl of (s as any).declarations) {
@@ -708,12 +759,21 @@ class BytecodeCompiler {
                   this.locals.delete(decl.id.name);
                 }
               }
+            } else if ((s as any).type === "FunctionDeclaration" && (s as any).id?.name) {
+              this.locals.delete((s as any).id.name);
             }
           }
         }
+        // function 宣言をブロック先頭に巻き上げてからその他の文をコンパイル
+        // (strict: ブロック内では宣言前から呼べ、ブロックの外には漏れない)
+        this.blockDepth++;
         for (const s of stmt.body) {
-          this.compileStatement(s);
+          if ((s as any).type === "FunctionDeclaration") this.compileStatement(s);
         }
+        for (const s of stmt.body) {
+          if ((s as any).type !== "FunctionDeclaration") this.compileStatement(s);
+        }
+        this.blockDepth--;
         if (hasBlockScoped) {
           this.locals = this.scopeStack.pop()!;
         }
@@ -1209,7 +1269,14 @@ class BytecodeCompiler {
           }
           this.emit("CallMethod", expr.arguments.length);
         } else {
-          // 通常の関数呼び出し
+          // 通常の関数呼び出し。JS 仕様では callee の参照解決が引数評価より
+          // 先なので、callee がグローバル参照なら存在チェックを引数の前に置く
+          // (f(garbage()) は f 未定義なら引数内の例外より ReferenceError が先)。
+          // スタック順 [args..., callee] は変えない (JIT の LdaGlobal+Call
+          // パターン検出を保つため)
+          if (expr.callee.type === "Identifier" && this.resolvesToGlobal(expr.callee.name)) {
+            this.emit("CheckGlobal", this.addConstant(expr.callee.name));
+          }
           for (const arg of expr.arguments) {
             this.compileExpression(arg as Expression);
           }

@@ -8,7 +8,7 @@ import {
   isJSFunction, createJSFunction, getProperty,
   collectBoundNames, bindPattern, assignPattern,
 } from "./values.js";
-import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "../vm/js-string.js";
+import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, toNumericOperand, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
 import { JSPromise, drainMicrotasks, isJSPromise } from "../runtime/promise.js";
 import "../runtime/host-patches.js";
@@ -85,7 +85,9 @@ function toPrimitive(value: unknown, hint: "number" | "string" = "number"): unkn
   if (value === null || value === undefined) return value;
   if (typeof value !== "object") return value;
   if (isJSString(value)) return value;
-  if (Array.isArray(value)) return value;
+  // 配列は join(",") 相当の文字列に (VM の toPrimitive と同じ規則)。
+  // 数値文脈は toNumericOperand が文字列から変換する
+  if (Array.isArray(value)) return internString(arrayToPrimitiveString(value));
 
   const obj = value as Record<string, unknown>;
   const methods = hint === "string" ? ["toString", "valueOf"] : ["valueOf", "toString"];
@@ -158,10 +160,43 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   env.defineReadOnly("SyntaxError", SyntaxError);
   env.defineReadOnly("RangeError", RangeError);
   env.defineReadOnly("Boolean", Boolean);
-  env.defineReadOnly("Number", Number);
-  // String: JSString を受け取れるカスタムコンストラクタ
+  // host の数値ビルトインに渡す前の前処理 (VM 側 index.ts の numArg と同じ規則)。
+  // JSString はラップを解いて数値化、プレーンオブジェクトは NaN に潰す
+  // (host の ToNumber に任せると JSString が "[object Object]" 経由で NaN になる)
+  const twNumArg = (v: unknown): unknown => {
+    if (isJSString(v)) return Number(jsStringToString(v));
+    // 配列は安全 join 経由で数値化 (JSString 要素を host join に掛けると
+    // "[object Object]" になる)
+    if (Array.isArray(v)) return Number(arrayToPrimitiveString(v));
+    if (v !== null && typeof v === "object") return NaN;
+    return v;
+  };
+  // 文字列ビルトイン (String/parseInt/parseFloat) 用の前処理 (VM 側 strConv と同一規則)
+  const twStrConv = (v: unknown): string => {
+    if (isJSString(v)) return jsStringToString(v);
+    if (Array.isArray(v)) return arrayToPrimitiveString(v);
+    if (v !== null && typeof v === "object") return "[object Object]";
+    return String(v);
+  };
+  // Number: JSString を受け取れるカスタムコンストラクタ (host Number の statics は引き継ぐ)
+  const NumberCtor = function(this: any, v?: unknown) {
+    const n = arguments.length === 0 ? 0 : Number(twNumArg(v));
+    if (new.target) return new Number(n);
+    return n;
+  } as unknown as NumberConstructor;
+  (NumberCtor as any).isNaN = Number.isNaN;
+  (NumberCtor as any).isFinite = Number.isFinite;
+  (NumberCtor as any).isInteger = Number.isInteger;
+  (NumberCtor as any).parseInt = parseInt;
+  (NumberCtor as any).parseFloat = parseFloat;
+  (NumberCtor as any).MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
+  (NumberCtor as any).MIN_SAFE_INTEGER = Number.MIN_SAFE_INTEGER;
+  (NumberCtor as any).prototype = Number.prototype;
+  env.defineReadOnly("Number", NumberCtor);
+  // String: JSString を受け取れるカスタムコンストラクタ。
+  // String() 無引数は "" だが String(undefined) は "undefined" (arguments.length で判別)
   const StringCtor = function(this: any, v?: unknown) {
-    const s = isJSString(v) ? jsStringToString(v) : (v === undefined ? "" : String(v));
+    const s = arguments.length === 0 ? "" : twStrConv(v);
     if (new.target) return new String(s);
     return internString(s);
   } as unknown as StringConstructor;
@@ -172,13 +207,16 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   env.defineReadOnly("Function", Function);
 
   // グローバル関数
-  env.defineReadOnly("isNaN", (v: unknown) => Number.isNaN(Number(v)));
-  env.defineReadOnly("isFinite", (v: unknown) => Number.isFinite(Number(v)));
-  env.defineReadOnly("parseInt", (s: unknown, radix?: number) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
-  env.defineReadOnly("parseFloat", (s: unknown) => parseFloat(isJSString(s) ? jsStringToString(s) : String(s)));
+  env.defineReadOnly("isNaN", (v: unknown) => Number.isNaN(Number(twNumArg(v))));
+  env.defineReadOnly("isFinite", (v: unknown) => Number.isFinite(Number(twNumArg(v))));
+  env.defineReadOnly("parseInt", (s: unknown, radix?: number) => parseInt(twStrConv(s), radix));
+  env.defineReadOnly("parseFloat", (s: unknown) => parseFloat(twStrConv(s)));
 
-  // Math
-  env.defineReadOnly("Math", {
+  // Math — 数値メソッドは引数を twNumArg で前処理してから host に渡す
+  // (JSString の "5" が NaN になる・プレーンオブジェクトの挙動が VM とズレるのを防ぐ)
+  const twWrapNum = (fn: (...a: number[]) => number) =>
+    (...args: unknown[]) => fn(...(args.map(twNumArg) as number[]));
+  const twRawMath: Record<string, unknown> = {
     floor: Math.floor, ceil: Math.ceil, round: Math.round,
     abs: Math.abs, min: Math.min, max: Math.max,
     sqrt: Math.sqrt, pow: Math.pow, log: Math.log,
@@ -195,7 +233,13 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     LN2: Math.LN2, LN10: Math.LN10,
     LOG2E: Math.LOG2E, LOG10E: Math.LOG10E,
     SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
-  });
+  };
+  const twMathObj: Record<string, unknown> = {};
+  for (const k of Object.keys(twRawMath)) {
+    const v = twRawMath[k];
+    twMathObj[k] = typeof v === "function" ? twWrapNum(v as (...a: number[]) => number) : v;
+  }
+  env.defineReadOnly("Math", twMathObj);
 
   // Date: host Date を公開。string 引数は JSString → string 変換。
   const twUnwrapStr = (v: unknown) => isJSString(v) ? jsStringToString(v) : v;
@@ -537,10 +581,11 @@ function hoistVarDeclarations(stmts: Statement[], env: Environment): void {
         }
       }
       hoistVarDeclarations([stmt.body], env);
-    } else if (stmt.type === "ForOfStatement") {
-      if (stmt.left.kind === "var") {
+    } else if (stmt.type === "ForOfStatement" || stmt.type === "ForInStatement") {
+      const left = (stmt as any).left;
+      if (left?.kind === "var") {
         const varEnv = env.findVarScope();
-        for (const decl of stmt.left.declarations) {
+        for (const decl of left.declarations) {
           for (const name of collectBoundNames(decl.id)) {
             if (!varEnv.hasOwn(name)) {
               varEnv.define(name, undefined);
@@ -548,7 +593,18 @@ function hoistVarDeclarations(stmts: Statement[], env: Environment): void {
           }
         }
       }
-      hoistVarDeclarations([stmt.body], env);
+      hoistVarDeclarations([(stmt as any).body], env);
+    } else if (stmt.type === "DoWhileStatement") {
+      hoistVarDeclarations([(stmt as any).body], env);
+    } else if (stmt.type === "TryStatement") {
+      const s = stmt as any;
+      if (s.block) hoistVarDeclarations(s.block.body, env);
+      if (s.handler?.body) hoistVarDeclarations(s.handler.body.body, env);
+      if (s.finalizer) hoistVarDeclarations(s.finalizer.body, env);
+    } else if (stmt.type === "SwitchStatement") {
+      for (const c of (stmt as any).cases ?? []) hoistVarDeclarations(c.consequent ?? [], env);
+    } else if ((stmt as any).type === "LabeledStatement") {
+      hoistVarDeclarations([(stmt as any).body], env);
     }
   }
 }
@@ -1021,6 +1077,9 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
           }
         }
       }
+      // ブロック内 function 宣言をブロック先頭に巻き上げ (strict: block-scoped)。
+      // ブロック内では宣言前から呼べ、ブロックの外には漏れない
+      hoistFunctionDeclarations(stmt.body, blockEnv);
       let result: unknown = undefined;
       for (const s of stmt.body) {
         result = yield* evalStatement(s, blockEnv);
@@ -1127,12 +1186,12 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       const arg = expr.argument;
       let oldValue: number;
       if (arg.type === "Identifier") {
-        oldValue = env.get(arg.name) as number;
+        oldValue = toNumericOperand(toPrimitive(env.get(arg.name)));
       } else {
         // MemberExpression
         const obj = (yield* evalExpression(arg.object, env)) as JSObject;
         const key = yield* resolveMemberKey(arg, env);
-        oldValue = getProperty(obj, key) as number;
+        oldValue = toNumericOperand(toPrimitive(getProperty(obj, key)));
       }
       const newValue = expr.operator === "++" ? oldValue + 1 : oldValue - 1;
       if (arg.type === "Identifier") {
@@ -1231,11 +1290,12 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         return value;
       }
 
-      // 複合代入: 現在の値を取得して演算
-      const rightValue = yield* evalExpression(expr.right, env);
+      // 複合代入: JS 仕様の評価順は「左辺の参照解決 + 現在値の読み出し → 右辺の評価」。
+      // 右辺を先に評価すると、未宣言変数への複合代入で右辺内の例外が
+      // ReferenceError より先に飛んでしまう
       let newValue: unknown;
       if (expr.operator === "=") {
-        newValue = rightValue;
+        newValue = yield* evalExpression(expr.right, env);
       } else {
         let currentValue: unknown;
         if (expr.left.type === "MemberExpression") {
@@ -1244,6 +1304,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         } else {
           currentValue = env.get(expr.left.name);
         }
+        const rightValue = yield* evalExpression(expr.right, env);
         switch (expr.operator) {
           case "+=":
             if (isJSString(currentValue) || isJSString(rightValue)) {
@@ -1254,10 +1315,10 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
               newValue = (currentValue as number) + (rightValue as number);
             }
             break;
-          case "-=": newValue = (currentValue as number) - (rightValue as number); break;
-          case "*=": newValue = (currentValue as number) * (rightValue as number); break;
-          case "/=": newValue = (currentValue as number) / (rightValue as number); break;
-          case "%=": newValue = (currentValue as number) % (rightValue as number); break;
+          case "-=": newValue = toNumericOperand(currentValue) - toNumericOperand(rightValue); break;
+          case "*=": newValue = toNumericOperand(currentValue) * toNumericOperand(rightValue); break;
+          case "/=": newValue = toNumericOperand(currentValue) / toNumericOperand(rightValue); break;
+          case "%=": newValue = toNumericOperand(currentValue) % toNumericOperand(rightValue); break;
           default: throw new Error(`Unknown assignment operator: ${expr.operator}`);
         }
       }
@@ -1825,8 +1886,8 @@ function* evalUnaryExpression(
   const argument = yield* evalExpression(expr.argument, env);
   switch (expr.operator) {
     case "!": return !isTruthy(argument);
-    case "-": return -(argument as number);
-    case "~": return ~(argument as number);
+    case "-": return -toNumericOperand(toPrimitive(argument));
+    case "~": return ~toNumericOperand(toPrimitive(argument));
     default:
       throw new Error(`Unknown unary operator: ${expr.operator}`);
   }
@@ -1863,21 +1924,41 @@ function* evalBinaryExpression(
         return jsStringConcat(l, r);
       }
       return (left as number) + (right as number);
-    case "-": return (left as number) - (right as number);
-    case "*": return (left as number) * (right as number);
-    case "/": return (left as number) / (right as number);
-    case "%": return (left as number) % (right as number);
-    case "**": return (left as number) ** (right as number);
-    case "&": return (left as number) & (right as number);
-    case "|": return (left as number) | (right as number);
-    case "^": return (left as number) ^ (right as number);
-    case "<<": return (left as number) << (right as number);
-    case ">>": return (left as number) >> (right as number);
-    case ">>>": return (left as number) >>> (right as number);
-    case "<": return (left as number) < (right as number);
-    case ">": return (left as number) > (right as number);
-    case "<=": return (left as number) <= (right as number);
-    case ">=": return (left as number) >= (right as number);
+    case "-": return toNumericOperand(left) - toNumericOperand(right);
+    case "*": return toNumericOperand(left) * toNumericOperand(right);
+    case "/": return toNumericOperand(left) / toNumericOperand(right);
+    case "%": return toNumericOperand(left) % toNumericOperand(right);
+    case "**": return toNumericOperand(left) ** toNumericOperand(right);
+    case "&": return toNumericOperand(left) & toNumericOperand(right);
+    case "|": return toNumericOperand(left) | toNumericOperand(right);
+    case "^": return toNumericOperand(left) ^ toNumericOperand(right);
+    case "<<": return toNumericOperand(left) << toNumericOperand(right);
+    case ">>": return toNumericOperand(left) >> toNumericOperand(right);
+    case ">>>": return toNumericOperand(left) >>> toNumericOperand(right);
+    // 相対比較: 両辺文字列なら辞書順 (JS 仕様 7.2.13)。JSString のまま
+    // number キャストすると host の ToPrimitive で両辺 "[object Object]" になり
+    // 'a' < 'b' すら false になる (VM の LessThan 系と同じ分岐にする)。
+    // TW の toPrimitive はプレーンオブジェクトで host string を返すことが
+    // あるので、JSString と host string の両方を文字列として扱う
+    case "<": case ">": case "<=": case ">=": {
+      const ls = isJSString(left) ? jsStringToString(left) : typeof left === "string" ? left : null;
+      const rs = isJSString(right) ? jsStringToString(right) : typeof right === "string" ? right : null;
+      if (ls !== null && rs !== null) {
+        switch (expr.operator) {
+          case "<": return ls < rs;
+          case ">": return ls > rs;
+          case "<=": return ls <= rs;
+          default: return ls >= rs;
+        }
+      }
+      const ln = toNumericOperand(left), rn = toNumericOperand(right);
+      switch (expr.operator) {
+        case "<": return ln < rn;
+        case ">": return ln > rn;
+        case "<=": return ln <= rn;
+        default: return ln >= rn;
+      }
+    }
     case "==":
       if (isJSString(left) && isJSString(right)) return jsStringEquals(left, right);
       if (isJSString(left) || isJSString(right)) return false;

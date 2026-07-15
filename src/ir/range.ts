@@ -20,7 +20,14 @@ export const RANGE_I32: Range = { min: I32_MIN, max: I32_MAX };
 export const RANGE_UNKNOWN: Range = { min: -Infinity, max: Infinity };
 
 export function canFitI32(range: Range): boolean {
-  return range.min >= I32_MIN && range.max <= I32_MAX;
+  // 境界チェックに加えて:
+  // - min/max が非整数 (0.5 等の小数定数) なら i32 で表現できない。
+  //   演算で小数が生まれるのは Div のみで、それは functionNeedsF64 が強制
+  //   f64 にするので、定数由来の小数は min/max の整数性チェックで捕まる
+  // - -0 は i32 に存在しない (0 になって console.log(-0) が 0 と出る)
+  return range.min >= I32_MIN && range.max <= I32_MAX
+    && Number.isInteger(range.min) && Number.isInteger(range.max)
+    && !Object.is(range.min, -0) && !Object.is(range.max, -0);
 }
 
 // ========== Range 伝播 ==========

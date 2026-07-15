@@ -42,6 +42,8 @@ export type Opcode =
   // 変数
   | "LdaGlobal"       // LdaGlobal <nameIndex> — グローバル変数を push
   | "StaGlobal"       // StaGlobal <nameIndex> — スタックトップをグローバル変数に格納 (pop しない)
+  | "StaGlobalStrict" // StaGlobalStrict <nameIndex> — 代入専用。未宣言なら ReferenceError (strict; sloppy の暗黙グローバルを作らない)
+  | "CheckGlobal"     // CheckGlobal <nameIndex> — グローバルの存在チェックのみ (push しない)。callee 解決を引数評価より先にするため
   | "LdaLocal"        // LdaLocal <slot> — ローカル変数を push
   | "StaLocal"        // StaLocal <slot> — スタックトップをローカル変数に格納 (pop しない)
   | "LdaUpvalue"      // LdaUpvalue <index> — キャプチャされた外部変数を push
@@ -78,6 +80,7 @@ export type Opcode =
   | "TypeOf"          // pop 1つ、typeof 文字列を push
   | "TypeOfGlobal"    // operand=名前index, 未定義なら "undefined" を push (ReferenceError にしない)
   | "Throw"           // pop 1つ、例外を投げる
+  | "ThrowConstAssign"// ThrowConstAssign <nameIndex> — const への再代入 → TypeError
 
   // 更新
   | "Increment"       // pop 1つ、+1 して push
@@ -189,6 +192,9 @@ function formatOperandComment(instr: Instruction, constants: unknown[]): string 
     }
     case "LdaGlobal":
     case "StaGlobal":
+    case "StaGlobalStrict":
+    case "CheckGlobal":
+    case "ThrowConstAssign":
       return ` ; ${constants[instr.operand]}`;
     case "Jump":
     case "JumpIfFalse":

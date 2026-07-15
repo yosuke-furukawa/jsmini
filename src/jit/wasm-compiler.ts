@@ -468,6 +468,10 @@ function translateRange(
         }
         if (typeof val !== "number") return false;
         if (isI32) {
+          // i32 で正確に表現できない定数 (1e10 や小数) を val|0 で emit すると
+          // 黙って wrap した値を返す誤コンパイルになる → compile 失敗にして
+          // f64 リトライ / VM フォールバックへ
+          if ((val | 0) !== val) return false;
           out.push(WASM_OP.i32_const, ...i32ToLEB128(val | 0));
         } else {
           out.push(WASM_OP.f64_const, ...f64ToBytes(val));
@@ -742,6 +746,11 @@ function translateRange(
       case "Jump":
         // 後方ジャンプはループパターンで、前方は if/else で処理されるべき
         return false;
+
+      // CheckGlobal は callee 存在チェック専用 (スタック効果なし)。JIT compile 時に
+      // callee は解決済み (未解決なら compile 自体が失敗して VM フォールバック) なので skip
+      case "CheckGlobal":
+        break;
 
       // 関数呼び出し
       case "LdaGlobal": {
