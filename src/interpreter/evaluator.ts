@@ -1294,20 +1294,26 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         return value;
       }
 
-      // 複合代入: JS 仕様の評価順は「左辺の参照解決 + 現在値の読み出し → 右辺の評価」。
-      // 右辺を先に評価すると、未宣言変数への複合代入で右辺内の例外が
-      // ReferenceError より先に飛んでしまう
+      // JS 仕様の評価順:
+      // - メンバー代入は object (と computed key) の評価が右辺より先。ここで
+      //   1 回だけ評価して読み出しと書き戻しの両方に使う (以前は右辺が先な上に
+      //   書き戻しで object を再評価していた = 2 回評価)
+      // - 複合代入は「左辺の参照解決 + 現在値の読み出し → 右辺の評価」。
+      //   右辺を先に評価すると、未宣言変数への複合代入で右辺内の例外が
+      //   ReferenceError より先に飛んでしまう
+      let memberObj: Record<string, unknown> | null = null;
+      let memberKey = "";
+      if (expr.left.type === "MemberExpression") {
+        memberObj = (yield* evalExpression(expr.left.object, env)) as Record<string, unknown>;
+        memberKey = yield* resolveMemberKey(expr.left, env);
+      }
       let newValue: unknown;
       if (expr.operator === "=") {
         newValue = yield* evalExpression(expr.right, env);
       } else {
-        let currentValue: unknown;
-        if (expr.left.type === "MemberExpression") {
-          const obj = (yield* evalExpression(expr.left.object, env)) as JSObject;
-          currentValue = getProperty(obj, yield* resolveMemberKey(expr.left, env));
-        } else {
-          currentValue = env.get(expr.left.name);
-        }
+        const currentValue = memberObj !== null
+          ? getProperty(memberObj as JSObject, memberKey)
+          : env.get(expr.left.name);
         const rightValue = yield* evalExpression(expr.right, env);
         switch (expr.operator) {
           case "+=":
@@ -1327,10 +1333,8 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         }
       }
 
-      if (expr.left.type === "MemberExpression") {
-        const obj = (yield* evalExpression(expr.left.object, env)) as Record<string, unknown>;
-        const key = yield* resolveMemberKey(expr.left, env);
-        obj[key] = newValue;
+      if (memberObj !== null) {
+        memberObj[memberKey] = newValue;
       } else {
         env.set(expr.left.name, newValue);
       }

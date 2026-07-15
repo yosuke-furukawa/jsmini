@@ -286,6 +286,105 @@ class BytecodeCompiler {
     else if (id.type === "AssignmentPattern") this.collectPatternNames(id.left, out);
   }
 
+  // メンバー代入 (obj.p = v / obj[k] = v / obj.p += v / obj[k] += v) のコンパイル。
+  // - 複合代入は「obj (と key) を 1 回だけ評価 → 現在値読み → rhs → 演算 → 書き戻し」。
+  //   以前は operator を見ておらず obj.p += 2 が obj.p = 2 として実行されていた
+  // - 単純代入も JS 仕様の評価順 (obj → rhs) を守る。副作用がなく冪等な object 式
+  //   (this / Identifier) は従来の rhs → obj のバイトコード形を保ち、JIT の
+  //   ホットパス (this.x = v) の形を崩さない。LdaGlobal になる Identifier は
+  //   CheckGlobal で存在チェックだけ先行させる (LdaGlobal の唯一の観測可能な効果)
+  private compileMemberAssignment(expr: any): void {
+    const left = expr.left;
+    // 副作用なし & 冪等 → 2 回 emit してよい object/key 式
+    const isSimple = (e: any) =>
+      e.type === "ThisExpression" || e.type === "Identifier" || e.type === "Literal";
+
+    if (expr.operator !== "=") {
+      const compoundOps: Record<string, Opcode> = {
+        "+=": "Add", "-=": "Sub", "*=": "Mul", "/=": "Div", "%=": "Mod",
+      };
+      const op = compoundOps[expr.operator];
+      if (!op) throw new Error(`Unsupported assignment operator: ${expr.operator}`);
+      if (left.computed) {
+        if (isSimple(left.object) && isSimple(left.property)) {
+          // SetPropertyComputed のスタック契約: [obj, key, value]
+          this.compileExpression(left.object);
+          this.compileExpression(left.property);
+          this.compileExpression(left.object);
+          this.compileExpression(left.property);
+          this.emit("GetPropertyComputed");
+          this.compileExpression(expr.right);
+          this.emit(op);
+          this.emit("SetPropertyComputed");
+        } else {
+          const tmpObj = this.declareLocal(`__ma_obj_${this.currentOffset()}`);
+          const tmpKey = this.declareLocal(`__ma_key_${this.currentOffset()}`);
+          this.compileExpression(left.object);
+          this.emit("StaLocal", tmpObj); this.emit("Pop");
+          this.compileExpression(left.property);
+          this.emit("StaLocal", tmpKey); this.emit("Pop");
+          this.emit("LdaLocal", tmpObj);
+          this.emit("LdaLocal", tmpKey);
+          this.emit("LdaLocal", tmpObj);
+          this.emit("LdaLocal", tmpKey);
+          this.emit("GetPropertyComputed");
+          this.compileExpression(expr.right);
+          this.emit(op);
+          this.emit("SetPropertyComputed");
+        }
+      } else {
+        const nameIdx = this.addConstant(left.property.name);
+        if (isSimple(left.object)) {
+          this.compileExpression(left.object);
+          this.emitWithIC("GetProperty", nameIdx);
+          this.compileExpression(expr.right);
+          this.emit(op);
+          this.compileExpression(left.object);
+          this.emitWithIC("SetPropertyAssign", nameIdx);
+        } else {
+          const tmpObj = this.declareLocal(`__ma_obj_${this.currentOffset()}`);
+          this.compileExpression(left.object);
+          this.emit("StaLocal", tmpObj); this.emit("Pop");
+          this.emit("LdaLocal", tmpObj);
+          this.emitWithIC("GetProperty", nameIdx);
+          this.compileExpression(expr.right);
+          this.emit(op);
+          this.emit("LdaLocal", tmpObj);
+          this.emitWithIC("SetPropertyAssign", nameIdx);
+        }
+      }
+      return;
+    }
+
+    // 単純代入 "="
+    if (left.computed) {
+      // 既に obj → key → rhs の順 (仕様通り)
+      this.compileExpression(left.object);
+      this.compileExpression(left.property);
+      this.compileExpression(expr.right);
+      this.emit("SetPropertyComputed");
+      return;
+    }
+    const nameIdx = this.addConstant(left.property.name);
+    if (isSimple(left.object)) {
+      // 従来形 (rhs → obj) を維持。グローバル参照だけ存在チェックを先行
+      if (left.object.type === "Identifier" && this.resolvesToGlobal(left.object.name)) {
+        this.emit("CheckGlobal", this.addConstant(left.object.name));
+      }
+      this.compileExpression(expr.right);
+      this.compileExpression(left.object);
+      this.emitWithIC("SetPropertyAssign", nameIdx);
+    } else {
+      // 副作用がありうる object 式 → 先に評価して temp に保持 (評価順: obj → rhs)
+      const tmpObj = this.declareLocal(`__ma_obj_${this.currentOffset()}`);
+      this.compileExpression(left.object);
+      this.emit("StaLocal", tmpObj); this.emit("Pop");
+      this.compileExpression(expr.right);
+      this.emit("LdaLocal", tmpObj);
+      this.emitWithIC("SetPropertyAssign", nameIdx);
+    }
+  }
+
   compileBindingTarget(id: any): void {
     if (id.type === "Identifier") {
       if (this.isFunction || this.resolveLocal(id.name) !== null) {
@@ -1199,19 +1298,7 @@ class BytecodeCompiler {
 
       case "AssignmentExpression": {
         if (expr.left.type === "MemberExpression") {
-          if (expr.left.computed) {
-            // computed: obj[key] = value → SetPropertyComputed (pop value, pop key, pop obj)
-            this.compileExpression(expr.left.object);
-            this.compileExpression(expr.left.property);
-            this.compileExpression(expr.right);
-            this.emit("SetPropertyComputed");
-          } else {
-            // non-computed: obj.prop = value → SetPropertyAssign
-            this.compileExpression(expr.right);
-            this.compileExpression(expr.left.object);
-            const nameIdx = this.addConstant((expr.left.property as any).name);
-            this.emitWithIC("SetPropertyAssign", nameIdx);
-          }
+          this.compileMemberAssignment(expr);
           break;
         }
         if (expr.operator !== "=" && expr.left.type === "Identifier") {
