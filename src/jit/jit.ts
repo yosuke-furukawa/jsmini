@@ -193,9 +193,16 @@ export class JitManager {
         // direct パスの this-model は memory を CachedWasm に渡せず実行できない
         // (旧実装は「compiled ログを出すが !memory で毎回 VM」という見せかけ
         //  JIT になっていた)。this 関数は IR パス専用にする
-        const wasmFn = compileToWasmSync(func, spec);
+        // i32 で失敗したら f64 でリトライ (引数は i32 でも本体に 1e10 のような
+        // i32 非表現定数があると i32 spec ではコンパイルできない)
+        let usedSpec = spec;
+        let wasmFn = compileToWasmSync(func, spec);
+        if (!wasmFn && spec === "i32") {
+          usedSpec = "f64";
+          wasmFn = compileToWasmSync(func, "f64");
+        }
         if (wasmFn) {
-          compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec, createArray: null, getArray: null, setArray: null };
+          compiled = { fn: wasmFn, memory: null, arrayArgIndices: [], stringArgIndices, spec: usedSpec, createArray: null, getArray: null, setArray: null };
         }
       }
     }
@@ -204,7 +211,7 @@ export class JitManager {
     (func as { __jitCached?: CachedWasm | null }).__jitCached = compiled;
 
     if (compiled) {
-      this.logTier(func, `→ Wasm compiled (${spec}, arrays: [${arrayArgIndices}])`, callCount);
+      this.logTier(func, `→ Wasm compiled (${compiled.spec}, arrays: [${arrayArgIndices}])`, callCount);
       return this.executeWasm(func, compiled, args, callCount, upvalueValues, thisObj);
     }
 
