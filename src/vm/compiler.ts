@@ -1464,21 +1464,49 @@ class BytecodeCompiler {
 
       case "CallExpression": {
         if (expr.callee.type === "MemberExpression") {
-          // メソッド呼び出し: obj.method(args)
-          // 引数を push
-          for (const arg of expr.arguments) {
-            this.compileExpression(arg as Expression);
-          }
-          // obj を push
-          this.compileExpression(expr.callee.object);
-          // メソッドを push
-          this.emit("Dup"); // obj を複製 (this 用に残す)
-          if (expr.callee.computed) {
-            this.compileExpression(expr.callee.property);
-            this.emit("GetPropertyComputed");
-          } else if (expr.callee.property.type === "Identifier") {
-            const nameIdx = this.addConstant(expr.callee.property.name);
-            this.emitWithIC("GetProperty", nameIdx);
+          // メソッド呼び出し: obj.method(args)。CallMethod のスタック順は
+          // [args..., obj, method]。
+          // JS 仕様では callee (obj とメソッド解決) の評価が引数より先。obj が
+          // 単純参照 (Identifier/this) なら副作用が無く順序は観測不能なので、
+          // ベンチのホットパス (this.m()/obj.m()) は従来どおり「引数→obj」の
+          // 高速順を維持する。obj が式 (呼び出し等の副作用を持ちうる) のときだけ
+          // obj とメソッドを先に temp へ確定させてから引数を評価する
+          const objSimple = expr.callee.object.type === "Identifier" || expr.callee.object.type === "ThisExpression";
+          if (objSimple) {
+            for (const arg of expr.arguments) {
+              this.compileExpression(arg as Expression);
+            }
+            this.compileExpression(expr.callee.object);
+            this.emit("Dup"); // obj を複製 (this 用に残す)
+            if (expr.callee.computed) {
+              this.compileExpression(expr.callee.property);
+              this.emit("GetPropertyComputed");
+            } else if (expr.callee.property.type === "Identifier") {
+              const nameIdx = this.addConstant(expr.callee.property.name);
+              this.emitWithIC("GetProperty", nameIdx);
+            }
+          } else {
+            // obj とメソッド (computed key 含む) を引数より先に評価して temp へ
+            const tmpObj = this.localCount++;
+            const tmpMethod = this.localCount++;
+            this.compileExpression(expr.callee.object);
+            this.emit("StaLocal", tmpObj); this.emit("Pop");
+            this.emit("LdaLocal", tmpObj);
+            if (expr.callee.computed) {
+              this.compileExpression(expr.callee.property);
+              this.emit("GetPropertyComputed");
+            } else if (expr.callee.property.type === "Identifier") {
+              const nameIdx = this.addConstant(expr.callee.property.name);
+              this.emitWithIC("GetProperty", nameIdx);
+            }
+            this.emit("StaLocal", tmpMethod); this.emit("Pop");
+            // 引数を評価 → [args...]
+            for (const arg of expr.arguments) {
+              this.compileExpression(arg as Expression);
+            }
+            // [args..., obj, method]
+            this.emit("LdaLocal", tmpObj);
+            this.emit("LdaLocal", tmpMethod);
           }
           this.emit("CallMethod", expr.arguments.length);
         } else {
