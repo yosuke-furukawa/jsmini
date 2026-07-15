@@ -906,11 +906,15 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
     }
     case "SwitchStatement": {
       const disc = yield* evalExpression(stmt.discriminant, env);
+      // switch 全体が 1 つのブロックスコープ (strict)。case 内の function 宣言は
+      // switch ブロック先頭に巻き上げ (前方の case や test からも呼べ、外には漏れない)
+      const switchEnv = new Environment(env);
+      hoistFunctionDeclarations(stmt.cases.flatMap((c: any) => c.consequent ?? []), switchEnv);
       let matched = false;
       let result: unknown = undefined;
       for (const c of stmt.cases) {
         if (!matched && c.test !== null) {
-          const testVal = yield* evalExpression(c.test, env);
+          const testVal = yield* evalExpression(c.test, switchEnv);
           // JSString 対応の === 比較
           if (isJSString(disc) && isJSString(testVal)) {
             matched = jsStringEquals(disc, testVal);
@@ -922,7 +926,7 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
         if (matched) {
           for (const s of c.consequent) {
             try {
-              result = yield* evalStatement(s, env);
+              result = yield* evalStatement(s, switchEnv);
             } catch (e) {
               if (e instanceof BreakSignal && !e.label) return result;
               throw e;

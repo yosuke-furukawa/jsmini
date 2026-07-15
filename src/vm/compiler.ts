@@ -621,6 +621,21 @@ class BytecodeCompiler {
         this.emit("StaLocal", discSlot);
         this.emit("Pop");
 
+        // case 内の function 宣言は switch ブロックに block-scoped (strict)。
+        // BlockStatement と同じ scopeStack シャドウイングで、全 case の宣言を
+        // 比較フェーズより前に巻き上げる (case の test からも呼べるため)
+        const switchFnDecls = stmt.cases.flatMap((c: any) =>
+          (c.consequent ?? []).filter((s: any) => s.type === "FunctionDeclaration"));
+        const hasSwitchScoped = switchFnDecls.length > 0;
+        if (hasSwitchScoped) {
+          this.scopeStack.push(new Map(this.locals));
+          for (const s of switchFnDecls) {
+            if ((s as any).id?.name) this.locals.delete((s as any).id.name);
+          }
+        }
+        this.blockDepth++;
+        for (const s of switchFnDecls) this.compileStatement(s);
+
         this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: -1 });
 
         // Phase 1: 比較 → body へのジャンプ
@@ -641,11 +656,12 @@ class BytecodeCompiler {
         // 全不一致 → default or end
         const jumpToDefaultOrEnd = this.emit("Jump", 0);
 
-        // Phase 2: body (fall-through で連続配置)
+        // Phase 2: body (fall-through で連続配置)。function 宣言は巻き上げ済みなので skip
         const bodyOffsets: number[] = [];
         for (let i = 0; i < stmt.cases.length; i++) {
           bodyOffsets.push(this.currentOffset());
           for (const s of stmt.cases[i].consequent) {
+            if ((s as any).type === "FunctionDeclaration") continue;
             this.compileStatement(s);
           }
         }
@@ -667,6 +683,10 @@ class BytecodeCompiler {
         // break パッチ
         const loop = this.loopStack.pop()!;
         for (const bp of loop.breakPatches) this.patch(bp, switchEnd);
+        this.blockDepth--;
+        if (hasSwitchScoped) {
+          this.locals = this.scopeStack.pop()!;
+        }
         break;
       }
 
