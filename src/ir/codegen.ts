@@ -504,7 +504,7 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
       const nullishIds = new Set<number>();
       for (const block of irFunc.blocks) {
         for (const o of block.ops) {
-          if (o.opcode === "Undefined" || (o.opcode === "Const" && (o.value === null || o.value === undefined))) nullishIds.add(o.id);
+          if (o.opcode === "Undefined" || (o.opcode === "Const" && (o.value === null || o.value === undefined || typeof o.value === "boolean"))) nullishIds.add(o.id);
         }
       }
       const isNullish = (id: number) => nullishIds.has(id);
@@ -531,6 +531,37 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
           }
         }
         if (op.opcode === "Return" && taggedValues.has(op.args[0])) resultTagged = true;
+      }
+    }
+    // bool 定数のうち全消費先が「tagged 値との比較」か「tagged スロットへの store」
+    // のものはタグ値 (TAG_FALSE/TAG_TRUE) で emit する必要がある → taggedValues へ。
+    // raw bool 文脈 (Branch 条件・算術) が 1 つでもあれば対象外 (0/1 のまま)
+    {
+      const CMPOPS = new Set(["Equal", "NotEqual", "StrictEqual", "StrictNotEqual"]);
+      const boolConstIds = new Set<number>();
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          if (op.opcode === "Const" && typeof op.value === "boolean") boolConstIds.add(op.id);
+        }
+      }
+      const boolConsumers = new Map<number, Op[]>();
+      for (const block of irFunc.blocks) {
+        for (const op of block.ops) {
+          for (const a of op.args) {
+            if (boolConstIds.has(a)) {
+              (boolConsumers.get(a) ?? boolConsumers.set(a, []).get(a)!).push(op);
+            }
+          }
+        }
+      }
+      for (const [cid, cs] of boolConsumers) {
+        const allTagged = cs.every(c =>
+          (CMPOPS.has(c.opcode) && c.args.some(a => a !== cid && taggedValues.has(a)))
+          || (c.opcode === "StoreProperty" && c.args[1] === cid && c.globalName !== undefined && taggedProps.has(c.globalName)));
+        if (allTagged) {
+          taggedValues.add(cid);
+          if (!opToLocal.has(cid)) { needsLocal.add(cid); opToLocal.set(cid, nextLocal++); }
+        }
       }
     }
   }
@@ -760,7 +791,8 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
     // 通常の命令を出力
     for (const op of block.ops) {
       if (op.opcode === "Branch" && taggedValues.has(op.args[0])) {
-        // tagged 値の truthiness 分岐: falsy = (v==0) | ((v|2)==3)。
+        // tagged 値の truthiness 分岐: falsy = (v==0) | ((v|2)==3) | (v==5)。
+        // (0 = Smi 0, 1 = null, 3 = undefined, 5 = TAG_FALSE)
         // 既存パスの「条件 + eqz」を「falsy」に置き換える形で emit
         const bwrites0 = phiWrites.get(blockId);
         if (bwrites0) {
@@ -773,7 +805,9 @@ export function codegenIR(irFunc: IRFunction, forceF64 = false, arrayTypeIdx = -
         body.push(WASM_OP.i32_eqz);
         emitLoadValue(op.args[0], body, opToLocal, opById, false);
         body.push(WASM_OP.i32_const, 2, 0x72, WASM_OP.i32_const, 3, 0x46);
-        body.push(0x72); // falsy がスタックに
+        body.push(0x72);
+        emitLoadValue(op.args[0], body, opToLocal, opById, false);
+        body.push(WASM_OP.i32_const, 5, 0x46, 0x72); // | (v == TAG_FALSE) — falsy がスタックに
         if (loopInfo) {
           const exitDepth = controlStack.length - 1 - controlStack.findLastIndex(
             e => e.kind === "block" && e.targetBlockId === loopInfo.exitBlock
@@ -1098,6 +1132,9 @@ function emitOp(
         if (taggedProps && taggedProps.size > 0 && (op.value === null || op.value === undefined)) {
           // tagged 関数内の null/undefined 定数はタグ値 (i32 リージョンの local へ)
           body.push(WASM_OP.i32_const, op.value === null ? 1 : 3);
+        } else if (typeof op.value === "boolean" && taggedValues?.has(op.id)) {
+          // tagged store/比較専用の bool 定数はタグ値 (TAG_FALSE=5 / TAG_TRUE=7)
+          body.push(WASM_OP.i32_const, op.value ? 7 : 5);
         } else if (effectiveType === "f64" && typeof op.value === "number") {
           body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
         } else if (op.type === "bool") {
@@ -1338,9 +1375,13 @@ function emitOp(
         const vIsUndef = vOp?.opcode === "Undefined"
           || (vOp?.opcode === "LoadGlobal" && vOp.globalName === "undefined")
           || (vOp?.opcode === "Const" && vOp.value === undefined);
+        const vBool = vOp?.opcode === "Const" && typeof vOp.value === "boolean" ? vOp.value : null;
         if ((vIsNull || vIsUndef) && op.globalName && taggedProps?.has(op.globalName)) {
           // tagged スロットへの null/undefined 代入 (分類パスが保証)
           body.push(WASM_OP.i32_const, vIsNull ? 1 : 3);
+        } else if (vBool !== null && op.globalName && taggedProps?.has(op.globalName)) {
+          // tagged スロットへの bool 定数代入 → TAG_FALSE/TAG_TRUE
+          body.push(WASM_OP.i32_const, vBool ? 7 : 5);
         } else if (op.globalName && taggedProps?.has(op.globalName)) {
           // tagged スロットへの store: 値は tagged チェーン由来の生 i32
           emitLoadValue(op.args[1], body, opToLocal, opById, false);
@@ -1531,13 +1572,16 @@ function emitOp(
       break;
     }
     case "Not": {
-      // tagged 値の否定: falsy = (v == 0) | ((v|2) == 3)  (0 / null / undefined)
+      // tagged 値の否定: falsy = (v == 0) | ((v|2) == 3) | (v == 5)
+      // (0 = Smi 0 / null / undefined / TAG_FALSE)
       if (taggedValues?.has(op.args[0])) {
         emitLoadValue(op.args[0], body, opToLocal, opById, false);
         body.push(WASM_OP.i32_eqz);
         emitLoadValue(op.args[0], body, opToLocal, opById, false);
         body.push(WASM_OP.i32_const, 2, 0x72 /* or */, WASM_OP.i32_const, 3, 0x46 /* eq */);
         body.push(0x72); // or
+        emitLoadValue(op.args[0], body, opToLocal, opById, false);
+        body.push(WASM_OP.i32_const, 5, 0x46 /* eq */, 0x72 /* or */);
         if (forceF64) body.push(WASM_OP.f64_convert_i32_s);
         maybeStoreLocal(op.id, body, opToLocal, needsLocal);
         break;
@@ -1672,6 +1716,9 @@ function emitValueOrConst(opId: number, body: number[], opToLocal: Map<number, n
       // tagged Phi への書き込みはタグ値 (null=1, undefined=3)。
       // 非 tagged 文脈では従来どおり 0 (undefined の falsy を保つ)
       body.push(WASM_OP.i32_const, nullTagMode ? (op.value === null ? 1 : 3) : 0);
+    } else if (typeof op.value === "boolean") {
+      // tagged Phi へは TAG_FALSE/TAG_TRUE、非 tagged 文脈は 0/1
+      body.push(WASM_OP.i32_const, nullTagMode ? (op.value ? 7 : 5) : (op.value ? 1 : 0));
     } else if (op.type === "f64") {
       body.push(WASM_OP.f64_const, ...f64ToBytes(op.value as number));
     } else {
@@ -1794,6 +1841,8 @@ function getReturnType(irFunc: IRFunction): IRType {
 // 降格の影響 (tagged load を numeric スロットに store 等) を fixpoint で伝播。
 export const TAG_NULL = 1;   // (0 << 1) | 1
 export const TAG_UNDEF = 3;  // (1 << 1) | 1
+export const TAG_FALSE = 5;  // (2 << 1) | 1 — object table の index 0..3 は予約
+export const TAG_TRUE = 7;   // (3 << 1) | 1
 export function classifyTaggedProps(irFunc: IRFunction): { taggedProps: Set<string>; nestedNames: string[] } {
   const opById = new Map<number, Op>();
   for (const b of irFunc.blocks) {
@@ -1834,6 +1883,12 @@ export function classifyTaggedProps(irFunc: IRFunction): { taggedProps: Set<stri
       || o.opcode === "Undefined"
       || (o.opcode === "LoadGlobal" && o.globalName === "undefined");
   };
+  // bool 定数は TAG_FALSE/TAG_TRUE でタグ化できる (this.b = false / this.b == true)。
+  // 比較結果 (x < y) の store はタグ変換が要るので対象外 (numeric 降格のまま)
+  const isBoolConst = (id: number): boolean => {
+    const o = opById.get(id);
+    return o?.opcode === "Const" && typeof o.value === "boolean";
+  };
   const CMP = new Set(["Equal", "NotEqual", "StrictEqual", "StrictNotEqual"]);
   const tagged = new Set<string>(props);
   const nestedNames = new Set<string>();
@@ -1867,7 +1922,7 @@ export function classifyTaggedProps(irFunc: IRFunction): { taggedProps: Set<stri
         let ok = false;
         if (CMP.has(c.opcode)) {
           const other = c.args[argIdx === 0 ? 1 : 0];
-          ok = rootOf.has(other) || isNullOrUndef(other);
+          ok = rootOf.has(other) || isNullOrUndef(other) || isBoolConst(other);
         } else if (c.opcode === "Branch" || c.opcode === "Not" || c.opcode === "Return") {
           ok = true;
         } else if (c.opcode === "StoreProperty" && argIdx === 1 && c.globalName && tagged.has(c.globalName) && isThisRooted(c.args[0])) {
@@ -1880,7 +1935,7 @@ export function classifyTaggedProps(irFunc: IRFunction): { taggedProps: Set<stri
     for (const name of [...tagged]) {
       for (const st of storesByProp.get(name) ?? []) {
         const vid = st.args[1];
-        if (!rootOf.has(vid) && !isNullOrUndef(vid)) {
+        if (!rootOf.has(vid) && !isNullOrUndef(vid) && !isBoolConst(vid)) {
           tagged.delete(name); changed = true; break;
         }
       }

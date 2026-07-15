@@ -162,3 +162,65 @@ describe("Phase 36-4 — ユーザー定義 valueOf/toString とビルトイン"
   it("メソッド無しは従来の既定値", () => agree(`isNaN(Number({})) ? 1 : 0;`, 1));
   it("+= の文字列結果は内容比較に乗る (JSString 生成)", () => agree(`var x = 1; x += [2]; ["12"].indexOf(x);`, 0));
 });
+
+describe("Phase 36-5 — JIT の boolean 表現 (tagged bool タグ + bool return)", () => {
+  const jopts = { jit: true, jitThreshold: 3, useIR: true } as const;
+  it("this.b = false が write-back 後も false", () => {
+    const src = `
+      function T() { this.b = true; this.n = 0; }
+      T.prototype.step = function () { this.b = false; this.n = this.n + 1; return 0; };
+      var t = new T();
+      for (var i = 0; i < 30; i++) { t.step(); }
+      t.b === false ? 1 : 0;
+    `;
+    assert.equal(vmEvaluate(src, jopts), vmEvaluate(src));
+    assert.equal(vmEvaluate(src, jopts), 1);
+  });
+  it("copy-in された bool prop の truthiness", () => {
+    const src = `
+      function T() { this.flag = false; }
+      T.prototype.check = function () { return this.flag ? 1 : 0; };
+      var t = new T();
+      var r = 0;
+      for (var i = 0; i < 30; i++) { r = t.check(); }
+      t.flag = true;
+      r * 10 + t.check();
+    `;
+    assert.equal(vmEvaluate(src, jopts), vmEvaluate(src));
+    assert.equal(vmEvaluate(src, jopts), 1);
+  });
+  it("return this.b が boolean のまま (tagged decode)", () => {
+    const src = `
+      function T() { this.b = false; }
+      T.prototype.get = function () { return this.b; };
+      var t = new T();
+      var got;
+      for (var i = 0; i < 30; i++) { got = t.get(); }
+      got === false ? 1 : 0;
+    `;
+    assert.equal(vmEvaluate(src, jopts), 1);
+  });
+  it("bool return が number にならない (両 JIT パス)", () => {
+    for (const useIR of [false, true]) {
+      const src = `
+        function f(a, b) { return a < b; }
+        var got;
+        for (var i = 0; i < 300; i++) { got = f(1, 2); }
+        got === true ? 1 : 0;
+      `;
+      assert.equal(vmEvaluate(src, { jit: true, jitThreshold: 4, useIR }), 1, `useIR=${useIR}`);
+    }
+  });
+  it("bool/非bool 混在 return は VM で正しく", () => {
+    for (const useIR of [false, true]) {
+      const src = `
+        function f(c) { if (c) return false; return 42; }
+        var got;
+        for (var i = 0; i < 300; i++) { got = f(0); }
+        var g2 = f(1);
+        (got === 42 ? 10 : 0) + (g2 === false ? 1 : 0);
+      `;
+      assert.equal(vmEvaluate(src, { jit: true, jitThreshold: 4, useIR }), 11, `useIR=${useIR}`);
+    }
+  });
+});
