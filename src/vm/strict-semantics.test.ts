@@ -265,3 +265,14 @@ describe("Phase 36-6 — プリミティブへのプロパティ代入は TypeEr
   it("代入失敗後に string プロパティは汚染されない", () =>
     agree(`try { let s = "a"; s.x = 5; } catch (e) {} ("a").x;`, undefined));
 });
+
+describe("Phase 36-6 — TDZ とエラー優先順位 (spec 7.x SetMutableBinding)", () => {
+  // const-in-TDZ への代入: TDZ (ReferenceError) が const-immutable (TypeError) より優先
+  it("宣言前 const への代入は ReferenceError (TypeError より優先)", () =>
+    allThrow(`switch (0) { case 1: const v0 = 1; break; default: v0 = 2; }`, ReferenceError));
+  // 複合代入 (prim).x += RHS: RHS 評価 (TDZ) がプリミティブ書込 TypeError より先
+  it("複合代入は RHS 評価が先 (RHS の TDZ が prim 書込 TypeError より優先)", () =>
+    allThrow(
+      `const b = true; switch (0) { case 1: const v = 1; break; default: b.x += (true ? v : 0); }`,
+      ReferenceError));
+});

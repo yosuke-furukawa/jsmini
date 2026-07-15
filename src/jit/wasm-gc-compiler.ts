@@ -167,6 +167,8 @@ function translateGCBytecode(
         break;
       case "StaHole":
         break; // TDZ の穴初期化。JIT では no-op
+      case "CheckTDZ":
+        break; // const-TDZ 優先判定。JIT では no-op
       case "StaLocalTDZ": // TDZ 再代入チェックは JIT では省略
       case "StaLocal":
         out.push(0x22, instr.operand!); // local.tee
@@ -311,6 +313,7 @@ function translateGCSingle(
     case "LdaLocalTDZ": // TDZ チェックは JIT では省略
     case "LdaLocal": out.push(WASM_OP.local_get, instr.operand!); return out;
     case "StaHole": return out; // TDZ の穴初期化。JIT では no-op (空の out)
+    case "CheckTDZ": return out; // const-TDZ 優先判定。JIT では no-op
     case "LdaConst": {
       const val = constants[instr.operand!];
       if (typeof val !== "number") return null;

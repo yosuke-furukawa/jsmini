@@ -248,7 +248,11 @@ class BytecodeCompiler {
   // 変数のストア (代入)。const 再代入は TypeError、未宣言グローバル代入は strict の ReferenceError。
   emitStore(name: string): void {
     if (this.isConstBinding(name)) {
-      // const への再代入 → 実行時 TypeError (初期化は compileBindingTarget が別途 StaLocal で行う)
+      // const への再代入 → 実行時 TypeError (初期化は compileBindingTarget が別途 StaLocal で行う)。
+      // ただし初期化前 (TDZ) なら spec は const-immutable より TDZ を優先 (ReferenceError)
+      // なので、自スコープの lexical スロットに解決できるときは CheckTDZ を先に挟む
+      const slot = this.resolveLocal(name);
+      if (slot !== null && this.lexicalSlots.has(slot)) this.emit("CheckTDZ", slot);
       this.emit("ThrowConstAssign", this.addConstant(name));
       return;
     }

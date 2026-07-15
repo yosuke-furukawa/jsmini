@@ -449,6 +449,8 @@ function translateRange(
       case "StaHole":
         // TDZ の穴初期化。JIT では no-op (実 StaLocal が値を決める)
         break;
+      case "CheckTDZ":
+        break; // const-TDZ 優先判定。JIT では no-op (cold)
       case "LdaUpvalueTDZ": // TDZ チェックは JIT では省略
       case "LdaUpvalue":
         // upvalue は通常パラメータの後に追加パラメータとして渡される

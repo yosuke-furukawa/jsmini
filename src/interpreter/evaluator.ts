@@ -1336,7 +1336,10 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       if (expr.operator === "=") {
         newValue = yield* evalExpression(expr.right, env);
       } else {
-        if (isMember && isPrimitiveTarget(memberObj)) throw primTargetError();
+        // 複合代入は現在値を読む。null/undefined はプロパティ読み出し自体が
+        // TypeError。string/number/boolean/symbol は読みは undefined を返し
+        // (throw しない)、書き込み時に TypeError になる (RHS 評価が先)
+        if (isMember && (memberObj === null || memberObj === undefined)) throw primTargetError();
         const currentValue = isMember
           ? getProperty(memberObj as JSObject, memberKey)
           : env.get(expr.left.name);

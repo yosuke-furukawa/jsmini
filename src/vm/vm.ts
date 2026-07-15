@@ -917,6 +917,17 @@ export class VM {
           if (box) box.value = val;
           break;
         }
+        case "CheckTDZ": {
+          // const 再代入時の TDZ 優先判定: 穴なら ReferenceError (const の TypeError より先)
+          const slot = instr.operand!;
+          const box = (frame as any).__localBoxes?.get(slot) as UpvalueBox | undefined;
+          const cur = box ? box.value : frame.locals[slot];
+          if (cur === TDZ_HOLE) {
+            const err = new ReferenceError("Cannot access lexical binding before initialization");
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+          }
+          break;
+        }
         case "StaHole": {
           // lexical スコープ入口: スロットを TDZ の穴で初期化
           const slot = instr.operand!;
