@@ -245,3 +245,10 @@ describe("Phase 36-6 — TDZ (Temporal Dead Zone) の実行時実装", () => {
   it("switch case 内 let は別 case で共有 (初期化後)", () =>
     agree(`let r; switch (1) { case 1: let v = 7; case 2: r = v; } r;`, 7));
 });
+
+describe("Phase 36-6 — null/undefined へのプロパティ代入は TypeError", () => {
+  it("null[key] = v (computed)", () => allThrow(`var v0 = null; (v0)["k0"] = 1;`, TypeError));
+  it("null.x = v (dotted)", () => allThrow(`var v0 = null; v0.x = 1;`, TypeError));
+  it("undefined.x = v", () => allThrow(`var v0; v0.x = 1;`, TypeError));
+  it("null.x += v (複合代入)", () => allThrow(`var v0 = null; v0.x += 1;`, TypeError));
+});

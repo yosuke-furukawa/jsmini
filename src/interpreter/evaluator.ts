@@ -1310,9 +1310,14 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       // - 複合代入は「左辺の参照解決 + 現在値の読み出し → 右辺の評価」。
       //   右辺を先に評価すると、未宣言変数への複合代入で右辺内の例外が
       //   ReferenceError より先に飛んでしまう
+      const isMember = expr.left.type === "MemberExpression";
       let memberObj: Record<string, unknown> | null = null;
       let memberKey = "";
-      if (expr.left.type === "MemberExpression") {
+      // null/undefined へのプロパティ代入は TypeError (ReferenceError ではない)。
+      // 単純代入 (=) では RHS 評価後に、複合代入では現在値の読み出し時に throw する
+      const nullTargetError = () =>
+        new TypeError(`Cannot set properties of ${memberObj === null ? "null" : "undefined"} (setting '${memberKey}')`);
+      if (isMember) {
         memberObj = (yield* evalExpression(expr.left.object, env)) as Record<string, unknown>;
         memberKey = yield* resolveMemberKey(expr.left, env);
       }
@@ -1320,7 +1325,8 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       if (expr.operator === "=") {
         newValue = yield* evalExpression(expr.right, env);
       } else {
-        const currentValue = memberObj !== null
+        if (isMember && (memberObj === null || memberObj === undefined)) throw nullTargetError();
+        const currentValue = isMember
           ? getProperty(memberObj as JSObject, memberKey)
           : env.get(expr.left.name);
         const rightValue = yield* evalExpression(expr.right, env);
@@ -1347,7 +1353,8 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         }
       }
 
-      if (memberObj !== null) {
+      if (isMember) {
+        if (memberObj === null || memberObj === undefined) throw nullTargetError();
         memberObj[memberKey] = newValue;
       } else {
         env.set(expr.left.name, newValue);
