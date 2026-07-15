@@ -27,6 +27,7 @@ class BytecodeCompiler {
   private isGenerator = false;
   private isAsync = false;
   private lexicalLocals = new Set<string>(); // let/const で宣言されたローカル変数名
+  private constLocals = new Set<string>(); // const で宣言された変数名 (再代入を禁止するため)
   private upvalues: { name: string; parentSlot: number }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
@@ -145,8 +146,24 @@ class BytecodeCompiler {
     this.emit("LdaGlobal", nameIdx);
   }
 
-  // 変数のストア
+  // name が (自スコープまたは外側スコープの) const バインディングか。
+  // 最初に name をローカルとして宣言しているスコープの const 判定を返す (内側のシャドウ優先)。
+  private isConstBinding(name: string): boolean {
+    let c: BytecodeCompiler | null = this;
+    while (c) {
+      if (c.locals.has(name)) return c.constLocals.has(name);
+      c = c.parent;
+    }
+    return false;
+  }
+
+  // 変数のストア (代入)。const 再代入は TypeError、未宣言グローバル代入は strict の ReferenceError。
   emitStore(name: string): void {
+    if (this.isConstBinding(name)) {
+      // const への再代入 → 実行時 TypeError (初期化は compileBindingTarget が別途 StaLocal で行う)
+      this.emit("ThrowConstAssign", this.addConstant(name));
+      return;
+    }
     const slot = this.resolveLocal(name);
     if (slot !== null) {
       this.emit("StaLocal", slot);
@@ -159,8 +176,9 @@ class BytecodeCompiler {
         return;
       }
     }
+    // どのスコープにも束縛が無い代入。strict では暗黙グローバルを作らず ReferenceError。
     const nameIdx = this.addConstant(name);
-    this.emit("StaGlobal", nameIdx);
+    this.emit("StaGlobalStrict", nameIdx);
   }
 
   finish(name: string): BytecodeFunction {
@@ -196,6 +214,16 @@ class BytecodeCompiler {
         if (elem) this.preDeclareBindingNames(elem);
       }
     }
+  }
+
+  // バインディングパターンから全 Identifier 名を out に集める (const 名の収集用)
+  private collectPatternNames(id: any, out: Set<string>): void {
+    if (!id) return;
+    if (id.type === "Identifier") out.add(id.name);
+    else if (id.type === "ObjectPattern") for (const p of id.properties) this.collectPatternNames(p.type === "RestElement" ? p.argument : p.value, out);
+    else if (id.type === "ArrayPattern") for (const e of id.elements) this.collectPatternNames(e, out);
+    else if (id.type === "RestElement") this.collectPatternNames(id.argument, out);
+    else if (id.type === "AssignmentPattern") this.collectPatternNames(id.left, out);
   }
 
   compileBindingTarget(id: any): void {
@@ -435,6 +463,12 @@ class BytecodeCompiler {
         break;
 
       case "VariableDeclaration": {
+        // const 宣言名を記録 (再代入禁止のため; トップレベル・関数内どちらも)
+        if (stmt.kind === "const") {
+          for (const decl of stmt.declarations) {
+            this.collectPatternNames(decl.id, this.constLocals);
+          }
+        }
         // let/const はトップレベルでもローカルスロットを使う (ブロックスコープ)
         if (!this.isFunction && stmt.kind !== "var") {
           for (const decl of stmt.declarations) {

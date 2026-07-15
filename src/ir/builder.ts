@@ -325,7 +325,8 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           }
           break;
         }
-        case "StaGlobal": {
+        case "StaGlobal":
+        case "StaGlobalStrict": {
           const name = constants[instr.operand!] as string;
           const val = stack[stack.length - 1]; // peek
           const op = registerOp(createOp(irFunc, "StoreGlobal", [val], "any"));
