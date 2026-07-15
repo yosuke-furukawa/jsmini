@@ -2024,22 +2024,28 @@ function* evalBinaryExpression(
         default: return ln >= rn;
       }
     }
-    case "==":
+    case "==": {
       if (isJSString(left) && isJSString(right)) return jsStringEquals(left, right);
-      if (isJSString(left) || isJSString(right)) return false;
       // 両辺オブジェクトなら参照比較 (JS 仕様 7.2.14)。ToPrimitive しない。
       // これを怠ると別オブジェクト同士が "[object Object]" 同士で true になる
       if (isEqObjectTW(rawLeft) && isEqObjectTW(rawRight)) return rawLeft === rawRight;
-      return left == right;
+      // JSString は host string に解いて host の == に委ねる。
+      // string↔number/boolean の ToNumber 段 ("5" == 5 → true) を host が行う
+      const lh = isJSString(left) ? jsStringToString(left) : left;
+      const rh = isJSString(right) ? jsStringToString(right) : right;
+      return lh == rh;
+    }
     case "===":
       if (isJSString(rawLeft) && isJSString(rawRight)) return jsStringEquals(rawLeft, rawRight);
       if (isJSString(rawLeft) || isJSString(rawRight)) return false;
       return rawLeft === rawRight;
-    case "!=":
+    case "!=": {
       if (isJSString(left) && isJSString(right)) return !jsStringEquals(left, right);
-      if (isJSString(left) || isJSString(right)) return true;
       if (isEqObjectTW(rawLeft) && isEqObjectTW(rawRight)) return rawLeft !== rawRight;
-      return left != right;
+      const lh = isJSString(left) ? jsStringToString(left) : left;
+      const rh = isJSString(right) ? jsStringToString(right) : right;
+      return lh != rh;
+    }
     case "!==":
       if (isJSString(rawLeft) && isJSString(rawRight)) return !jsStringEquals(rawLeft, rawRight);
       if (isJSString(rawLeft) || isJSString(rawRight)) return true;

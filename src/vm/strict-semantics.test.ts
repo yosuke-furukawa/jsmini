@@ -136,3 +136,18 @@ describe("JIT の数値表現 — i32 で表現できない値", () => {
     }
   });
 });
+
+describe("Phase 36-3 — == の ToNumber 段 (JS 仕様 7.2.14)", () => {
+  it("'5' == 5", () => agree(`("5" == 5) ? 1 : 0;`, 1));
+  it("'5' != 5 は false", () => agree(`("5" != 5) ? 1 : 0;`, 0));
+  it("'abc' == 5 は false (NaN)", () => agree(`("abc" == 5) ? 1 : 0;`, 0));
+  it("'1' == true", () => agree(`("1" == true) ? 1 : 0;`, 1));
+  it("'' == 0", () => agree(`("" == 0) ? 1 : 0;`, 1));
+  it("'' == null は false", () => agree(`("" == null) ? 1 : 0;`, 0));
+  it("null == undefined", () => agree(`(null == undefined) ? 1 : 0;`, 1));
+  it("null == 0 は false", () => agree(`(null == 0) ? 1 : 0;`, 0));
+  it("[5] == 5 (ToPrimitive 経由)", () => agree(`([5] == 5) ? 1 : 0;`, 1));
+  it("'5' === 5 は false のまま", () => agree(`("5" === 5) ? 1 : 0;`, 0));
+  it("別オブジェクト同士は false (参照比較)", () => agree(`var a = {}, b = {}; (a == b ? 1 : 0) * 10 + (a == a ? 1 : 0);`, 1));
+  it("2 == true は false", () => agree(`(2 == true) ? 1 : 0;`, 0));
+});

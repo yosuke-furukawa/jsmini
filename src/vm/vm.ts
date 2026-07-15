@@ -784,24 +784,29 @@ export class VM {
           const left = this.pop();
           if (isJSString(left) && isJSString(right)) {
             this.push(jsStringEquals(left, right));
-          } else if (isJSString(left) || isJSString(right)) {
-            this.push(false);
-          } else if (instr.op === "Equal") {
-            // 両辺がオブジェクトなら参照比較 (JS 仕様 7.2.14)。
-            // ToPrimitive は片辺が primitive のときだけ。これを怠ると
+          } else if (instr.op === "StrictEqual") {
+            // === は型が違えば false。片方だけ JSString なら相手は文字列でないので false
+            this.push(isJSString(left) || isJSString(right) ? false : left === right);
+          } else {
+            // == (JS 仕様 7.2.14)。両辺オブジェクトなら参照比較。
+            // ToPrimitive は片辺が primitive のときだけ — これを怠ると
             // 別オブジェクト同士が "[object Object]" == "[object Object]" で
             // true になる (deltablue の strength == REQUIRED が誤爆した)
             if (isEqObject(left) && isEqObject(right)) {
               this.push(left === right);
             } else {
-              // == は ToPrimitive で型変換してから比較
               const l = this.toPrimitive(left); if (l === THROWN_SENTINEL) { continue; }
               const r = this.toPrimitive(right); if (r === THROWN_SENTINEL) { continue; }
               if (isJSString(l) && isJSString(r)) this.push(jsStringEquals(l, r));
-              else this.push(l == r);
+              else {
+                // JSString は host string に解いて host の == に委ねる。
+                // string↔number/boolean の ToNumber 段 ("5" == 5 → true) を
+                // host が正しくやってくれる (以前は片方 JSString = 即 false だった)
+                const lh = isJSString(l) ? jsStringToString(l) : l;
+                const rh = isJSString(r) ? jsStringToString(r) : r;
+                this.push(lh == rh);
+              }
             }
-          } else {
-            this.push(left === right);
           }
           break;
         }
@@ -811,8 +816,6 @@ export class VM {
           const left = this.pop();
           if (isJSString(left) && isJSString(right)) {
             this.push(!jsStringEquals(left, right));
-          } else if (isJSString(left) || isJSString(right)) {
-            this.push(true);
           } else if (instr.op === "NotEqual") {
             if (isEqObject(left) && isEqObject(right)) {
               this.push(left !== right);
@@ -820,10 +823,14 @@ export class VM {
               const l = this.toPrimitive(left); if (l === THROWN_SENTINEL) { continue; }
               const r = this.toPrimitive(right); if (r === THROWN_SENTINEL) { continue; }
               if (isJSString(l) && isJSString(r)) this.push(!jsStringEquals(l, r));
-              else this.push(l != r);
+              else {
+                const lh = isJSString(l) ? jsStringToString(l) : l;
+                const rh = isJSString(r) ? jsStringToString(r) : r;
+                this.push(lh != rh);
+              }
             }
           } else {
-            this.push(left !== right);
+            this.push(isJSString(left) || isJSString(right) ? true : left !== right);
           }
           break;
         }
