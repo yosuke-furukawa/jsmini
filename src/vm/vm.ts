@@ -742,13 +742,16 @@ export class VM {
           this.push((l as number) ** (r as number));
           break;
         }
-        case "BitAnd": { const r = this.pop(); const l = this.pop(); this.push((l as number) & (r as number)); break; }
-        case "BitOr": { const r = this.pop(); const l = this.pop(); this.push((l as number) | (r as number)); break; }
-        case "BitXor": { const r = this.pop(); const l = this.pop(); this.push((l as number) ^ (r as number)); break; }
-        case "BitNot": { this.push(~(this.pop() as number)); break; }
-        case "ShiftLeft": { const r = this.pop(); const l = this.pop(); this.push((l as number) << (r as number)); break; }
-        case "ShiftRight": { const r = this.pop(); const l = this.pop(); this.push((l as number) >> (r as number)); break; }
-        case "UShiftRight": { const r = this.pop(); const l = this.pop(); this.push((l as number) >>> (r as number)); break; }
+        // ビット演算・シフトも被演算子を ToPrimitive してから数値化する (JS の ToNumber → ToInt32)。
+        // これを省くと ({}) & 1 のようなオブジェクト被演算子で host が "Cannot convert object to
+        // primitive value" を投げてしまう (正しくは NaN → 0)。
+        case "BitAnd": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) & (r as number)); break; }
+        case "BitOr": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) | (r as number)); break; }
+        case "BitXor": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) ^ (r as number)); break; }
+        case "BitNot": { const v = this.toPrimitive(this.pop()); if (v === THROWN_SENTINEL) continue; this.push(~(v as number)); break; }
+        case "ShiftLeft": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) << (r as number)); break; }
+        case "ShiftRight": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) >> (r as number)); break; }
+        case "UShiftRight": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) >>> (r as number)); break; }
         case "IsNullish": {
           const val = this.pop();
           this.push(val === null || val === undefined);
@@ -887,6 +890,22 @@ export class VM {
           const val = this.peek();
           this.globals.set(name, val);
           // JIT: バイトコード関数をグローバルに登録されたら追跡
+          if (this.jit && typeof val === "object" && val !== null && "bytecode" in val) {
+            this.jit.registerFunc(name, val as BytecodeFunction);
+          }
+          break;
+        }
+        case "StaGlobalStrict": {
+          // 代入専用。宣言 (var/function/組み込み) されていないグローバルへの代入は
+          // strict の ReferenceError (暗黙グローバルを作らない)。
+          const name = constants[instr.operand!] as string;
+          if (!this.globals.has(name)) {
+            const err = new ReferenceError(`${name} is not defined`);
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
+          const val = this.peek();
+          this.globals.set(name, val);
           if (this.jit && typeof val === "object" && val !== null && "bytecode" in val) {
             this.jit.registerFunc(name, val as BytecodeFunction);
           }
@@ -1307,6 +1326,12 @@ export class VM {
             // 現在の run() スコープ内にハンドラがない: JS 例外として上位に伝播
             throw { __thrown: true, value: throwValue };
           }
+          break;
+        }
+        case "ThrowConstAssign": {
+          const name = constants[instr.operand!] as string;
+          const err = new TypeError(`Assignment to constant variable '${name}'`);
+          if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
           break;
         }
 

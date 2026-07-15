@@ -323,8 +323,16 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   (BooleanCtor as any).prototype = {};
   vm.setGlobal("Boolean", BooleanCtor);
 
+  // host の数値ビルトイン (Number/isNaN/Math.*) に jsmini 値を渡す前の前処理。
+  // jsmini のプレーンオブジェクトは host prototype が null なので host の ToNumber が
+  // "Cannot convert object to primitive value" を投げてしまう。JS 仕様ではプレーン
+  // オブジェクトの ToPrimitive は "[object Object]" → NaN なので、ここで NaN に潰す。
+  // (配列は host Array.prototype 経由で正しく数値化でき、文字列は既存処理に委ねる)
+  const numArg = (v: unknown): unknown =>
+    v !== null && typeof v === "object" && !Array.isArray(v) && !isJSString(v) ? NaN : v;
+
   function NumberCtor(this: any, v: unknown) {
-    const n = isJSString(v) ? Number(jsStringToString(v)) : Number(v);
+    const n = isJSString(v) ? Number(jsStringToString(v)) : Number(numArg(v));
     if (new.target) { this.valueOf = () => n; return; }
     return n;
   }
@@ -353,8 +361,8 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   vm.setGlobal("Function", function() {});
 
   // グローバル関数
-  vm.setGlobal("isNaN", (v: unknown) => Number.isNaN(Number(v)));
-  vm.setGlobal("isFinite", (v: unknown) => Number.isFinite(Number(v)));
+  vm.setGlobal("isNaN", (v: unknown) => Number.isNaN(Number(numArg(v))));
+  vm.setGlobal("isFinite", (v: unknown) => Number.isFinite(Number(numArg(v))));
   vm.setGlobal("parseInt", (s: unknown, radix?: number) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
   vm.setGlobal("parseFloat", (s: unknown) => parseFloat(isJSString(s) ? jsStringToString(s) : String(s)));
 
@@ -471,8 +479,11 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   ObjectWrapper.prototype = Object.prototype;
   vm.setGlobal("Object", ObjectWrapper);
 
-  // Math
-  vm.setGlobal("Math", {
+  // Math — 数値メソッドは引数を numArg で前処理してから host に渡す
+  // (プレーンオブジェクト被演算子が host の ToNumber で throw するのを防ぐ)
+  const wrapNum = (fn: (...a: number[]) => number) =>
+    (...args: unknown[]) => fn(...(args.map(numArg) as number[]));
+  const rawMath: Record<string, unknown> = {
     floor: Math.floor, ceil: Math.ceil, round: Math.round,
     abs: Math.abs, min: Math.min, max: Math.max,
     sqrt: Math.sqrt, pow: Math.pow, log: Math.log,
@@ -489,7 +500,13 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     LN2: Math.LN2, LN10: Math.LN10,
     LOG2E: Math.LOG2E, LOG10E: Math.LOG10E,
     SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
-  });
+  };
+  const mathObj: Record<string, unknown> = {};
+  for (const k of Object.keys(rawMath)) {
+    const v = rawMath[k];
+    mathObj[k] = typeof v === "function" ? wrapNum(v as (...a: number[]) => number) : v;
+  }
+  vm.setGlobal("Math", mathObj);
 
   // Date: ネイティブ Date を公開。string 引数は JSString → string 変換。
   const unwrapStr = (v: unknown) => isJSString(v) ? jsStringToString(v) : v;
