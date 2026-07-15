@@ -324,15 +324,27 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   vm.setGlobal("Boolean", BooleanCtor);
 
   // host の数値ビルトイン (Number/isNaN/Math.*) に jsmini 値を渡す前の前処理。
+  // JSString はラップを解いて数値化 (host に任せると "[object Object]" 経由で NaN)。
   // jsmini のプレーンオブジェクトは host prototype が null なので host の ToNumber が
   // "Cannot convert object to primitive value" を投げてしまう。JS 仕様ではプレーン
   // オブジェクトの ToPrimitive は "[object Object]" → NaN なので、ここで NaN に潰す。
-  // (配列は host Array.prototype 経由で正しく数値化でき、文字列は既存処理に委ねる)
-  const numArg = (v: unknown): unknown =>
-    v !== null && typeof v === "object" && !Array.isArray(v) && !isJSString(v) ? NaN : v;
+  // (配列は host Array.prototype 経由で正しく数値化できるので host に委ねる)
+  const numArg = (v: unknown): unknown => {
+    if (isJSString(v)) return Number(jsStringToString(v));
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) return NaN;
+    return v;
+  };
+  // host の文字列ビルトイン (String/parseInt/parseFloat) 用の前処理。
+  // プレーンオブジェクトは host prototype が null で host String() が throw するので
+  // "[object Object]" に潰す (strArg は string メソッド用の既存ヘルパで別物)
+  const strConv = (v: unknown): string => {
+    if (isJSString(v)) return jsStringToString(v);
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) return "[object Object]";
+    return String(v);
+  };
 
-  function NumberCtor(this: any, v: unknown) {
-    const n = isJSString(v) ? Number(jsStringToString(v)) : Number(numArg(v));
+  function NumberCtor(this: any, v?: unknown) {
+    const n = arguments.length === 0 ? 0 : Number(numArg(v));
     if (new.target) { this.valueOf = () => n; return; }
     return n;
   }
@@ -346,8 +358,9 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   (NumberCtor as any).prototype = {};
   vm.setGlobal("Number", NumberCtor);
 
-  function StringCtor(this: any, v: unknown) {
-    const s = isJSString(v) ? v : internString(String(v));
+  function StringCtor(this: any, v?: unknown) {
+    // String() 無引数は "" だが String(undefined) は "undefined" (arguments.length で判別)
+    const s = isJSString(v) ? v : internString(arguments.length === 0 ? "" : strConv(v));
     if (new.target) { this.valueOf = () => s; this.toString = () => s; return; }
     return s;
   }
@@ -363,8 +376,8 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   // グローバル関数
   vm.setGlobal("isNaN", (v: unknown) => Number.isNaN(Number(numArg(v))));
   vm.setGlobal("isFinite", (v: unknown) => Number.isFinite(Number(numArg(v))));
-  vm.setGlobal("parseInt", (s: unknown, radix?: number) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
-  vm.setGlobal("parseFloat", (s: unknown) => parseFloat(isJSString(s) ? jsStringToString(s) : String(s)));
+  vm.setGlobal("parseInt", (s: unknown, radix?: number) => parseInt(strConv(s), radix));
+  vm.setGlobal("parseFloat", (s: unknown) => parseFloat(strConv(s)));
 
   // JSObject のキーを取得するヘルパー (内部プロパティを除外)
   const jsObjKeys = (obj: unknown): string[] => {
