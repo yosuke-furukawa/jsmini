@@ -168,14 +168,23 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     // 配列は安全 join 経由で数値化 (JSString 要素を host join に掛けると
     // "[object Object]" になる)
     if (Array.isArray(v)) return Number(arrayToPrimitiveString(v));
-    if (v !== null && typeof v === "object") return NaN;
+    if (v !== null && typeof v === "object") {
+      // ユーザー定義 valueOf/toString を呼ぶ (VM 側 tryUserToPrimitive と同じ規則)
+      const p = toPrimitive(v, "number");
+      if (isJSString(p)) return Number(jsStringToString(p));
+      return typeof p === "object" && p !== null ? NaN : p;
+    }
     return v;
   };
   // 文字列ビルトイン (String/parseInt/parseFloat) 用の前処理 (VM 側 strConv と同一規則)
   const twStrConv = (v: unknown): string => {
     if (isJSString(v)) return jsStringToString(v);
     if (Array.isArray(v)) return arrayToPrimitiveString(v);
-    if (v !== null && typeof v === "object") return "[object Object]";
+    if (v !== null && typeof v === "object") {
+      const p = toPrimitive(v, "string");
+      if (isJSString(p)) return jsStringToString(p);
+      return typeof p === "object" && p !== null ? "[object Object]" : String(p);
+    }
     return String(v);
   };
   // Number: JSString を受け取れるカスタムコンストラクタ (host Number の statics は引き継ぐ)
@@ -1316,15 +1325,20 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
           : env.get(expr.left.name);
         const rightValue = yield* evalExpression(expr.right, env);
         switch (expr.operator) {
-          case "+=":
-            if (isJSString(currentValue) || isJSString(rightValue)) {
-              const l = isJSString(currentValue) ? currentValue : createSeqString(String(currentValue));
-              const r = isJSString(rightValue) ? rightValue : createSeqString(String(rightValue));
+          case "+=": {
+            // 二項 + と同じ規則: ToPrimitive → どちらかが文字列なら JSString 連結
+            // (host + に任せると host string が生まれ、intern 前提の比較から漏れる)
+            const lp = toPrimitive(currentValue);
+            const rp = toPrimitive(rightValue);
+            if (isJSString(lp) || isJSString(rp) || typeof lp === "string" || typeof rp === "string") {
+              const l = isJSString(lp) ? lp : createSeqString(String(lp));
+              const r = isJSString(rp) ? rp : createSeqString(String(rp));
               newValue = jsStringConcat(l, r);
             } else {
-              newValue = (currentValue as number) + (rightValue as number);
+              newValue = (lp as number) + (rp as number);
             }
             break;
+          }
           case "-=": newValue = toNumericOperand(currentValue) - toNumericOperand(rightValue); break;
           case "*=": newValue = toNumericOperand(currentValue) * toNumericOperand(rightValue); break;
           case "/=": newValue = toNumericOperand(currentValue) / toNumericOperand(rightValue); break;
@@ -1983,7 +1997,10 @@ function* evalBinaryExpression(
   const right = toPrimitive(rawRight);
   switch (expr.operator) {
     case "+":
-      if (isJSString(left) || isJSString(right)) {
+      // TW の toPrimitive はプレーンオブジェクトで host string を返すことが
+      // あるので、host string も文字列連結の対象にして JSString を生成する
+      // (host string のまま流すと intern 前提の内容比較から漏れる)
+      if (isJSString(left) || isJSString(right) || typeof left === "string" || typeof right === "string") {
         const l = isJSString(left) ? left : createSeqString(String(left));
         const r = isJSString(right) ? right : createSeqString(String(right));
         return jsStringConcat(l, r);

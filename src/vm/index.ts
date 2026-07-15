@@ -343,12 +343,37 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   // "Cannot convert object to primitive value" を投げてしまう。JS 仕様ではプレーン
   // オブジェクトの ToPrimitive は "[object Object]" → NaN なので、ここで NaN に潰す。
   // (配列は host Array.prototype 経由で正しく数値化できるので host に委ねる)
+  // jsmini オブジェクトのユーザー定義 valueOf/toString を呼んでプリミティブ化を
+  // 試みる。ユーザー定義 (bytecode 関数) が無ければ NO_USER_PRIM (呼び出し元の既定へ。
+  // ユーザー関数が undefined を返すケースと区別する)。
+  // ユーザー定義があるのに全部オブジェクトを返したら TypeError (仕様 / TW と同じ)
+  const NO_USER_PRIM = Symbol("no-user-prim");
+  const tryUserToPrimitive = (v: unknown, hint: "number" | "string"): unknown => {
+    const order = hint === "number" ? ["valueOf", "toString"] : ["toString", "valueOf"];
+    let found = false;
+    for (const name of order) {
+      const m = isJSObject(v) ? jsObjGet(v, name) : (v as Record<string, unknown>)[name];
+      const isUserFn = m !== null && typeof m === "object" && ("bytecode" in (m as any) || "__closure" in (m as any));
+      if (isUserFn) {
+        found = true;
+        const r = vm.callFunction(m, v, []);
+        if (r === null || r === undefined || typeof r !== "object" || isJSString(r)) return r;
+      }
+    }
+    if (found) throw new TypeError("Cannot convert object to primitive value");
+    return NO_USER_PRIM;
+  };
+
   const numArg = (v: unknown): unknown => {
     if (isJSString(v)) return Number(jsStringToString(v));
     // 配列は安全 join 経由で数値化 (host に渡すと jsmini オブジェクト要素の
     // null proto で join が throw する)
     if (Array.isArray(v)) return Number(arrayToPrimitiveString(v));
-    if (v !== null && typeof v === "object") return NaN;
+    if (v !== null && typeof v === "object") {
+      const p = tryUserToPrimitive(v, "number");
+      if (p !== NO_USER_PRIM) return isJSString(p) ? Number(jsStringToString(p)) : p;
+      return NaN;
+    }
     return v;
   };
   // host の文字列ビルトイン (String/parseInt/parseFloat) 用の前処理。
@@ -359,7 +384,11 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   const strConv = (v: unknown): string => {
     if (isJSString(v)) return jsStringToString(v);
     if (Array.isArray(v)) return arrayToPrimitiveString(v);
-    if (v !== null && typeof v === "object") return "[object Object]";
+    if (v !== null && typeof v === "object") {
+      const p = tryUserToPrimitive(v, "string");
+      if (p !== NO_USER_PRIM) return isJSString(p) ? jsStringToString(p) : String(p);
+      return "[object Object]";
+    }
     return String(v);
   };
 

@@ -151,3 +151,14 @@ describe("Phase 36-3 — == の ToNumber 段 (JS 仕様 7.2.14)", () => {
   it("別オブジェクト同士は false (参照比較)", () => agree(`var a = {}, b = {}; (a == b ? 1 : 0) * 10 + (a == a ? 1 : 0);`, 1));
   it("2 == true は false", () => agree(`(2 == true) ? 1 : 0;`, 0));
 });
+
+describe("Phase 36-4 — ユーザー定義 valueOf/toString とビルトイン", () => {
+  it("Number(valueOf)", () => agree(`var o = { valueOf: function () { return 42; } }; Number(o);`, 42));
+  it("String(toString)", () => agree(`var o = { toString: function () { return "hi"; } }; String(o);`, "hi"));
+  it("Math.abs(valueOf)", () => agree(`var o = { valueOf: function () { return -7; } }; Math.abs(o);`, 7));
+  it("parseInt(toString)", () => agree(`var o = { toString: function () { return "42px"; } }; parseInt(o);`, 42));
+  it("String は toString 優先", () => agree(`var o = { valueOf: function () { return 1; }, toString: function () { return "s"; } }; String(o);`, "s"));
+  it("Number は valueOf 優先", () => agree(`var o = { valueOf: function () { return 1; }, toString: function () { return "2"; } }; Number(o);`, 1));
+  it("メソッド無しは従来の既定値", () => agree(`isNaN(Number({})) ? 1 : 0;`, 1));
+  it("+= の文字列結果は内容比較に乗る (JSString 生成)", () => agree(`var x = 1; x += [2]; ["12"].indexOf(x);`, 0));
+});
