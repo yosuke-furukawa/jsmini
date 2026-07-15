@@ -325,6 +325,10 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           }
           break;
         }
+        case "CheckGlobal":
+          // callee 存在チェック専用 (スタック効果なし)。JIT では callee が
+          // compile 時に解決される (未解決なら compile 失敗 → VM) ので no-op
+          break;
         case "StaGlobal":
         case "StaGlobalStrict": {
           const name = constants[instr.operand!] as string;

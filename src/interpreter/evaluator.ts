@@ -8,7 +8,7 @@ import {
   isJSFunction, createJSFunction, getProperty,
   collectBoundNames, bindPattern, assignPattern,
 } from "./values.js";
-import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "../vm/js-string.js";
+import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, toNumericOperand, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
 import { JSPromise, drainMicrotasks, isJSPromise } from "../runtime/promise.js";
 import "../runtime/host-patches.js";
@@ -85,7 +85,9 @@ function toPrimitive(value: unknown, hint: "number" | "string" = "number"): unkn
   if (value === null || value === undefined) return value;
   if (typeof value !== "object") return value;
   if (isJSString(value)) return value;
-  if (Array.isArray(value)) return value;
+  // 配列は join(",") 相当の文字列に (VM の toPrimitive と同じ規則)。
+  // 数値文脈は toNumericOperand が文字列から変換する
+  if (Array.isArray(value)) return internString(arrayToPrimitiveString(value));
 
   const obj = value as Record<string, unknown>;
   const methods = hint === "string" ? ["toString", "valueOf"] : ["valueOf", "toString"];
@@ -1174,12 +1176,12 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       const arg = expr.argument;
       let oldValue: number;
       if (arg.type === "Identifier") {
-        oldValue = env.get(arg.name) as number;
+        oldValue = toNumericOperand(toPrimitive(env.get(arg.name)));
       } else {
         // MemberExpression
         const obj = (yield* evalExpression(arg.object, env)) as JSObject;
         const key = yield* resolveMemberKey(arg, env);
-        oldValue = getProperty(obj, key) as number;
+        oldValue = toNumericOperand(toPrimitive(getProperty(obj, key)));
       }
       const newValue = expr.operator === "++" ? oldValue + 1 : oldValue - 1;
       if (arg.type === "Identifier") {
@@ -1278,11 +1280,12 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         return value;
       }
 
-      // 複合代入: 現在の値を取得して演算
-      const rightValue = yield* evalExpression(expr.right, env);
+      // 複合代入: JS 仕様の評価順は「左辺の参照解決 + 現在値の読み出し → 右辺の評価」。
+      // 右辺を先に評価すると、未宣言変数への複合代入で右辺内の例外が
+      // ReferenceError より先に飛んでしまう
       let newValue: unknown;
       if (expr.operator === "=") {
-        newValue = rightValue;
+        newValue = yield* evalExpression(expr.right, env);
       } else {
         let currentValue: unknown;
         if (expr.left.type === "MemberExpression") {
@@ -1291,6 +1294,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         } else {
           currentValue = env.get(expr.left.name);
         }
+        const rightValue = yield* evalExpression(expr.right, env);
         switch (expr.operator) {
           case "+=":
             if (isJSString(currentValue) || isJSString(rightValue)) {
@@ -1301,10 +1305,10 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
               newValue = (currentValue as number) + (rightValue as number);
             }
             break;
-          case "-=": newValue = (currentValue as number) - (rightValue as number); break;
-          case "*=": newValue = (currentValue as number) * (rightValue as number); break;
-          case "/=": newValue = (currentValue as number) / (rightValue as number); break;
-          case "%=": newValue = (currentValue as number) % (rightValue as number); break;
+          case "-=": newValue = toNumericOperand(currentValue) - toNumericOperand(rightValue); break;
+          case "*=": newValue = toNumericOperand(currentValue) * toNumericOperand(rightValue); break;
+          case "/=": newValue = toNumericOperand(currentValue) / toNumericOperand(rightValue); break;
+          case "%=": newValue = toNumericOperand(currentValue) % toNumericOperand(rightValue); break;
           default: throw new Error(`Unknown assignment operator: ${expr.operator}`);
         }
       }
@@ -1872,8 +1876,8 @@ function* evalUnaryExpression(
   const argument = yield* evalExpression(expr.argument, env);
   switch (expr.operator) {
     case "!": return !isTruthy(argument);
-    case "-": return -(argument as number);
-    case "~": return ~(argument as number);
+    case "-": return -toNumericOperand(toPrimitive(argument));
+    case "~": return ~toNumericOperand(toPrimitive(argument));
     default:
       throw new Error(`Unknown unary operator: ${expr.operator}`);
   }
@@ -1910,32 +1914,41 @@ function* evalBinaryExpression(
         return jsStringConcat(l, r);
       }
       return (left as number) + (right as number);
-    case "-": return (left as number) - (right as number);
-    case "*": return (left as number) * (right as number);
-    case "/": return (left as number) / (right as number);
-    case "%": return (left as number) % (right as number);
-    case "**": return (left as number) ** (right as number);
-    case "&": return (left as number) & (right as number);
-    case "|": return (left as number) | (right as number);
-    case "^": return (left as number) ^ (right as number);
-    case "<<": return (left as number) << (right as number);
-    case ">>": return (left as number) >> (right as number);
-    case ">>>": return (left as number) >>> (right as number);
+    case "-": return toNumericOperand(left) - toNumericOperand(right);
+    case "*": return toNumericOperand(left) * toNumericOperand(right);
+    case "/": return toNumericOperand(left) / toNumericOperand(right);
+    case "%": return toNumericOperand(left) % toNumericOperand(right);
+    case "**": return toNumericOperand(left) ** toNumericOperand(right);
+    case "&": return toNumericOperand(left) & toNumericOperand(right);
+    case "|": return toNumericOperand(left) | toNumericOperand(right);
+    case "^": return toNumericOperand(left) ^ toNumericOperand(right);
+    case "<<": return toNumericOperand(left) << toNumericOperand(right);
+    case ">>": return toNumericOperand(left) >> toNumericOperand(right);
+    case ">>>": return toNumericOperand(left) >>> toNumericOperand(right);
     // 相対比較: 両辺文字列なら辞書順 (JS 仕様 7.2.13)。JSString のまま
     // number キャストすると host の ToPrimitive で両辺 "[object Object]" になり
-    // 'a' < 'b' すら false になる (VM の LessThan 系と同じ分岐にする)
-    case "<":
-      if (isJSString(left) && isJSString(right)) return jsStringToString(left) < jsStringToString(right);
-      return (left as number) < (right as number);
-    case ">":
-      if (isJSString(left) && isJSString(right)) return jsStringToString(left) > jsStringToString(right);
-      return (left as number) > (right as number);
-    case "<=":
-      if (isJSString(left) && isJSString(right)) return jsStringToString(left) <= jsStringToString(right);
-      return (left as number) <= (right as number);
-    case ">=":
-      if (isJSString(left) && isJSString(right)) return jsStringToString(left) >= jsStringToString(right);
-      return (left as number) >= (right as number);
+    // 'a' < 'b' すら false になる (VM の LessThan 系と同じ分岐にする)。
+    // TW の toPrimitive はプレーンオブジェクトで host string を返すことが
+    // あるので、JSString と host string の両方を文字列として扱う
+    case "<": case ">": case "<=": case ">=": {
+      const ls = isJSString(left) ? jsStringToString(left) : typeof left === "string" ? left : null;
+      const rs = isJSString(right) ? jsStringToString(right) : typeof right === "string" ? right : null;
+      if (ls !== null && rs !== null) {
+        switch (expr.operator) {
+          case "<": return ls < rs;
+          case ">": return ls > rs;
+          case "<=": return ls <= rs;
+          default: return ls >= rs;
+        }
+      }
+      const ln = toNumericOperand(left), rn = toNumericOperand(right);
+      switch (expr.operator) {
+        case "<": return ln < rn;
+        case ">": return ln > rn;
+        case "<=": return ln <= rn;
+        default: return ln >= rn;
+      }
+    }
     case "==":
       if (isJSString(left) && isJSString(right)) return jsStringEquals(left, right);
       if (isJSString(left) || isJSString(right)) return false;

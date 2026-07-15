@@ -3,7 +3,7 @@ import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots, isAccessorDescriptor, createAccessorDescriptor } from "./js-object.js";
-import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, type JSString } from "./js-string.js";
+import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, toNumericOperand, type JSString } from "./js-string.js";
 import { isJSSymbol } from "./js-symbol.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
 import { Heap } from "./heap.js";
@@ -29,6 +29,17 @@ function jsminiTypeof(val: unknown): string {
   if (val === null) return "object";
   if (typeof val === "object" && val !== null && ("bytecode" in val && "paramCount" in val || "__closure" in val)) return "function";
   return typeof val;
+}
+
+// computed アクセス (obj[key]) の ToPropertyKey → 文字列化。
+// jsmini のプレーンオブジェクトは host prototype が null で host String() が
+// throw するので "[object Object]" に潰す (実 JS の ToString(object) と同じ)
+function toPropertyKeyString(key: unknown): string {
+  if (isJSSymbol(key)) return key.key;
+  if (isJSString(key)) return jsStringToString(key);
+  if (Array.isArray(key)) return arrayToPrimitiveString(key);
+  if (key !== null && typeof key === "object") return "[object Object]";
+  return String(key);
 }
 
 // toPrimitive/callInternal 内で例外が unwindToHandler で処理された場合の sentinel
@@ -540,7 +551,9 @@ export class VM {
     if (value === null || value === undefined) return value;
     if (typeof value !== "object") return value;
     if (isJSString(value)) return value;
-    if (Array.isArray(value)) return value;
+    // 配列は join(",") 相当の文字列に (host に任せると jsmini オブジェクト要素の
+    // null proto で throw する)。数値文脈は toNumericOperand が文字列から変換する
+    if (Array.isArray(value)) return internString(arrayToPrimitiveString(value));
 
     const obj = value as Record<string, unknown>;
     let methodFound = false;
@@ -715,43 +728,43 @@ export class VM {
         case "Sub": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
-          this.push((l as number) - (r as number));
+          this.push(toNumericOperand(l) - toNumericOperand(r));
           break;
         }
         case "Mul": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
-          this.push((l as number) * (r as number));
+          this.push(toNumericOperand(l) * toNumericOperand(r));
           break;
         }
         case "Div": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
-          this.push((l as number) / (r as number));
+          this.push(toNumericOperand(l) / toNumericOperand(r));
           break;
         }
         case "Mod": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
-          this.push((l as number) % (r as number));
+          this.push(toNumericOperand(l) % toNumericOperand(r));
           break;
         }
         case "Exp": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
-          this.push((l as number) ** (r as number));
+          this.push(toNumericOperand(l) ** toNumericOperand(r));
           break;
         }
         // ビット演算・シフトも被演算子を ToPrimitive してから数値化する (JS の ToNumber → ToInt32)。
         // これを省くと ({}) & 1 のようなオブジェクト被演算子で host が "Cannot convert object to
         // primitive value" を投げてしまう (正しくは NaN → 0)。
-        case "BitAnd": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) & (r as number)); break; }
-        case "BitOr": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) | (r as number)); break; }
-        case "BitXor": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) ^ (r as number)); break; }
-        case "BitNot": { const v = this.toPrimitive(this.pop()); if (v === THROWN_SENTINEL) continue; this.push(~(v as number)); break; }
-        case "ShiftLeft": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) << (r as number)); break; }
-        case "ShiftRight": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) >> (r as number)); break; }
-        case "UShiftRight": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push((l as number) >>> (r as number)); break; }
+        case "BitAnd": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push(toNumericOperand(l) & toNumericOperand(r)); break; }
+        case "BitOr": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push(toNumericOperand(l) | toNumericOperand(r)); break; }
+        case "BitXor": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push(toNumericOperand(l) ^ toNumericOperand(r)); break; }
+        case "BitNot": { const v = this.toPrimitive(this.pop()); if (v === THROWN_SENTINEL) continue; this.push(~toNumericOperand(v)); break; }
+        case "ShiftLeft": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push(toNumericOperand(l) << toNumericOperand(r)); break; }
+        case "ShiftRight": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push(toNumericOperand(l) >> toNumericOperand(r)); break; }
+        case "UShiftRight": { const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue; const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue; this.push(toNumericOperand(l) >>> toNumericOperand(r)); break; }
         case "IsNullish": {
           const val = this.pop();
           this.push(val === null || val === undefined);
@@ -760,7 +773,7 @@ export class VM {
         case "Negate": {
           const val = this.toPrimitive(this.pop());
           if (val === THROWN_SENTINEL) continue;
-          this.push(-(val as number));
+          this.push(-toNumericOperand(val));
           break;
         }
 
@@ -818,28 +831,28 @@ export class VM {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
           if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) < jsStringToString(r));
-          else this.push((l as number) < (r as number));
+          else this.push(toNumericOperand(l) < toNumericOperand(r));
           break;
         }
         case "GreaterThan": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
           if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) > jsStringToString(r));
-          else this.push((l as number) > (r as number));
+          else this.push(toNumericOperand(l) > toNumericOperand(r));
           break;
         }
         case "LessEqual": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
           if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) <= jsStringToString(r));
-          else this.push((l as number) <= (r as number));
+          else this.push(toNumericOperand(l) <= toNumericOperand(r));
           break;
         }
         case "GreaterEqual": {
           const r = this.toPrimitive(this.pop()); if (r === THROWN_SENTINEL) continue;
           const l = this.toPrimitive(this.pop()); if (l === THROWN_SENTINEL) continue;
           if (isJSString(l) && isJSString(r)) this.push(jsStringToString(l) >= jsStringToString(r));
-          else this.push((l as number) >= (r as number));
+          else this.push(toNumericOperand(l) >= toNumericOperand(r));
           break;
         }
 
@@ -892,6 +905,16 @@ export class VM {
           // JIT: バイトコード関数をグローバルに登録されたら追跡
           if (this.jit && typeof val === "object" && val !== null && "bytecode" in val) {
             this.jit.registerFunc(name, val as BytecodeFunction);
+          }
+          break;
+        }
+        case "CheckGlobal": {
+          // callee の存在チェック (push しない)。args→callee のスタック順を
+          // 保ったまま「callee 参照解決が引数評価より先」の JS 仕様を実現する
+          const name = constants[instr.operand!] as string;
+          if (!this.globals.has(name)) {
+            const err = new ReferenceError(`${name} is not defined`);
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
           }
           break;
         }
@@ -1137,7 +1160,7 @@ export class VM {
         case "GetPropertyComputed": {
           const key = this.pop();
           const obj = this.pop() as Record<string, unknown>;
-          const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
+          const keyStr = toPropertyKeyString(key);
           if (isJSObject(obj)) {
             this.push(jsObjGet(obj, keyStr));
           } else {
@@ -1152,7 +1175,7 @@ export class VM {
           if (Array.isArray(obj) && typeof key === "number") {
             setElement(obj, key, value);
           } else {
-            const keyStr = isJSSymbol(key) ? key.key : isJSString(key) ? jsStringToString(key) : String(key);
+            const keyStr = toPropertyKeyString(key);
             if (isJSObject(obj)) {
               jsObjSet(obj, keyStr, value);
             } else {
@@ -1309,13 +1332,13 @@ export class VM {
         case "Increment": {
           const v = this.toPrimitive(this.pop());
           if (v === THROWN_SENTINEL) continue;
-          this.push((v as number) + 1);
+          this.push(toNumericOperand(v) + 1);
           break;
         }
         case "Decrement": {
           const v = this.toPrimitive(this.pop());
           if (v === THROWN_SENTINEL) continue;
-          this.push((v as number) - 1);
+          this.push(toNumericOperand(v) - 1);
           break;
         }
 

@@ -241,3 +241,32 @@ export function internString(str: string): JSString {
   internById.push(jsStr);
   return jsStr;
 }
+
+// --- ToPrimitive/ToNumber 用の共有ヘルパー (TW と VM で同一規則にする) ---
+
+// 配列の ToPrimitive (Array.prototype.toString = join(",") 相当) を host に
+// 頼らず安全に行う。jsmini のプレーンオブジェクト要素は host prototype が
+// null で host の join が throw するため。null/undefined 要素は "" (JS 仕様)。
+// 自己参照などの深い入れ子は depth 上限で "" に落とす (host V8 も cycle は "")。
+export function arrayToPrimitiveString(arr: unknown[], depth = 0): string {
+  if (depth > 8) return "";
+  const parts: string[] = [];
+  for (const el of arr) {
+    if (el === null || el === undefined) parts.push("");
+    else if (isJSString(el)) parts.push(jsStringToString(el));
+    else if (Array.isArray(el)) parts.push(arrayToPrimitiveString(el, depth + 1));
+    else if (typeof el === "object") parts.push("[object Object]");
+    else parts.push(String(el));
+  }
+  return parts.join(",");
+}
+
+// 数値演算の被演算子を数値化する (ToPrimitive 済みの値用)。
+// JSString は中身の文字列から Number() で変換する — as number キャストだと
+// host の ToPrimitive が "[object Object]" を経由して常に NaN になる
+// ("5" - 2 が NaN だった)。それ以外は host の暗黙変換に委ねる
+// (null→0, true→1, undefined→NaN)。
+export function toNumericOperand(v: unknown): number {
+  if (isJSString(v)) return Number(jsStringToString(v));
+  return v as number;
+}

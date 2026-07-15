@@ -119,6 +119,20 @@ class BytecodeCompiler {
     return -1;
   }
 
+  // emitLoad が最終的に LdaGlobal に落とすか (= グローバル参照になるか) の
+  // 事前判定。emitLoad と同じ解決順 (local → 親 var の global 優先 → upvalue)。
+  // resolveUpvalue は名前で dedup されるので先に呼んでも副作用は重複しない
+  private resolvesToGlobal(name: string): boolean {
+    if (this.resolveLocal(name) !== null) return false;
+    if (this.isFunction) {
+      if (this.parent && !this.parent.isFunction && this.parent.resolveLocal(name) !== null && !this.parent.lexicalLocals.has(name)) {
+        return true; // トップレベル var は global 優先 (emitLoad と同じ)
+      }
+      if (this.resolveUpvalue(name) >= 0) return false;
+    }
+    return true;
+  }
+
   // 変数のロード: ローカル → upvalue → グローバル の優先順で解決
   emitLoad(name: string): void {
     const slot = this.resolveLocal(name);
@@ -1255,7 +1269,14 @@ class BytecodeCompiler {
           }
           this.emit("CallMethod", expr.arguments.length);
         } else {
-          // 通常の関数呼び出し
+          // 通常の関数呼び出し。JS 仕様では callee の参照解決が引数評価より
+          // 先なので、callee がグローバル参照なら存在チェックを引数の前に置く
+          // (f(garbage()) は f 未定義なら引数内の例外より ReferenceError が先)。
+          // スタック順 [args..., callee] は変えない (JIT の LdaGlobal+Call
+          // パターン検出を保つため)
+          if (expr.callee.type === "Identifier" && this.resolvesToGlobal(expr.callee.name)) {
+            this.emit("CheckGlobal", this.addConstant(expr.callee.name));
+          }
           for (const arg of expr.arguments) {
             this.compileExpression(arg as Expression);
           }

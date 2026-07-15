@@ -2,7 +2,7 @@ import { compile } from "./compiler.js";
 import { VM } from "./vm.js";
 import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
-import { isJSString, jsStringToString, internString, createSeqString } from "./js-string.js";
+import { isJSString, jsStringToString, internString, createSeqString, arrayToPrimitiveString } from "./js-string.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass } from "./js-object.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
 import { Heap } from "./heap.js";
@@ -336,10 +336,13 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   };
   // host の文字列ビルトイン (String/parseInt/parseFloat) 用の前処理。
   // プレーンオブジェクトは host prototype が null で host String() が throw するので
-  // "[object Object]" に潰す (strArg は string メソッド用の既存ヘルパで別物)
+  // "[object Object]" に潰す。配列も要素に jsmini オブジェクトを含むと host の
+  // join が同じ理由で throw するため安全 join を使う
+  // (strArg は string メソッド用の既存ヘルパで別物)
   const strConv = (v: unknown): string => {
     if (isJSString(v)) return jsStringToString(v);
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) return "[object Object]";
+    if (Array.isArray(v)) return arrayToPrimitiveString(v);
+    if (v !== null && typeof v === "object") return "[object Object]";
     return String(v);
   };
 
