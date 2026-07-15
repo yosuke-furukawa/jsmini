@@ -29,6 +29,13 @@ class BytecodeCompiler {
   private lexicalLocals = new Set<string>(); // let/const で宣言されたローカル変数名
   private constLocals = new Set<string>(); // const で宣言された変数名 (再代入を禁止するため)
   private blockDepth = 0; // BlockStatement のネスト深さ (ブロック内 function 宣言の判定用)
+  // 本体直下の let/const に先行割当したスロット (名前 → slot)。
+  // 関数宣言は本体先頭に巻き上げてコンパイルされるため、ソース上で後方の
+  // lexical を閉包が参照するとき、宣言文のコンパイル前でも子の resolveUpvalue
+  // がここで解決できる必要がある。自スコープの直列コードからは見えないままに
+  // する (宣言前アクセスの擬似 TDZ = ReferenceError を保つ) ため locals とは
+  // 別に持ち、宣言文の declareLocal 時に同じスロットへ昇格する
+  private pendingLexicals = new Map<string, number>();
   private upvalues: { name: string; parentSlot: number }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
@@ -77,9 +84,39 @@ class BytecodeCompiler {
     return this.constants.length - 1;
   }
 
+  // 本体直下の let/const を先行スキャンしてスロットを予約する。
+  // 巻き上げコンパイルされる関数宣言の閉包解決 (resolveUpvalue) 用。
+  // ブロック内の lexical はブロックコンパイル時に別スロットを得るので対象外
+  preScanLexicals(stmts: Statement[]): void {
+    for (const stmt of stmts) {
+      const s = stmt as any;
+      if (s.type === "VariableDeclaration" && s.kind !== "var") {
+        const names = new Set<string>();
+        for (const decl of s.declarations) this.collectPatternNames(decl.id, names);
+        for (const name of names) {
+          if (!this.locals.has(name) && !this.pendingLexicals.has(name)) {
+            this.pendingLexicals.set(name, this.localCount++);
+          }
+          this.lexicalLocals.add(name);
+          if (s.kind === "const") this.constLocals.add(name);
+        }
+      }
+    }
+  }
+
   // ローカル変数のスロットを確保
   declareLocal(name: string): number {
     if (this.locals.has(name)) return this.locals.get(name)!;
+    // 本体直下 (blockDepth 0) の宣言は preScanLexicals の予約スロットへ昇格。
+    // ブロック/switch/for 内 (blockDepth > 0) はシャドウ用の新スロット
+    if (this.blockDepth === 0) {
+      const pending = this.pendingLexicals.get(name);
+      if (pending !== undefined) {
+        this.pendingLexicals.delete(name);
+        this.locals.set(name, pending);
+        return pending;
+      }
+    }
     const slot = this.localCount++;
     this.locals.set(name, slot);
     return slot;
@@ -89,11 +126,17 @@ class BytecodeCompiler {
     return this.locals.get(name) ?? null;
   }
 
+  // 子クロージャからの解決用: 宣言済みローカルに加えて、先行予約された
+  // lexical (ソース上で後方の let/const) も見る
+  private resolveLocalForChild(name: string): number | null {
+    return this.locals.get(name) ?? this.pendingLexicals.get(name) ?? null;
+  }
+
   // 親コンパイラのローカルを再帰的に探索して upvalue index を返す (-1 = 見つからない)
   private resolveUpvalue(name: string): number {
     if (!this.parent) return -1;
-    // 親のローカルにあるか
-    const parentSlot = this.parent.resolveLocal(name);
+    // 親のローカルにあるか (先行予約された lexical 含む)
+    const parentSlot = this.parent.resolveLocalForChild(name);
     if (parentSlot !== null) {
       // 既に同じ upvalue があれば再利用
       for (let i = 0; i < this.upvalues.length; i++) {
@@ -163,10 +206,12 @@ class BytecodeCompiler {
 
   // name が (自スコープまたは外側スコープの) const バインディングか。
   // 最初に name をローカルとして宣言しているスコープの const 判定を返す (内側のシャドウ優先)。
+  // 先行予約された lexical (pendingLexicals) も宣言済み扱い — 巻き上げコンパイル中の
+  // 関数から見た「ソース上で後方の const」への代入も TypeError にするため
   private isConstBinding(name: string): boolean {
     let c: BytecodeCompiler | null = this;
     while (c) {
-      if (c.locals.has(name)) return c.constLocals.has(name);
+      if (c.locals.has(name) || c.pendingLexicals.has(name)) return c.constLocals.has(name);
       c = c.parent;
     }
     return false;
@@ -327,6 +372,10 @@ class BytecodeCompiler {
   }
 
   compileProgram(program: Program): void {
+    // lexical (let/const) の先行スキャン: 巻き上げコンパイルされる関数が
+    // ソース上で後方の let/const を閉包参照できるように、スロットと
+    // const 判定を先に確定させる
+    this.preScanLexicals(program.body);
     // function hoisting: 関数宣言を先にコンパイルしてグローバルに登録
     for (const stmt of program.body) {
       if (stmt.type === "FunctionDeclaration") {
@@ -415,6 +464,9 @@ class BytecodeCompiler {
     // 参照する」とき、compile 時点で locals に無く global 扱いになる
     // (navier-stokes の this.update が var dens_prev より前にあるパターン)
     this.hoistVarNames(body);
+    // lexical (let/const) の先行スキャン (compileProgram と同じ理由:
+    // ソース上で前方にある関数宣言/クロージャが後方の lexical を参照できるように)
+    this.preScanLexicals(body);
     // 本体をコンパイル
     for (const stmt of body) {
       this.compileStatement(stmt);
@@ -716,10 +768,13 @@ class BytecodeCompiler {
       }
 
       case "ForStatement": {
-        // for (let/const ...) のブロックスコープ
+        // for (let/const ...) のブロックスコープ。blockDepth も上げて
+        // for-init の let が本体直下の予約スロット (pendingLexicals) を
+        // 誤って消費しないようにする
         const forHasBlockScoped = stmt.init?.type === "VariableDeclaration" && stmt.init.kind !== "var";
         if (forHasBlockScoped) {
           this.scopeStack.push(new Map(this.locals));
+          this.blockDepth++;
         }
         if (stmt.init) {
           if (stmt.init.type === "VariableDeclaration") {
@@ -758,6 +813,7 @@ class BytecodeCompiler {
         for (const bp of loop.breakPatches) this.patch(bp, this.currentOffset());
         if (forHasBlockScoped) {
           this.locals = this.scopeStack.pop()!;
+          this.blockDepth--;
         }
         break;
       }
