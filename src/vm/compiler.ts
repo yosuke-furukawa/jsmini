@@ -28,6 +28,7 @@ class BytecodeCompiler {
   private isAsync = false;
   private lexicalLocals = new Set<string>(); // let/const で宣言されたローカル変数名
   private constLocals = new Set<string>(); // const で宣言された変数名 (再代入を禁止するため)
+  private blockDepth = 0; // BlockStatement のネスト深さ (ブロック内 function 宣言の判定用)
   private upvalues: { name: string; parentSlot: number }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
@@ -318,17 +319,15 @@ class BytecodeCompiler {
         this.compileStatement(stmt);
       }
     }
-    // var hoisting: var 宣言を事前に undefined でグローバルに登録
-    for (const stmt of program.body) {
-      if (stmt.type === "VariableDeclaration" && (stmt as any).kind === "var") {
-        for (const decl of (stmt as any).declarations) {
-          if (decl.id.type === "Identifier") {
-            this.emit("LdaUndefined");
-            this.emit("StaGlobal", this.addConstant(decl.id.name));
-            this.emit("Pop");
-          }
-        }
-      }
+    // var hoisting: var 宣言を事前に undefined でグローバルに登録。
+    // ネストしたブロック (非実行の if 分岐や 0 回の for 本体) 内の var も
+    // 巻き上げ対象なので再帰的に収集する
+    const hoistedVars = new Set<string>();
+    this.hoistVarNames(program.body, (id) => this.collectPatternNames(id, hoistedVars));
+    for (const name of hoistedVars) {
+      this.emit("LdaUndefined");
+      this.emit("StaGlobal", this.addConstant(name));
+      this.emit("Pop");
     }
     for (let i = 0; i < program.body.length; i++) {
       const stmt = program.body[i];
@@ -411,45 +410,47 @@ class BytecodeCompiler {
     this.emit("Return");
   }
 
-  // 関数本体の var 束縛名を再帰的に集めて declareLocal する (var hoisting)。
+  // 関数本体の var 束縛名を再帰的に集めて declare する (var hoisting)。
   // ネスト関数 (FunctionDeclaration/FunctionExpression) の中は走査しない。
-  hoistVarNames(stmts: Statement[]): void {
+  // declare 省略時は declareLocal (関数本体用)。compileProgram はグローバル
+  // 登録用に名前収集コールバックを渡す。
+  hoistVarNames(stmts: Statement[], declare: (id: unknown) => void = (id) => this.preDeclareBindingNames(id)): void {
     for (const stmt of stmts) {
       const s = stmt as any;
       switch (s.type) {
         case "VariableDeclaration":
           if (s.kind === "var") {
-            for (const decl of s.declarations) this.preDeclareBindingNames(decl.id);
+            for (const decl of s.declarations) declare(decl.id);
           }
           break;
-        case "BlockStatement": this.hoistVarNames(s.body); break;
+        case "BlockStatement": this.hoistVarNames(s.body, declare); break;
         case "IfStatement":
-          this.hoistVarNames([s.consequent]);
-          if (s.alternate) this.hoistVarNames([s.alternate]);
+          this.hoistVarNames([s.consequent], declare);
+          if (s.alternate) this.hoistVarNames([s.alternate], declare);
           break;
         case "WhileStatement": case "DoWhileStatement":
-          this.hoistVarNames([s.body]); break;
+          this.hoistVarNames([s.body], declare); break;
         case "ForStatement":
           if (s.init && s.init.type === "VariableDeclaration" && s.init.kind === "var") {
-            for (const decl of s.init.declarations) this.preDeclareBindingNames(decl.id);
+            for (const decl of s.init.declarations) declare(decl.id);
           }
-          this.hoistVarNames([s.body]);
+          this.hoistVarNames([s.body], declare);
           break;
         case "ForInStatement": case "ForOfStatement":
           if (s.left && s.left.type === "VariableDeclaration" && s.left.kind === "var") {
-            for (const decl of s.left.declarations) this.preDeclareBindingNames(decl.id);
+            for (const decl of s.left.declarations) declare(decl.id);
           }
-          this.hoistVarNames([s.body]);
+          this.hoistVarNames([s.body], declare);
           break;
         case "TryStatement":
-          if (s.block) this.hoistVarNames(s.block.body);
-          if (s.handler?.body) this.hoistVarNames(s.handler.body.body);
-          if (s.finalizer) this.hoistVarNames(s.finalizer.body);
+          if (s.block) this.hoistVarNames(s.block.body, declare);
+          if (s.handler?.body) this.hoistVarNames(s.handler.body.body, declare);
+          if (s.finalizer) this.hoistVarNames(s.finalizer.body, declare);
           break;
         case "SwitchStatement":
-          for (const c of s.cases ?? []) this.hoistVarNames(c.consequent ?? []);
+          for (const c of s.cases ?? []) this.hoistVarNames(c.consequent ?? [], declare);
           break;
-        case "LabeledStatement": this.hoistVarNames([s.body]); break;
+        case "LabeledStatement": this.hoistVarNames([s.body], declare); break;
         default: break;
       }
     }
@@ -505,8 +506,9 @@ class BytecodeCompiler {
         this.emit("LdaConst", fnIndex);
         const fnSlot = this.resolveLocal(stmt.id.name) ?? this.declareLocal(stmt.id.name);
         this.emit("StaLocal", fnSlot);
-        // トップレベル関数はグローバルにも登録 (再帰呼び出し + JIT 用)
-        if (!this.isFunction) {
+        // トップレベル関数はグローバルにも登録 (再帰呼び出し + JIT 用)。
+        // ブロック内 function 宣言は block-scoped なのでグローバルへ漏らさない
+        if (!this.isFunction && this.blockDepth === 0) {
           this.emit("Dup");
           const nameIdx = this.addConstant(stmt.id.name);
           this.emit("StaGlobal", nameIdx);
@@ -727,13 +729,14 @@ class BytecodeCompiler {
       }
 
       case "BlockStatement": {
+        // let/const とブロック内 function 宣言は block-scoped (strict)
         const hasBlockScoped = stmt.body.some(
-          (s: any) => s.type === "VariableDeclaration" && s.kind !== "var"
+          (s: any) => (s.type === "VariableDeclaration" && s.kind !== "var") || s.type === "FunctionDeclaration"
         );
         if (hasBlockScoped) {
           // スコープを push — 同名変数は新しいスロットに割り当てられる
           this.scopeStack.push(new Map(this.locals));
-          // ブロック内の let/const 変数を強制的に新スロットに割り当て
+          // ブロック内の let/const/function を強制的に新スロットに割り当て
           for (const s of stmt.body) {
             if ((s as any).type === "VariableDeclaration" && (s as any).kind !== "var") {
               for (const decl of (s as any).declarations) {
@@ -742,12 +745,21 @@ class BytecodeCompiler {
                   this.locals.delete(decl.id.name);
                 }
               }
+            } else if ((s as any).type === "FunctionDeclaration" && (s as any).id?.name) {
+              this.locals.delete((s as any).id.name);
             }
           }
         }
+        // function 宣言をブロック先頭に巻き上げてからその他の文をコンパイル
+        // (strict: ブロック内では宣言前から呼べ、ブロックの外には漏れない)
+        this.blockDepth++;
         for (const s of stmt.body) {
-          this.compileStatement(s);
+          if ((s as any).type === "FunctionDeclaration") this.compileStatement(s);
         }
+        for (const s of stmt.body) {
+          if ((s as any).type !== "FunctionDeclaration") this.compileStatement(s);
+        }
+        this.blockDepth--;
         if (hasBlockScoped) {
           this.locals = this.scopeStack.pop()!;
         }

@@ -158,10 +158,33 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   env.defineReadOnly("SyntaxError", SyntaxError);
   env.defineReadOnly("RangeError", RangeError);
   env.defineReadOnly("Boolean", Boolean);
-  env.defineReadOnly("Number", Number);
-  // String: JSString を受け取れるカスタムコンストラクタ
+  // host の数値ビルトインに渡す前の前処理 (VM 側 index.ts の numArg と同じ規則)。
+  // JSString はラップを解いて数値化、プレーンオブジェクトは NaN に潰す
+  // (host の ToNumber に任せると JSString が "[object Object]" 経由で NaN になる)
+  const twNumArg = (v: unknown): unknown => {
+    if (isJSString(v)) return Number(jsStringToString(v));
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) return NaN;
+    return v;
+  };
+  // Number: JSString を受け取れるカスタムコンストラクタ (host Number の statics は引き継ぐ)
+  const NumberCtor = function(this: any, v?: unknown) {
+    const n = arguments.length === 0 ? 0 : Number(twNumArg(v));
+    if (new.target) return new Number(n);
+    return n;
+  } as unknown as NumberConstructor;
+  (NumberCtor as any).isNaN = Number.isNaN;
+  (NumberCtor as any).isFinite = Number.isFinite;
+  (NumberCtor as any).isInteger = Number.isInteger;
+  (NumberCtor as any).parseInt = parseInt;
+  (NumberCtor as any).parseFloat = parseFloat;
+  (NumberCtor as any).MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
+  (NumberCtor as any).MIN_SAFE_INTEGER = Number.MIN_SAFE_INTEGER;
+  (NumberCtor as any).prototype = Number.prototype;
+  env.defineReadOnly("Number", NumberCtor);
+  // String: JSString を受け取れるカスタムコンストラクタ。
+  // String() 無引数は "" だが String(undefined) は "undefined" (arguments.length で判別)
   const StringCtor = function(this: any, v?: unknown) {
-    const s = isJSString(v) ? jsStringToString(v) : (v === undefined ? "" : String(v));
+    const s = isJSString(v) ? jsStringToString(v) : (arguments.length === 0 ? "" : String(v));
     if (new.target) return new String(s);
     return internString(s);
   } as unknown as StringConstructor;
@@ -172,13 +195,16 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   env.defineReadOnly("Function", Function);
 
   // グローバル関数
-  env.defineReadOnly("isNaN", (v: unknown) => Number.isNaN(Number(v)));
-  env.defineReadOnly("isFinite", (v: unknown) => Number.isFinite(Number(v)));
+  env.defineReadOnly("isNaN", (v: unknown) => Number.isNaN(Number(twNumArg(v))));
+  env.defineReadOnly("isFinite", (v: unknown) => Number.isFinite(Number(twNumArg(v))));
   env.defineReadOnly("parseInt", (s: unknown, radix?: number) => parseInt(isJSString(s) ? jsStringToString(s) : String(s), radix));
   env.defineReadOnly("parseFloat", (s: unknown) => parseFloat(isJSString(s) ? jsStringToString(s) : String(s)));
 
-  // Math
-  env.defineReadOnly("Math", {
+  // Math — 数値メソッドは引数を twNumArg で前処理してから host に渡す
+  // (JSString の "5" が NaN になる・プレーンオブジェクトの挙動が VM とズレるのを防ぐ)
+  const twWrapNum = (fn: (...a: number[]) => number) =>
+    (...args: unknown[]) => fn(...(args.map(twNumArg) as number[]));
+  const twRawMath: Record<string, unknown> = {
     floor: Math.floor, ceil: Math.ceil, round: Math.round,
     abs: Math.abs, min: Math.min, max: Math.max,
     sqrt: Math.sqrt, pow: Math.pow, log: Math.log,
@@ -195,7 +221,13 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     LN2: Math.LN2, LN10: Math.LN10,
     LOG2E: Math.LOG2E, LOG10E: Math.LOG10E,
     SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
-  });
+  };
+  const twMathObj: Record<string, unknown> = {};
+  for (const k of Object.keys(twRawMath)) {
+    const v = twRawMath[k];
+    twMathObj[k] = typeof v === "function" ? twWrapNum(v as (...a: number[]) => number) : v;
+  }
+  env.defineReadOnly("Math", twMathObj);
 
   // Date: host Date を公開。string 引数は JSString → string 変換。
   const twUnwrapStr = (v: unknown) => isJSString(v) ? jsStringToString(v) : v;
@@ -537,10 +569,11 @@ function hoistVarDeclarations(stmts: Statement[], env: Environment): void {
         }
       }
       hoistVarDeclarations([stmt.body], env);
-    } else if (stmt.type === "ForOfStatement") {
-      if (stmt.left.kind === "var") {
+    } else if (stmt.type === "ForOfStatement" || stmt.type === "ForInStatement") {
+      const left = (stmt as any).left;
+      if (left?.kind === "var") {
         const varEnv = env.findVarScope();
-        for (const decl of stmt.left.declarations) {
+        for (const decl of left.declarations) {
           for (const name of collectBoundNames(decl.id)) {
             if (!varEnv.hasOwn(name)) {
               varEnv.define(name, undefined);
@@ -548,7 +581,18 @@ function hoistVarDeclarations(stmts: Statement[], env: Environment): void {
           }
         }
       }
-      hoistVarDeclarations([stmt.body], env);
+      hoistVarDeclarations([(stmt as any).body], env);
+    } else if (stmt.type === "DoWhileStatement") {
+      hoistVarDeclarations([(stmt as any).body], env);
+    } else if (stmt.type === "TryStatement") {
+      const s = stmt as any;
+      if (s.block) hoistVarDeclarations(s.block.body, env);
+      if (s.handler?.body) hoistVarDeclarations(s.handler.body.body, env);
+      if (s.finalizer) hoistVarDeclarations(s.finalizer.body, env);
+    } else if (stmt.type === "SwitchStatement") {
+      for (const c of (stmt as any).cases ?? []) hoistVarDeclarations(c.consequent ?? [], env);
+    } else if ((stmt as any).type === "LabeledStatement") {
+      hoistVarDeclarations([(stmt as any).body], env);
     }
   }
 }
@@ -1021,6 +1065,9 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
           }
         }
       }
+      // ブロック内 function 宣言をブロック先頭に巻き上げ (strict: block-scoped)。
+      // ブロック内では宣言前から呼べ、ブロックの外には漏れない
+      hoistFunctionDeclarations(stmt.body, blockEnv);
       let result: unknown = undefined;
       for (const s of stmt.body) {
         result = yield* evalStatement(s, blockEnv);
@@ -1874,10 +1921,21 @@ function* evalBinaryExpression(
     case "<<": return (left as number) << (right as number);
     case ">>": return (left as number) >> (right as number);
     case ">>>": return (left as number) >>> (right as number);
-    case "<": return (left as number) < (right as number);
-    case ">": return (left as number) > (right as number);
-    case "<=": return (left as number) <= (right as number);
-    case ">=": return (left as number) >= (right as number);
+    // 相対比較: 両辺文字列なら辞書順 (JS 仕様 7.2.13)。JSString のまま
+    // number キャストすると host の ToPrimitive で両辺 "[object Object]" になり
+    // 'a' < 'b' すら false になる (VM の LessThan 系と同じ分岐にする)
+    case "<":
+      if (isJSString(left) && isJSString(right)) return jsStringToString(left) < jsStringToString(right);
+      return (left as number) < (right as number);
+    case ">":
+      if (isJSString(left) && isJSString(right)) return jsStringToString(left) > jsStringToString(right);
+      return (left as number) > (right as number);
+    case "<=":
+      if (isJSString(left) && isJSString(right)) return jsStringToString(left) <= jsStringToString(right);
+      return (left as number) <= (right as number);
+    case ">=":
+      if (isJSString(left) && isJSString(right)) return jsStringToString(left) >= jsStringToString(right);
+      return (left as number) >= (right as number);
     case "==":
       if (isJSString(left) && isJSString(right)) return jsStringEquals(left, right);
       if (isJSString(left) || isJSString(right)) return false;
