@@ -87,6 +87,27 @@ describe("文字列/数値変換の spec 準拠", () => {
   it("computed キーにオブジェクト", () => agree(`var o = {}; o[o] = 5; o["[object Object]"];`, 5));
 });
 
+describe("Phase 36 — switch/lexical スコープと配列メソッド", () => {
+  it("switch case 内 fn 宣言はブロック内可視", () => agree(`var x = 0; switch (1) { case 1: function f() { return 9; } x = f(); } x;`, 9));
+  it("switch case 内 fn は前方 case から可視", () => agree(`var r = 0; switch (1) { case 1: r = g(); break; case 2: function g() { return 3; } } r;`, 3));
+  it("switch case 内 fn は外に漏れない", () => allThrow(`switch (1) { case 1: function f() { return 9; } } f();`, ReferenceError));
+  it("巻き上げ fn から後方の let へ書き込み", () => agree(`function f() { z = 5; } let z = 1; f(); z;`, 5));
+  it("巻き上げ fn から後方の let を読む", () => agree(`function g() { return w; } let w = 1; g();`, 1));
+  it("後方の const への代入は TypeError", () => allThrow(`function f() { x = 5; } const x = 1; f();`, TypeError));
+  it("宣言前アクセスの擬似 TDZ は維持", () => allThrow(`q; let q = 1;`, ReferenceError));
+  it("member 複合代入 o.p += v", () => agree(`var o = { p: 1 }; o.p += 2; o.p;`, 3));
+  it("this.p += v (メソッド内)", () => agree(`function T() { this.c = 10; } T.prototype.add = function (n) { this.c += n; }; var t = new T(); t.add(5); t.add(3); t.c;`, 18));
+  it("computed 複合代入 o[k] += v", () => agree(`var o = { p: 1 }; var k = "p"; o[k] += 2; o.p;`, 3));
+  it("複合代入で object 式は 1 回だけ評価", () =>
+    agree(`var n = 0; var w = { o: { p: 1 } }; function O() { n = n + 1; return w.o; } O().p += 2; w.o.p * 10 + n;`, 31));
+  it("join は JSString 要素/区切りを正しく扱う", () => agree(`["a", "b"].join("-");`, "a-b"));
+  it("join のオブジェクト要素は [object Object]", () => agree(`[({ k0: 1 }), 2].join("-");`, "[object Object]-2"));
+  it("toString は join(,) 相当", () => agree(`["a", 1].toString();`, "a,1"));
+  it("indexOf は concat 由来の文字列も内容比較", () => agree(`var s = "a" + "b"; ["ab"].indexOf(s);`, 0));
+  it("sort 既定は ToString 辞書順", () => agree(`[10, 9, 1].sort().join(",");`, "1,10,9"));
+  it("sort はオブジェクト要素で throw しない", () => agree(`[({}), 1].sort().length;`, 2));
+});
+
 describe("評価順 — callee 解決と複合代入の LHS", () => {
   it("未定義 callee は引数評価より先に ReferenceError", () => allThrow(`foo((void 0).x);`, ReferenceError));
   it("既知 callee なら引数の TypeError が飛ぶ", () => allThrow(`function g(x) { return x; } g((void 0).x);`, TypeError));

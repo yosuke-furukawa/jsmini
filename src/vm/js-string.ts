@@ -244,20 +244,24 @@ export function internString(str: string): JSString {
 
 // --- ToPrimitive/ToNumber 用の共有ヘルパー (TW と VM で同一規則にする) ---
 
+// join の 1 要素分の文字列化 (JS の Array.prototype.join 規則)。
+// null/undefined は ""、JSString は中身、jsmini のプレーンオブジェクトは
+// host prototype が null で host String() が throw するため "[object Object]" に潰す。
+export function joinElementToString(el: unknown, depth = 0): string {
+  if (el === null || el === undefined) return "";
+  if (isJSString(el)) return jsStringToString(el);
+  if (Array.isArray(el)) return arrayToPrimitiveString(el, depth + 1);
+  if (typeof el === "object") return "[object Object]";
+  return String(el);
+}
+
 // 配列の ToPrimitive (Array.prototype.toString = join(",") 相当) を host に
-// 頼らず安全に行う。jsmini のプレーンオブジェクト要素は host prototype が
-// null で host の join が throw するため。null/undefined 要素は "" (JS 仕様)。
-// 自己参照などの深い入れ子は depth 上限で "" に落とす (host V8 も cycle は "")。
+// 頼らず安全に行う。自己参照などの深い入れ子は depth 上限で "" に落とす
+// (host V8 も cycle は "")。
 export function arrayToPrimitiveString(arr: unknown[], depth = 0): string {
   if (depth > 8) return "";
   const parts: string[] = [];
-  for (const el of arr) {
-    if (el === null || el === undefined) parts.push("");
-    else if (isJSString(el)) parts.push(jsStringToString(el));
-    else if (Array.isArray(el)) parts.push(arrayToPrimitiveString(el, depth + 1));
-    else if (typeof el === "object") parts.push("[object Object]");
-    else parts.push(String(el));
-  }
+  for (const el of arr) parts.push(joinElementToString(el, depth));
   return parts.join(",");
 }
 

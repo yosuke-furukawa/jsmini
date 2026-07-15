@@ -8,7 +8,7 @@ import {
   isJSFunction, createJSFunction, getProperty,
   collectBoundNames, bindPattern, assignPattern,
 } from "./values.js";
-import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, toNumericOperand, type JSString } from "../vm/js-string.js";
+import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, joinElementToString, toNumericOperand, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
 import { JSPromise, drainMicrotasks, isJSPromise } from "../runtime/promise.js";
 import "../runtime/host-patches.js";
@@ -1572,6 +1572,57 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment,
   return undefined;
 }
 
+// 配列メソッドのうち文字列化/要素比較を含むものの自前実装 (VM index.ts の
+// arrayPrototype と同一規則)。TW の配列は host メソッドに委譲しているが、
+// host の join/sort/indexOf は JSString 要素を "[object Object]" として扱う
+// (要素比較は intern されない concat 由来文字列も内容比較で見つける)
+const TW_ARRAY_OVERRIDES: Record<string, Function> = {
+  join: function(this: unknown[], sep?: unknown) {
+    const s = sep === undefined ? "," : joinElementToString(sep);
+    const parts: string[] = [];
+    for (let i = 0; i < this.length; i++) parts.push(joinElementToString(this[i]));
+    return internString(parts.join(s));
+  },
+  toString: function(this: unknown[]) {
+    return internString(arrayToPrimitiveString(this));
+  },
+  indexOf: function(this: unknown[], item: unknown, from?: number) {
+    const start = from ?? 0;
+    for (let i = start; i < this.length; i++) {
+      const el = this[i];
+      if (el === item || (isJSString(el) && isJSString(item) && jsStringEquals(el, item))) return i;
+    }
+    return -1;
+  },
+  lastIndexOf: function(this: unknown[], item: unknown, from?: number) {
+    const start = from ?? this.length - 1;
+    for (let i = Math.min(start, this.length - 1); i >= 0; i--) {
+      const el = this[i];
+      if (el === item || (isJSString(el) && isJSString(item) && jsStringEquals(el, item))) return i;
+    }
+    return -1;
+  },
+  includes: function(this: unknown[], item: unknown, from?: number) {
+    const start = from ?? 0;
+    for (let i = start; i < this.length; i++) {
+      const el = this[i];
+      if (el === item || (isJSString(el) && isJSString(item) && jsStringEquals(el, item))) return true;
+    }
+    return false;
+  },
+  sort: function(this: unknown[], cmpFn?: unknown) {
+    // comparator は evalCallExpression の汎用ラップ済み (JSFunction → host callable)。
+    // 既定比較は ToString の辞書順 — joinElementToString で JSString/オブジェクト要素も安全に
+    const cmp = typeof cmpFn === "function"
+      ? (a: unknown, b: unknown) => (cmpFn as Function)(a, b) as number
+      : (a: unknown, b: unknown) => {
+          const sa = joinElementToString(a), sb = joinElementToString(b);
+          return sa < sb ? -1 : sa > sb ? 1 : 0;
+        };
+    return this.sort(cmp);
+  },
+};
+
 function* evalCallExpression(
   expr: Expression & { type: "CallExpression" },
   env: Environment,
@@ -1633,6 +1684,12 @@ function* evalCallExpression(
         };
         return bound;
       }
+    }
+    // 配列の文字列感受性メソッドは自前実装で上書き (host 実装は JSString を
+    // "[object Object]" にしてしまう)。map/filter 等の callback 系は host +
+    // 汎用 JSFunction ラップで正しく動くので対象外
+    if (Array.isArray(thisValue) && typeof key === "string" && TW_ARRAY_OVERRIDES[key]) {
+      fn = TW_ARRAY_OVERRIDES[key];
     }
     // (JSPromise の then/catch は getProperty の前で処理済み)
     // JSString のメソッド: ネイティブ文字列メソッドに委譲
