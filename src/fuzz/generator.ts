@@ -77,7 +77,9 @@ function genExpr(ctx: Ctx, depth: number): string {
       return `(${sub()} ${r.pick(group)} ${sub()})`;
     }
     case "unary":
-      return `(${r.pick(UNARY)}${sub()})`;
+      // 演算子と被演算子の間に空白: `-` と `-0.5` が直結すると `--0.5` になり
+      // (実 JS でも) SyntaxError になるため
+      return `(${r.pick(UNARY)} ${sub()})`;
     case "ternary":
       return `(${sub()} ? ${sub()} : ${sub()})`;
     case "array": {
