@@ -16,16 +16,19 @@ PROBLEMS.md に台帳化した。Phase 36 はその台帳を上から潰す。
 
 ### 36-1: 小粒の divergence 修正 (PROBLEMS §2)
 
-- [ ] 36-1a: switch の case 内 function 宣言を TW で巻き上げ (§2-1)。
-      TW の SwitchStatement に hoistFunctionDeclarations を追加。
-      VM は動作済みなので TW のみ
-- [ ] 36-1b: const を閉包する関数の巻き上げ順エッジ (§2-4)。
-      compileProgram / compileFunctionBody の関数 hoisting パスの前に
-      const 宣言名を先行スキャンして constLocals へ登録 →
-      ReferenceError でなく TypeError に
-- [ ] 36-1c: メンバー代入 `obj.p = rhs` の評価順 (§2-3)。
-      VM: SetPropertyAssign (non-computed) を object 先に。
-      TW: put 時の object 再評価 (2 回評価) も同時に解消
+- [x] 36-1a: switch の case 内 function 宣言を block-scoped に (§2-1)。
+      TW: switchEnv へ巻き上げ。VM も実は壊れていた (外に漏れる + 前方 case
+      から不可視) ので scopeStack + blockDepth で同時修正
+- [x] 36-1b: const を閉包する関数の巻き上げ順エッジ (§2-4)。
+      調査で拡大: VM はトップレベル関数からトップレベル let/const が宣言順に
+      関係なく一切見えなかった (読み書きとも ReferenceError)。preScanLexicals
+      (スロット先行予約 pendingLexicals) + resolveLocalForChild +
+      isConstBinding 対応で解決。擬似 TDZ とシャドウは維持
+- [x] 36-1c: メンバー代入 `obj.p = rhs` の評価順 (§2-3)。
+      調査で拡大: VM は o.p += 2 を o.p = 2 として実行する実バグがあった
+      (operator 不問の分岐)。compileMemberAssignment 新設で複合代入 + 評価順
+      (obj → rhs、ホット形は維持、複雑式のみ temp) を修正。TW の object
+      2 回評価も解消
 
 ### 36-2: TW の host 配列メソッドの JSString 対応 (§2-2)
 
