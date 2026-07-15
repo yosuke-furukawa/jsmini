@@ -93,7 +93,9 @@ function genExpr(ctx: Ctx, depth: number): string {
       return `({${props.join(", ")}})`;
     }
     case "member":
-      return `(${sub()}).${r.pick(["length", "k0", "k1", "constructor", "x"])}`;
+      // ".constructor" は host 境界の既知差異 (TW=host Array/Number vs VM=jsmini Object)
+      // で発散が確定しているため生成しない (PROBLEMS.md 参照。新規バグ検出のノイズになる)
+      return `(${sub()}).${r.pick(["length", "k0", "k1", "x"])}`;
     case "index":
       return `(${sub()})[${r.pick(["0", "1", "2", genLeaf(ctx)])}]`;
     case "call": {

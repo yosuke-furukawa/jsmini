@@ -1069,6 +1069,12 @@ export class VM {
             // IC 更新
             const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
             if (ic) icUpdate(ic, getHiddenClass(obj), name);
+          } else if (isJSString(obj) || isJSSymbol(obj)) {
+            // プリミティブ (文字列/シンボル) へのプロパティ代入は strict の TypeError。
+            // 文字列は intern 共有オブジェクトなので黙って書くと状態が漏れる
+            const err = new TypeError(`Cannot create property '${name}' on ${isJSString(obj) ? "string" : "symbol"}`);
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
           } else {
             (obj as Record<string, unknown>)[name] = value;
           }
@@ -1127,6 +1133,10 @@ export class VM {
               const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
               if (ic) icUpdate(ic, getHiddenClass(obj), name);
             }
+          } else if (isJSString(obj) || isJSSymbol(obj)) {
+            const err = new TypeError(`Cannot create property '${name}' on ${isJSString(obj) ? "string" : "symbol"}`);
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
           } else {
             (obj as Record<string, unknown>)[name] = value;
           }
@@ -1245,6 +1255,10 @@ export class VM {
             const keyStr = toPropertyKeyString(key);
             if (isJSObject(obj)) {
               jsObjSet(obj, keyStr, value);
+            } else if (isJSString(obj) || isJSSymbol(obj)) {
+              const err = new TypeError(`Cannot create property '${keyStr}' on ${isJSString(obj) ? "string" : "symbol"}`);
+              if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+              break;
             } else {
               obj[keyStr] = value;
             }

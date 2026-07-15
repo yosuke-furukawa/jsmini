@@ -252,3 +252,16 @@ describe("Phase 36-6 — null/undefined へのプロパティ代入は TypeError
   it("undefined.x = v", () => allThrow(`var v0; v0.x = 1;`, TypeError));
   it("null.x += v (複合代入)", () => allThrow(`var v0 = null; v0.x += 1;`, TypeError));
 });
+
+describe("Phase 36-6 — プリミティブへのプロパティ代入は TypeError (intern 汚染防止)", () => {
+  // 文字列は intern 共有オブジェクト。代入を許すと後続実行に状態が漏れる
+  it("string.x = v", () => allThrow(`let s = "a"; s.x = 5;`, TypeError));
+  it("string.x += v (複合)", () => allThrow(`let s = "a"; s.x += 1;`, TypeError));
+  it("string[key] = v (computed)", () => allThrow(`let s = "a"; s["k"] = 5;`, TypeError));
+  it("number.x = v", () => allThrow(`let n = 5; n.x = 1;`, TypeError));
+  it("boolean.x = v", () => allThrow(`let b = true; b.x = 1;`, TypeError));
+  it("symbol.x = v", () => allThrow(`let y = Symbol(); y.x = 1;`, TypeError));
+  // 汚染していないこと: 代入試行後も文字列プロパティは undefined のまま
+  it("代入失敗後に string プロパティは汚染されない", () =>
+    agree(`try { let s = "a"; s.x = 5; } catch (e) {} ("a").x;`, undefined));
+});

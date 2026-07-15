@@ -1313,10 +1313,21 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       const isMember = expr.left.type === "MemberExpression";
       let memberObj: Record<string, unknown> | null = null;
       let memberKey = "";
-      // null/undefined へのプロパティ代入は TypeError (ReferenceError ではない)。
-      // 単純代入 (=) では RHS 評価後に、複合代入では現在値の読み出し時に throw する
-      const nullTargetError = () =>
-        new TypeError(`Cannot set properties of ${memberObj === null ? "null" : "undefined"} (setting '${memberKey}')`);
+      // プリミティブ (null/undefined/string/number/boolean/symbol) へのプロパティ
+      // 代入は strict では TypeError (ReferenceError でも暗黙 no-op でもない)。
+      // 特に文字列は intern 共有オブジェクトなので、書き込みを許すと後続プログラムに
+      // 状態が漏れる。単純代入 (=) は RHS 評価後、複合代入は現在値読み出し時に throw
+      const isPrimitiveTarget = (v: unknown): boolean => {
+        if (v === null || v === undefined) return true;
+        const t = typeof v;
+        if (t === "string" || t === "number" || t === "boolean" || t === "bigint") return true;
+        return isJSString(v) || isJSSymbol(v);
+      };
+      const primTargetError = () => {
+        const what = memberObj === null ? "null" : memberObj === undefined ? "undefined"
+          : `${isJSString(memberObj) ? "string" : typeof memberObj}`;
+        return new TypeError(`Cannot set properties of ${what} (setting '${memberKey}')`);
+      };
       if (isMember) {
         memberObj = (yield* evalExpression(expr.left.object, env)) as Record<string, unknown>;
         memberKey = yield* resolveMemberKey(expr.left, env);
@@ -1325,7 +1336,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       if (expr.operator === "=") {
         newValue = yield* evalExpression(expr.right, env);
       } else {
-        if (isMember && (memberObj === null || memberObj === undefined)) throw nullTargetError();
+        if (isMember && isPrimitiveTarget(memberObj)) throw primTargetError();
         const currentValue = isMember
           ? getProperty(memberObj as JSObject, memberKey)
           : env.get(expr.left.name);
@@ -1354,8 +1365,8 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       }
 
       if (isMember) {
-        if (memberObj === null || memberObj === undefined) throw nullTargetError();
-        memberObj[memberKey] = newValue;
+        if (isPrimitiveTarget(memberObj)) throw primTargetError();
+        memberObj![memberKey] = newValue;
       } else {
         env.set(expr.left.name, newValue);
       }
