@@ -45,6 +45,11 @@ function toPropertyKeyString(key: unknown): string {
 // toPrimitive/callInternal 内で例外が unwindToHandler で処理された場合の sentinel
 const THROWN_SENTINEL = Symbol("thrown");
 
+// TDZ (Temporal Dead Zone): lexical (let/const) が宣言スロットを確保済みだが
+// 初期化子がまだ実行されていない状態を表す穴。この値を読むと ReferenceError。
+// undefined とは区別する (`let x; x` は undefined を返すが宣言前アクセスは throw)
+export const TDZ_HOLE = Symbol("TDZ");
+
 // Upvalue ボックス: ミュータブルキャプチャ用の参照ラッパー
 type UpvalueBox = { value: unknown };
 
@@ -877,6 +882,18 @@ export class VM {
           this.push(box ? box.value : frame.locals[slot]);
           break;
         }
+        case "LdaLocalTDZ": {
+          const slot = instr.operand!;
+          const box = (frame as any).__localBoxes?.get(slot) as UpvalueBox | undefined;
+          const v = box ? box.value : frame.locals[slot];
+          if (v === TDZ_HOLE) {
+            const err = new ReferenceError("Cannot access lexical binding before initialization");
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
+          this.push(v);
+          break;
+        }
         case "StaLocal": {
           const slot = instr.operand!;
           const val = this.peek();
@@ -885,14 +902,57 @@ export class VM {
           if (box) box.value = val;
           break;
         }
+        case "StaLocalTDZ": {
+          // lexical への再代入: 初期化前 (穴) なら ReferenceError
+          const slot = instr.operand!;
+          const box = (frame as any).__localBoxes?.get(slot) as UpvalueBox | undefined;
+          const cur = box ? box.value : frame.locals[slot];
+          if (cur === TDZ_HOLE) {
+            const err = new ReferenceError("Cannot access lexical binding before initialization");
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
+          const val = this.peek();
+          frame.locals[slot] = val;
+          if (box) box.value = val;
+          break;
+        }
+        case "StaHole": {
+          // lexical スコープ入口: スロットを TDZ の穴で初期化
+          const slot = instr.operand!;
+          frame.locals[slot] = TDZ_HOLE;
+          const box = (frame as any).__localBoxes?.get(slot) as UpvalueBox | undefined;
+          if (box) box.value = TDZ_HOLE;
+          break;
+        }
 
         // Upvalue (クロージャでキャプチャされた外部変数)
         case "LdaUpvalue":
           this.push(frame.upvalueBoxes[instr.operand!].value);
           break;
+        case "LdaUpvalueTDZ": {
+          const v = frame.upvalueBoxes[instr.operand!].value;
+          if (v === TDZ_HOLE) {
+            const err = new ReferenceError("Cannot access lexical binding before initialization");
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
+          this.push(v);
+          break;
+        }
         case "StaUpvalue":
           frame.upvalueBoxes[instr.operand!].value = this.peek();
           break;
+        case "StaUpvalueTDZ": {
+          const b = frame.upvalueBoxes[instr.operand!];
+          if (b.value === TDZ_HOLE) {
+            const err = new ReferenceError("Cannot access lexical binding before initialization");
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
+          b.value = this.peek();
+          break;
+        }
 
         // グローバル変数
         case "LdaGlobal": {

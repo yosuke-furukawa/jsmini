@@ -29,7 +29,7 @@ function classifyBoolReturns(func: BytecodeFunction): "none" | "bool" | "mixed" 
   const boolSlots = new Set<number>();
   const nonBoolSlots = new Set<number>();
   for (let i = 0; i < bc.length; i++) {
-    if (bc[i].op === "StaLocal" && bc[i].operand !== undefined) {
+    if ((bc[i].op === "StaLocal" || bc[i].op === "StaLocalTDZ") && bc[i].operand !== undefined) {
       if (i > 0 && BOOL_PRODUCERS.has(bc[i - 1].op)) boolSlots.add(bc[i].operand!);
       else nonBoolSlots.add(bc[i].operand!);
     }
@@ -43,7 +43,7 @@ function classifyBoolReturns(func: BytecodeFunction): "none" | "bool" | "mixed" 
     // (bool デコードでも falsy のまま)、これを数えると全関数が混在判定になる
     if (i === bc.length - 1 && prev?.op === "LdaUndefined") continue;
     const isBool = prev !== undefined && (BOOL_PRODUCERS.has(prev.op) ||
-      (prev.op === "LdaLocal" && prev.operand !== undefined && boolSlots.has(prev.operand) && !nonBoolSlots.has(prev.operand)));
+      ((prev.op === "LdaLocal" || prev.op === "LdaLocalTDZ") && prev.operand !== undefined && boolSlots.has(prev.operand) && !nonBoolSlots.has(prev.operand)));
     if (isBool) sawBool = true; else sawOther = true;
   }
   return sawBool ? (sawOther ? "mixed" : "bool") : "none";

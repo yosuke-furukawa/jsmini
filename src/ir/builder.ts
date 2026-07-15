@@ -252,6 +252,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
         case "LdaNull": { const op = registerOp(createConst(irFunc, 0, "any")); op.value = null as any; block.ops.push(op); stack.push(op.id); break; }
         case "LdaTrue": { const op = registerOp(createConst(irFunc, 1, "bool")); op.value = true; block.ops.push(op); stack.push(op.id); break; }
         case "LdaFalse": { const op = registerOp(createConst(irFunc, 0, "bool")); op.value = false; block.ops.push(op); stack.push(op.id); break; }
+        case "LdaLocalTDZ": // JIT では TDZ チェックを省略 (穴を踏むコードは cold で tier-up しない)
         case "LdaLocal": {
           const slot = instr.operand!;
           const valId = locals[slot];
@@ -259,7 +260,9 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           else { const op = registerOp(createOp(irFunc, "Undefined", [], "any")); block.ops.push(op); stack.push(op.id); }
           break;
         }
+        case "StaLocalTDZ": // TDZ 再代入チェックは JIT では省略
         case "StaLocal": { locals[instr.operand!] = stack[stack.length - 1]; break; }
+        case "StaHole": break; // TDZ の穴初期化。JIT では no-op (実 StaLocal が型を決める)
         case "Add": case "Sub": case "Mul": case "Div": case "Mod": {
           const r = stack.pop()!, l = stack.pop()!;
           const op = registerOp(createOp(irFunc, instr.op as any, [l, r], inferBinType(l, r)));
@@ -338,6 +341,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           block.ops.push(op);
           break;
         }
+        case "LdaUpvalueTDZ": // JIT では TDZ チェック省略 (穴を踏むコードは cold)
         case "LdaUpvalue": {
           const uvIndex = instr.operand!;
           const op = registerOp(createOp(irFunc, "LoadUpvalue", [], "any"));
@@ -345,6 +349,7 @@ export function buildIR(func: BytecodeFunction, options?: BuildIROptions): IRFun
           block.ops.push(op); stack.push(op.id);
           break;
         }
+        case "StaUpvalueTDZ": // TDZ 再代入チェックは JIT では省略
         case "StaUpvalue": {
           const uvIndex = instr.operand!;
           const val = stack[stack.length - 1]; // peek

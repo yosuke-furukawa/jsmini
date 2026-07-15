@@ -224,3 +224,24 @@ describe("Phase 36-5 — JIT の boolean 表現 (tagged bool タグ + bool retur
     }
   });
 });
+
+describe("Phase 36-6 — TDZ (Temporal Dead Zone) の実行時実装", () => {
+  // switch: 制御が宣言をスキップして別 case の lexical を読む → ReferenceError
+  it("switch case をまたぐ宣言前 read", () =>
+    allThrow(`switch (undefined) { case 1: const v0 = true; break; default: [(v0)]; }`, ReferenceError));
+  it("switch case をまたぐ宣言前 write", () =>
+    allThrow(`switch (undefined) { case 1: let v0 = 1; break; default: v0 = 2; }`, ReferenceError));
+  // block: 宣言文より前で read/write
+  it("block 内の宣言前 read", () => allThrow(`{ x; let x = 1; }`, ReferenceError));
+  it("block 内の宣言前 write", () => allThrow(`{ x = 2; let x = 1; }`, ReferenceError));
+  // closure: 巻き上げ関数が初期化前に lexical をキャプチャ read
+  it("クロージャの宣言前キャプチャ read", () =>
+    allThrow(`function foo() { return q; } foo(); let q = 3;`, ReferenceError));
+  // 正常系: 初期化後は普通に読める / let 無初期化は undefined (TDZ ではない)
+  it("初期化後の read は正常", () => agree(`let a = 5; let b = a + 1; b;`, 6));
+  it("初期化子無し let は undefined (throw しない)", () => agree(`let z; z;`, undefined));
+  it("block の const は初期化後 read 可", () => agree(`let r = 0; { const c = 10; r = c * 2; } r;`, 20));
+  it("再代入は初期化後なら throw しない", () => agree(`let x = 1; x = 2; x;`, 2));
+  it("switch case 内 let は別 case で共有 (初期化後)", () =>
+    agree(`let r; switch (1) { case 1: let v = 7; case 2: r = v; } r;`, 7));
+});
