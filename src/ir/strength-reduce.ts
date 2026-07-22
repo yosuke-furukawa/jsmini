@@ -7,13 +7,14 @@
 //   x % 2  → x & 1    (正の整数のみ)
 //
 // 恒等変換:
-//   x * 0  → 0
+//   x * 0  → 0  (※ -0 を生みうる関数では不可: -5*0=-0, x+0 で -0+0=+0)
 //   x * 1  → x
 //   x + 0  → x
-//   x - 0  → x
+//   x - 0  → x  (符号ゼロに安全: -0-0=-0)
 
 import type { IRFunction, Op, Block } from "./types.js";
 import { createConst } from "./types.js";
+import { functionNeedsF64 } from "./range.js";
 
 // 2 の冪乗なら指数を返す (1→0, 2→1, 4→2, 8→3, ...)
 function log2IfPow2(n: number): number {
@@ -24,6 +25,11 @@ function log2IfPow2(n: number): number {
 
 export function strengthReduce(func: IRFunction): boolean {
   let changed = false;
+  // -0 を生みうる (f64 化される) 関数では、-0 を +0 に潰す恒等変換を抑止する:
+  //   x * 0 → 0   (-5*0 は -0、Const 0 は +0)
+  //   x + 0 → x   (-0 + 0 は +0、x のままだと -0)
+  // pow2 シフト変換は codegen が f64 で Mul に戻すので安全 (抑止不要)
+  const mayNegZero = functionNeedsF64(func);
 
   // Op ID → Op のマップ
   const opById = new Map<number, Op>();
@@ -50,11 +56,13 @@ export function strengthReduce(func: IRFunction): boolean {
         switch (op.opcode) {
           case "Mul": {
             if (val === 0) {
-              op.opcode = "Const";
-              op.value = 0;
-              op.args = [];
-              op.type = "i32";
-              changed = true;
+              if (!mayNegZero) { // x*0→0 は -0 を潰すので f64 関数では抑止
+                op.opcode = "Const";
+                op.value = 0;
+                op.args = [];
+                op.type = "i32";
+                changed = true;
+              }
             } else if (val === 1) {
               replaceWithArg(func, op, op.args[0]);
               changed = true;
@@ -104,7 +112,7 @@ export function strengthReduce(func: IRFunction): boolean {
           }
 
           case "Add": {
-            if (val === 0) {
+            if (val === 0 && !mayNegZero) { // x+0→x は -0+0=+0 を壊すので f64 関数では抑止
               replaceWithArg(func, op, op.args[0]);
               changed = true;
             }
@@ -112,7 +120,7 @@ export function strengthReduce(func: IRFunction): boolean {
           }
 
           case "Sub": {
-            if (val === 0) {
+            if (val === 0) { // x-0→x は符号ゼロに安全 (-0-0=-0)
               replaceWithArg(func, op, op.args[0]);
               changed = true;
             }
@@ -129,11 +137,13 @@ export function strengthReduce(func: IRFunction): boolean {
         switch (op.opcode) {
           case "Mul": {
             if (val === 0) {
-              op.opcode = "Const";
-              op.value = 0;
-              op.args = [];
-              op.type = "i32";
-              changed = true;
+              if (!mayNegZero) { // 0*x→0 は -0 を潰すので f64 関数では抑止
+                op.opcode = "Const";
+                op.value = 0;
+                op.args = [];
+                op.type = "i32";
+                changed = true;
+              }
             } else if (val === 1) {
               replaceWithArg(func, op, op.args[1]);
               changed = true;
@@ -152,7 +162,7 @@ export function strengthReduce(func: IRFunction): boolean {
           }
 
           case "Add": {
-            if (val === 0) {
+            if (val === 0 && !mayNegZero) { // 0+x→x は -0 を壊すので f64 関数では抑止
               replaceWithArg(func, op, op.args[1]);
               changed = true;
             }

@@ -24,6 +24,7 @@ Phase 36-6 で差分ファザは完全収束した (5 seed × 20000 = 10 万プ�
 - **§3-1 `"5" == 5`** → 36-3 で ToNumber 段を追加して true
 - **§3-2 ユーザー定義 valueOf/toString** → 36-4 で解決
 - **§3-3 TW の `+=` が host string を生む** → 36-4 で解決
+- **§1-1 計算で生まれる -0 が 0 になる** → Phase 37 で f64 昇格して解決 (下記詳細)
 - **TDZ (Temporal Dead Zone)** → 36-6 で実行時 TDZ を実装 (下記詳細)
 - **プリミティブへのプロパティ代入** → 36-6 で TypeError に統一 (intern 汚染の根治)
 - **TDZ とエラー優先順位** → 36-6 で spec 準拠 (TDZ > const-immutable, RHS 評価 > 書込)
@@ -45,19 +46,27 @@ JSString オブジェクトに書き込んでいた (spec 違反)。intern は�
 
 ## 1. 残る既知の divergence
 
-### 1-1. JIT: 計算で生まれた -0 が 0 になる (保留)
+### 1-1. JIT: 計算で生まれた -0 が 0 になる → Phase 37 で解決
 
 ```js
-function f0(p0) { return -p0; }   // p0 = 0 のとき実 JS は -0
-for (var i = 0; i < 300; i++) console.log(f0(0));
-// TW/VM: -0    JIT (OSR 後): 0
+function f0(a, b) { return a * b; }
+// f0(0, -1) は実 JS で -0。1 / f0(0,-1) は -Infinity
+// 修正前: JIT (i32.mul) は +0 → +Infinity
 ```
 
-- i32 に -0 は無い。**定数の -0** は 35-8 で解決済みだが、**演算結果の -0**
-  (`-x` で x=0 等) は range 分析で静的に追えない。
-- V8 も「-0 を生みうる演算」に deopt を仕込んで対処。Negate/Mul に -0 チェック
-  付き slow path が要る。**コスト大・実害小のため保留**。
-- 差分ファザの生成器はこのパターンをほぼ生成しないため発散数には出ない。
+- i32 に -0 は無く、i32.mul/i32 の negate (`0 - x`) が -0 を 0 に潰していた。
+- **解決 (deopt ではなく f64 昇格)**: f64.neg/f64.mul は -0 をネイティブ保持する
+  ので、-0 を生みうる Negate/Mul を含む関数を f64 コンパイルに昇格させる。
+  - IR パス: `functionNeedsF64` に `opProducesNegZero` を追加 (operand の range で
+    -0 の可能性を判定)。
+  - direct パス: `bytecodeHasRiskyMul` で spec を f64 昇格。`x * 正の整数定数`
+    (0*正=+0) は安全なので i32 のまま (index 計算のホットパス維持)。Negate は
+    direct パスが元々 i32 で bail して f64 化するので対象外。
+  - 併せて strength-reduce の -0 非健全な恒等変換 (x*0→0, x+0→x) を f64 関数で
+    抑止 (f64 昇格で -0 が IR に到達可能になり顕在化した潜在バグ)。
+  - **引数/グローバルで渡された -0** も対応: i32 特殊化の copy-in で -0 が来たら
+    deopt して VM 実行に落とす (`id(-0)` が -0 を保持)。既存の「非整数引数 →
+    deopt」と同じ仕組み。稀なので実害小。
 
 ### 1-2. `.constructor` の host 境界差 (生成器から除外)
 

@@ -24,6 +24,23 @@ const BOOL_PRODUCERS = new Set([
   "LessThan", "GreaterThan", "LessEqual", "GreaterEqual",
   "Equal", "NotEqual", "StrictEqual", "StrictNotEqual",
 ]);
+// -0 を生みうる Mul を bytecode に含むか (direct パスの spec 昇格用)。
+// `x * 正の整数定数` は 0*正=+0 で -0 にならないので i32 のまま安全。
+// それ以外の Mul (変数×変数, x×負定数) は i32.mul だと -0 が 0 に化けるため
+// f64 spec に昇格させる (f64.mul は -0 を保持)。
+function bytecodeHasRiskyMul(func: BytecodeFunction): boolean {
+  const bc = func.bytecode;
+  for (let i = 0; i < bc.length; i++) {
+    if (bc[i].op !== "Mul") continue;
+    const prev = bc[i - 1];
+    if (prev && prev.op === "LdaConst" && prev.operand !== undefined) {
+      const v = func.constants[prev.operand];
+      if (typeof v === "number" && Number.isInteger(v) && v > 0) continue; // x * 正定数 は安全
+    }
+    return true;
+  }
+  return false;
+}
 function classifyBoolReturns(func: BytecodeFunction): "none" | "bool" | "mixed" {
   const bc = func.bytecode;
   const boolSlots = new Set<number>();
@@ -212,7 +229,12 @@ export class JitManager {
 
     // 型特殊化 (引数なしの場合はデフォルト i32)
     const allSame = wasmArgTypes.length === 0 || wasmArgTypes.every(t => t === wasmArgTypes[0]);
-    const spec: WasmNumericType = allSame && (wasmArgTypes.length === 0 || wasmArgTypes[0] === "i32") ? "i32" : "f64";
+    let spec: WasmNumericType = allSame && (wasmArgTypes.length === 0 || wasmArgTypes[0] === "i32") ? "i32" : "f64";
+    // -0 を生みうる Mul を含む i32 関数は f64 に昇格する。i32.mul は -0 を 0 に
+    // 潰すが f64.mul は -0 を保持する (`1 / (0 * -1)` が -Infinity になる)。
+    // Negate は direct パスが元々 i32 で bail して f64 リトライするので対象外。
+    // IR パスは functionNeedsF64 が range 分析で別途 f64 化する
+    if (spec === "i32" && bytecodeHasRiskyMul(func)) spec = "f64";
 
     // Return が bool の関数: 全 bool なら境界デコード、混在なら compile しない
     const boolRet = classifyBoolReturns(func);
@@ -603,10 +625,12 @@ export class JitManager {
         if (id < 0) { this.deoptimize(func, args); return null; }
         wasmArgs.push(id);
       } else if (typeof a === "number") {
-        // i32 特殊化のとき、小数が渡されたら deopt
-        if (cached.spec === "i32" && !Number.isInteger(a)) {
+        // i32 特殊化のとき、小数または -0 が渡されたら deopt。
+        // -0 は i32 の copy-in で 0 に潰れるため (`id(-0)` が +0 を返す)。
+        // 実 JS では引数の -0 は保持されるので VM 実行に落とす (稀なので実害小)
+        if (cached.spec === "i32" && (!Number.isInteger(a) || Object.is(a, -0))) {
           this.deoptimize(func, args);
-          this.logTier(func, "Bytecode VM (after deopt: float to i32)", callCount);
+          this.logTier(func, "Bytecode VM (after deopt: float/-0 to i32)", callCount);
           return null;
         }
         wasmArgs.push(a);
@@ -733,7 +757,8 @@ export class JitManager {
       if (!this.globalsMap) { this.deoptimize(func, args); return null; }
       for (const gname of cached.globalNames) {
         const v = this.globalsMap.get(gname);
-        if (typeof v !== "number" || (cached.spec === "i32" && !Number.isInteger(v))) {
+        // -0 は i32 copy-in で 0 に潰れるので引数と同様に deopt
+        if (typeof v !== "number" || (cached.spec === "i32" && (!Number.isInteger(v) || Object.is(v, -0)))) {
           this.deoptimize(func, args);
           this.logTier(func, "Bytecode VM (after deopt: non-numeric global " + gname + ")", callCount);
           return null;
