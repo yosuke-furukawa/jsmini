@@ -305,3 +305,38 @@ spike の結果を受けて **案 C' (i32 Smi タグ + object table)** で進め
 - V8 の対応物: Smi/HeapNumber/tagged fields。案 A まで行くと
   「V8 のオブジェクトモデルを WasmGC で再構築する」ことになり、
   教育リポジトリとしては最終ボス感のあるテーマ
+
+## Phase 36-5 追記: bool タグ (TAG_FALSE / TAG_TRUE)
+
+差分ファザが検出した「JIT 内の `this.k0 = false` が write-back で number 0 になる」
+問題への対応。bool Const を store すると classify が prop を numeric 降格し、
+Const false が i32 0 で emit → write-back が Smi 0 → number 0 とデコードしていた。
+
+### 設計 (案: タグ空間拡張を採用)
+
+- タグ値を 2 つ追加: **TAG_FALSE = 5, TAG_TRUE = 7** (null=1 / undefined=3 と同列)
+- object table の index 予約を 0..1 → **0..3** に拡張 (最初のオブジェクト tag は 9)
+- copy-in / write-back / return / __load_slot の encode/decode に bool を追加
+- truthiness の falsy 集合: {0(Smi 0), 1(null), 3(undefined)} に **5(false)** を追加
+- classify: bool **定数** の store / tagged 値との比較を許可 (null/undefined と同じ扱い)。
+  比較結果 (x < y 等) の store は従来通り numeric 降格 (タグ変換の挿入コストは
+  次の需要が出るまで見送り)
+- emit: 全消費先が tagged store/比較の bool Const は taggedValues に入れて
+  タグ値 (5/7) で emit。raw bool 文脈 (Branch/算術) が混在する Const は対象外
+
+### 比較の意味論 (割り切り)
+
+タグ値同士の == は identity 比較のまま。bool==bool / bool==null / bool==ref は
+正しいが、**実行時に型が混在するチェーン同士** (false == 0 → 実 JS true) と
+null == undefined (実 JS true) は identity では false になる。これは既存の
+null==undefined と同類の tagged 領域の既知制約として PROBLEMS.md に記録する
+(classify は数値定数との比較を降格するので、fuzz で当たるのは
+「両辺 tagged チェーンで実行時型が bool/number 混在」の狭いケースのみ)。
+
+### 却下した代替案
+
+- copy-in で bool を deopt: richards/deltablue の bool フラグ prop
+  (packetPending / stay 等) が丸ごと JIT から外れ、Phase 31-33 の成果が消える
+- write-back 型復元 (copy-in 時 bool だった prop は 0/1 を bool に戻す):
+  JIT 内で this.b = 1 (number) された場合に誤って bool 化する。型追跡が必要になり
+  タグ拡張より高くつく

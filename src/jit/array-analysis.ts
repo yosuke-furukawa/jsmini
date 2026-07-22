@@ -14,7 +14,7 @@ export function detectArrayLocals(func: BytecodeFunction): Set<number> {
       // → arr が配列
       if (pc >= 2) {
         const objInstr = bytecode[pc - 2];
-        if (objInstr.op === "LdaLocal") {
+        if (objInstr.op === "LdaLocal" || objInstr.op === "LdaLocalTDZ") {
           arrayLocals.add(objInstr.operand!);
         }
       }
@@ -25,7 +25,7 @@ export function detectArrayLocals(func: BytecodeFunction): Set<number> {
       // → arr が配列
       if (pc >= 3) {
         const objInstr = bytecode[pc - 3];
-        if (objInstr.op === "LdaLocal") {
+        if (objInstr.op === "LdaLocal" || objInstr.op === "LdaLocalTDZ") {
           arrayLocals.add(objInstr.operand!);
         }
       }
@@ -42,7 +42,7 @@ export function detectArrayLocals(func: BytecodeFunction): Set<number> {
       const name = func.constants[instr.operand!];
       if (name === "length" && pc >= 1) {
         const objInstr = bytecode[pc - 1];
-        if (objInstr.op === "LdaLocal") {
+        if (objInstr.op === "LdaLocal" || objInstr.op === "LdaLocalTDZ") {
           arrayLocals.add(objInstr.operand!);
         }
       }

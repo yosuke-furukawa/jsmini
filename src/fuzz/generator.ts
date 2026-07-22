@@ -93,7 +93,9 @@ function genExpr(ctx: Ctx, depth: number): string {
       return `({${props.join(", ")}})`;
     }
     case "member":
-      return `(${sub()}).${r.pick(["length", "k0", "k1", "constructor", "x"])}`;
+      // ".constructor" は host 境界の既知差異 (TW=host Array/Number vs VM=jsmini Object)
+      // で発散が確定しているため生成しない (PROBLEMS.md 参照。新規バグ検出のノイズになる)
+      return `(${sub()}).${r.pick(["length", "k0", "k1", "x"])}`;
     case "index":
       return `(${sub()})[${r.pick(["0", "1", "2", genLeaf(ctx)])}]`;
     case "call": {
@@ -103,6 +105,12 @@ function genExpr(ctx: Ctx, depth: number): string {
         [`Math.sqrt(${sub()})`, 1], [`Math.pow(${sub()}, ${sub()})`, 1],
         [`String(${sub()})`, 1], [`Number(${sub()})`, 1], [`Boolean(${sub()})`, 1],
         [`parseInt(${sub()})`, 1], [`isNaN(${sub()})`, 1],
+        // 配列メソッド (JSString 要素/引数の扱いと自前実装の検証。Phase 36-2 の再発防止)
+        [`[${sub()}, ${sub()}].join(${sub()})`, 1],
+        [`[${sub()}, ${sub()}].indexOf(${sub()})`, 1],
+        [`[${sub()}, ${sub()}].includes(${sub()})`, 1],
+        [`([${sub()}, ${sub()}].sort()).length`, 1],
+        [`[${sub()}, ${sub()}].lastIndexOf(${sub()})`, 1],
       ];
       return r.weighted(builtins);
     }
@@ -119,14 +127,31 @@ function genExpr(ctx: Ctx, depth: number): string {
 
 // ----- 文生成 -----
 
-function genBlock(ctx: Ctx, maxStmts: number): string {
-  const lines: string[] = [];
-  const n = ctx.rng.range(1, maxStmts);
-  for (let i = 0; i < n && ctx.budget.stmts > 0; i++) {
-    lines.push(genStmt(ctx));
+// ブロックスコープ内で文を生成し、そこで宣言した変数はブロックを抜けたら
+// スコープから外す。これを怠ると生成器がブロック内 let をブロック外から参照する
+// (実 JS では ReferenceError になる) 無効コードを量産し、差分がノイズになる。
+// var は本来関数スコープだが、生成器は安全側 (使える変数が減るだけ) で全部戻す
+function withBlockScope<T>(ctx: Ctx, body: () => T): T {
+  const savedVars = ctx.vars.length;
+  const savedFuncs = ctx.funcs.length;
+  try {
+    return body();
+  } finally {
+    ctx.vars.length = savedVars;
+    ctx.funcs.length = savedFuncs;
   }
-  if (lines.length === 0) lines.push(";");
-  return `{\n${lines.map((l) => "  " + l).join("\n")}\n}`;
+}
+
+function genBlock(ctx: Ctx, maxStmts: number): string {
+  return withBlockScope(ctx, () => {
+    const lines: string[] = [];
+    const n = ctx.rng.range(1, maxStmts);
+    for (let i = 0; i < n && ctx.budget.stmts > 0; i++) {
+      lines.push(genStmt(ctx));
+    }
+    if (lines.length === 0) lines.push(";");
+    return `{\n${lines.map((l) => "  " + l).join("\n")}\n}`;
+  });
 }
 
 function genStmt(ctx: Ctx): string {
@@ -137,10 +162,12 @@ function genStmt(ctx: Ctx): string {
   const kind = r.weighted([
     ["decl", 6],
     ["assign", ctx.vars.length ? 4 : 0],
+    ["memberassign", ctx.vars.length ? 2 : 0],
     ["log", 3],
     ["expr", 3],
     ["if", canBranch ? 3 : 0],
     ["for", canBranch ? 3 : 0],
+    ["switch", canBranch ? 2 : 0],
     ["trycatch", canBranch ? 2 : 0],
     ["throw", 1],
     ["fndecl", canBranch ? 2 : 0],
@@ -192,6 +219,38 @@ function genStmt(ctx: Ctx): string {
       const c = genBlock(ctx, 2);
       ctx.blockDepth--;
       return `try ${t} catch (e) ${c}`;
+    }
+    case "switch": {
+      // switch 生成: case 内の fn/var 宣言のスコープ、fall-through、
+      // default をカバー (Phase 36-1a の再発防止)。switch 全体が 1 ブロック
+      // スコープ (case 内 let は case 間で共有だが switch の外では不可視) なので
+      // withBlockScope で包む
+      ctx.blockDepth++;
+      const stmt = withBlockScope(ctx, () => {
+        const disc = genExpr(ctx, 2);
+        const parts: string[] = [];
+        const ncases = r.range(1, 3);
+        for (let i = 0; i < ncases; i++) {
+          const test = r.pick(["0", "1", "2", "3", '"a"', "true"]);
+          const body: string[] = [];
+          const bn = r.range(0, 2);
+          for (let j = 0; j < bn && ctx.budget.stmts > 0; j++) body.push(genStmt(ctx));
+          if (r.bool(0.7)) body.push("break;");
+          parts.push(`case ${test}: ${body.join(" ")}`);
+        }
+        if (r.bool(0.5) && ctx.budget.stmts > 0) parts.push(`default: ${genStmt(ctx)}`);
+        return `switch (${disc}) {\n${parts.map((c) => "  " + c).join("\n")}\n}`;
+      });
+      ctx.blockDepth--;
+      return stmt;
+    }
+    case "memberassign": {
+      // メンバー代入/複合代入: 評価順 (obj → rhs) と o.p += v をカバー
+      // (Phase 36-1c の再発防止)。object 位置は変数かオブジェクトリテラル
+      const obj = r.bool(0.6) ? r.pick(ctx.vars) : `({k0: ${genLeaf(ctx)}})`;
+      const key = r.bool(0.75) ? `.${r.pick(["k0", "k1", "x"])}` : `[${r.pick(['"k0"', "0", "1"])}]`;
+      const op = r.weighted([["=", 4], ["+=", 2], ["-=", 1], ["*=", 1]] as const);
+      return `(${obj})${key} ${op} ${genExpr(ctx, 2)};`;
     }
     case "throw":
       return `throw ${genExpr(ctx, 2)};`;

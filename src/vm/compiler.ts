@@ -29,7 +29,17 @@ class BytecodeCompiler {
   private lexicalLocals = new Set<string>(); // let/const で宣言されたローカル変数名
   private constLocals = new Set<string>(); // const で宣言された変数名 (再代入を禁止するため)
   private blockDepth = 0; // BlockStatement のネスト深さ (ブロック内 function 宣言の判定用)
-  private upvalues: { name: string; parentSlot: number }[] = [];
+  // 本体直下の let/const に先行割当したスロット (名前 → slot)。
+  // 関数宣言は本体先頭に巻き上げてコンパイルされるため、ソース上で後方の
+  // lexical を閉包が参照するとき、宣言文のコンパイル前でも子の resolveUpvalue
+  // がここで解決できる必要がある。自スコープの直列コードからは見えないままに
+  // する (宣言前アクセスの擬似 TDZ = ReferenceError を保つ) ため locals とは
+  // 別に持ち、宣言文の declareLocal 時に同じスロットへ昇格する
+  private pendingLexicals = new Map<string, number>();
+  // TDZ 対象の lexical スロット (このスコープで確保した let/const)。宣言前に
+  // 読むと ReferenceError になるよう、読みを LdaLocalTDZ で emit する判定に使う
+  private lexicalSlots = new Set<number>();
+  private upvalues: { name: string; parentSlot: number; tdz?: boolean }[] = [];
 
   constructor(parent: BytecodeCompiler | null) {
     this.parent = parent;
@@ -77,9 +87,39 @@ class BytecodeCompiler {
     return this.constants.length - 1;
   }
 
+  // 本体直下の let/const を先行スキャンしてスロットを予約する。
+  // 巻き上げコンパイルされる関数宣言の閉包解決 (resolveUpvalue) 用。
+  // ブロック内の lexical はブロックコンパイル時に別スロットを得るので対象外
+  preScanLexicals(stmts: Statement[]): void {
+    for (const stmt of stmts) {
+      const s = stmt as any;
+      if (s.type === "VariableDeclaration" && s.kind !== "var") {
+        const names = new Set<string>();
+        for (const decl of s.declarations) this.collectPatternNames(decl.id, names);
+        for (const name of names) {
+          if (!this.locals.has(name) && !this.pendingLexicals.has(name)) {
+            this.pendingLexicals.set(name, this.localCount++);
+          }
+          this.lexicalLocals.add(name);
+          if (s.kind === "const") this.constLocals.add(name);
+        }
+      }
+    }
+  }
+
   // ローカル変数のスロットを確保
   declareLocal(name: string): number {
     if (this.locals.has(name)) return this.locals.get(name)!;
+    // 本体直下 (blockDepth 0) の宣言は preScanLexicals の予約スロットへ昇格。
+    // ブロック/switch/for 内 (blockDepth > 0) はシャドウ用の新スロット
+    if (this.blockDepth === 0) {
+      const pending = this.pendingLexicals.get(name);
+      if (pending !== undefined) {
+        this.pendingLexicals.delete(name);
+        this.locals.set(name, pending);
+        return pending;
+      }
+    }
     const slot = this.localCount++;
     this.locals.set(name, slot);
     return slot;
@@ -89,18 +129,48 @@ class BytecodeCompiler {
     return this.locals.get(name) ?? null;
   }
 
+  // lexical スコープ (block/switch) 入口の TDZ 初期化。直下の let/const 宣言に
+  // 新スロットを確保して StaHole (穴) で初期化する。宣言子の初期化 StaLocal が
+  // 後で穴を埋め、宣言前に読むと LdaLocalTDZ が ReferenceError を投げる。
+  // blockDepth++ 済み・scopeStack push 済みの状態で呼ぶこと
+  private beginLexicalScope(lexDecls: any[]): void {
+    for (const s of lexDecls) {
+      for (const decl of s.declarations) {
+        const names = new Set<string>();
+        this.collectPatternNames(decl.id, names);
+        for (const name of names) {
+          this.locals.delete(name); // 外側スコープのシャドウを外し新スロットを強制
+          const slot = this.declareLocal(name);
+          this.lexicalSlots.add(slot);
+          this.lexicalLocals.add(name);
+          if (s.kind === "const") this.constLocals.add(name);
+          this.emit("StaHole", slot);
+        }
+      }
+    }
+  }
+
+  // 子クロージャからの解決用: 宣言済みローカルに加えて、先行予約された
+  // lexical (ソース上で後方の let/const) も見る
+  private resolveLocalForChild(name: string): number | null {
+    return this.locals.get(name) ?? this.pendingLexicals.get(name) ?? null;
+  }
+
   // 親コンパイラのローカルを再帰的に探索して upvalue index を返す (-1 = 見つからない)
   private resolveUpvalue(name: string): number {
     if (!this.parent) return -1;
-    // 親のローカルにあるか
-    const parentSlot = this.parent.resolveLocal(name);
+    // 親のローカルにあるか (先行予約された lexical 含む)
+    const parentSlot = this.parent.resolveLocalForChild(name);
     if (parentSlot !== null) {
       // 既に同じ upvalue があれば再利用
       for (let i = 0; i < this.upvalues.length; i++) {
         if (this.upvalues[i].name === name) return i;
       }
       const idx = this.upvalues.length;
-      this.upvalues.push({ name, parentSlot });
+      // 親が lexical (TDZ 対象) としてこのスロットを確保しているなら、
+      // 宣言前キャプチャ読みを TDZ チェック付きにする
+      const tdz = this.parent.lexicalSlots.has(parentSlot);
+      this.upvalues.push({ name, parentSlot, tdz });
       return idx;
     }
     // 親の upvalue にあるか (ネストしたクロージャ)
@@ -112,7 +182,7 @@ class BytecodeCompiler {
         }
         const idx = this.upvalues.length;
         // parentSlot = -1 - parentUpvalue で「upvalue 参照」を表す
-        this.upvalues.push({ name, parentSlot: -(parentUpvalue + 1) });
+        this.upvalues.push({ name, parentSlot: -(parentUpvalue + 1), tdz: this.parent.upvalues[parentUpvalue]?.tdz });
         return idx;
       }
     }
@@ -137,7 +207,8 @@ class BytecodeCompiler {
   emitLoad(name: string): void {
     const slot = this.resolveLocal(name);
     if (slot !== null) {
-      this.emit("LdaLocal", slot);
+      // lexical (let/const) スロットは TDZ チェック付きでロード
+      this.emit(this.lexicalSlots.has(slot) ? "LdaLocalTDZ" : "LdaLocal", slot);
       return;
     }
     if (this.isFunction) {
@@ -153,7 +224,7 @@ class BytecodeCompiler {
       }
       const upIdx = this.resolveUpvalue(name);
       if (upIdx >= 0) {
-        this.emit("LdaUpvalue", upIdx);
+        this.emit(this.upvalues[upIdx].tdz ? "LdaUpvalueTDZ" : "LdaUpvalue", upIdx);
         return;
       }
     }
@@ -163,10 +234,12 @@ class BytecodeCompiler {
 
   // name が (自スコープまたは外側スコープの) const バインディングか。
   // 最初に name をローカルとして宣言しているスコープの const 判定を返す (内側のシャドウ優先)。
+  // 先行予約された lexical (pendingLexicals) も宣言済み扱い — 巻き上げコンパイル中の
+  // 関数から見た「ソース上で後方の const」への代入も TypeError にするため
   private isConstBinding(name: string): boolean {
     let c: BytecodeCompiler | null = this;
     while (c) {
-      if (c.locals.has(name)) return c.constLocals.has(name);
+      if (c.locals.has(name) || c.pendingLexicals.has(name)) return c.constLocals.has(name);
       c = c.parent;
     }
     return false;
@@ -175,19 +248,24 @@ class BytecodeCompiler {
   // 変数のストア (代入)。const 再代入は TypeError、未宣言グローバル代入は strict の ReferenceError。
   emitStore(name: string): void {
     if (this.isConstBinding(name)) {
-      // const への再代入 → 実行時 TypeError (初期化は compileBindingTarget が別途 StaLocal で行う)
+      // const への再代入 → 実行時 TypeError (初期化は compileBindingTarget が別途 StaLocal で行う)。
+      // ただし初期化前 (TDZ) なら spec は const-immutable より TDZ を優先 (ReferenceError)
+      // なので、自スコープの lexical スロットに解決できるときは CheckTDZ を先に挟む
+      const slot = this.resolveLocal(name);
+      if (slot !== null && this.lexicalSlots.has(slot)) this.emit("CheckTDZ", slot);
       this.emit("ThrowConstAssign", this.addConstant(name));
       return;
     }
     const slot = this.resolveLocal(name);
     if (slot !== null) {
-      this.emit("StaLocal", slot);
+      // lexical への再代入は初期化前 (TDZ) チェック付き
+      this.emit(this.lexicalSlots.has(slot) ? "StaLocalTDZ" : "StaLocal", slot);
       return;
     }
     if (this.isFunction) {
       const upIdx = this.resolveUpvalue(name);
       if (upIdx >= 0) {
-        this.emit("StaUpvalue", upIdx);
+        this.emit(this.upvalues[upIdx].tdz ? "StaUpvalueTDZ" : "StaUpvalue", upIdx);
         return;
       }
     }
@@ -239,6 +317,105 @@ class BytecodeCompiler {
     else if (id.type === "ArrayPattern") for (const e of id.elements) this.collectPatternNames(e, out);
     else if (id.type === "RestElement") this.collectPatternNames(id.argument, out);
     else if (id.type === "AssignmentPattern") this.collectPatternNames(id.left, out);
+  }
+
+  // メンバー代入 (obj.p = v / obj[k] = v / obj.p += v / obj[k] += v) のコンパイル。
+  // - 複合代入は「obj (と key) を 1 回だけ評価 → 現在値読み → rhs → 演算 → 書き戻し」。
+  //   以前は operator を見ておらず obj.p += 2 が obj.p = 2 として実行されていた
+  // - 単純代入も JS 仕様の評価順 (obj → rhs) を守る。副作用がなく冪等な object 式
+  //   (this / Identifier) は従来の rhs → obj のバイトコード形を保ち、JIT の
+  //   ホットパス (this.x = v) の形を崩さない。LdaGlobal になる Identifier は
+  //   CheckGlobal で存在チェックだけ先行させる (LdaGlobal の唯一の観測可能な効果)
+  private compileMemberAssignment(expr: any): void {
+    const left = expr.left;
+    // 副作用なし & 冪等 → 2 回 emit してよい object/key 式
+    const isSimple = (e: any) =>
+      e.type === "ThisExpression" || e.type === "Identifier" || e.type === "Literal";
+
+    if (expr.operator !== "=") {
+      const compoundOps: Record<string, Opcode> = {
+        "+=": "Add", "-=": "Sub", "*=": "Mul", "/=": "Div", "%=": "Mod",
+      };
+      const op = compoundOps[expr.operator];
+      if (!op) throw new Error(`Unsupported assignment operator: ${expr.operator}`);
+      if (left.computed) {
+        if (isSimple(left.object) && isSimple(left.property)) {
+          // SetPropertyComputed のスタック契約: [obj, key, value]
+          this.compileExpression(left.object);
+          this.compileExpression(left.property);
+          this.compileExpression(left.object);
+          this.compileExpression(left.property);
+          this.emit("GetPropertyComputed");
+          this.compileExpression(expr.right);
+          this.emit(op);
+          this.emit("SetPropertyComputed");
+        } else {
+          const tmpObj = this.declareLocal(`__ma_obj_${this.currentOffset()}`);
+          const tmpKey = this.declareLocal(`__ma_key_${this.currentOffset()}`);
+          this.compileExpression(left.object);
+          this.emit("StaLocal", tmpObj); this.emit("Pop");
+          this.compileExpression(left.property);
+          this.emit("StaLocal", tmpKey); this.emit("Pop");
+          this.emit("LdaLocal", tmpObj);
+          this.emit("LdaLocal", tmpKey);
+          this.emit("LdaLocal", tmpObj);
+          this.emit("LdaLocal", tmpKey);
+          this.emit("GetPropertyComputed");
+          this.compileExpression(expr.right);
+          this.emit(op);
+          this.emit("SetPropertyComputed");
+        }
+      } else {
+        const nameIdx = this.addConstant(left.property.name);
+        if (isSimple(left.object)) {
+          this.compileExpression(left.object);
+          this.emitWithIC("GetProperty", nameIdx);
+          this.compileExpression(expr.right);
+          this.emit(op);
+          this.compileExpression(left.object);
+          this.emitWithIC("SetPropertyAssign", nameIdx);
+        } else {
+          const tmpObj = this.declareLocal(`__ma_obj_${this.currentOffset()}`);
+          this.compileExpression(left.object);
+          this.emit("StaLocal", tmpObj); this.emit("Pop");
+          this.emit("LdaLocal", tmpObj);
+          this.emitWithIC("GetProperty", nameIdx);
+          this.compileExpression(expr.right);
+          this.emit(op);
+          this.emit("LdaLocal", tmpObj);
+          this.emitWithIC("SetPropertyAssign", nameIdx);
+        }
+      }
+      return;
+    }
+
+    // 単純代入 "="
+    if (left.computed) {
+      // 既に obj → key → rhs の順 (仕様通り)
+      this.compileExpression(left.object);
+      this.compileExpression(left.property);
+      this.compileExpression(expr.right);
+      this.emit("SetPropertyComputed");
+      return;
+    }
+    const nameIdx = this.addConstant(left.property.name);
+    if (isSimple(left.object)) {
+      // 従来形 (rhs → obj) を維持。グローバル参照だけ存在チェックを先行
+      if (left.object.type === "Identifier" && this.resolvesToGlobal(left.object.name)) {
+        this.emit("CheckGlobal", this.addConstant(left.object.name));
+      }
+      this.compileExpression(expr.right);
+      this.compileExpression(left.object);
+      this.emitWithIC("SetPropertyAssign", nameIdx);
+    } else {
+      // 副作用がありうる object 式 → 先に評価して temp に保持 (評価順: obj → rhs)
+      const tmpObj = this.declareLocal(`__ma_obj_${this.currentOffset()}`);
+      this.compileExpression(left.object);
+      this.emit("StaLocal", tmpObj); this.emit("Pop");
+      this.compileExpression(expr.right);
+      this.emit("LdaLocal", tmpObj);
+      this.emitWithIC("SetPropertyAssign", nameIdx);
+    }
   }
 
   compileBindingTarget(id: any): void {
@@ -327,6 +504,17 @@ class BytecodeCompiler {
   }
 
   compileProgram(program: Program): void {
+    // lexical (let/const) の先行スキャン: 巻き上げコンパイルされる関数が
+    // ソース上で後方の let/const を閉包参照できるように、スロットと
+    // const 判定を先に確定させる
+    this.preScanLexicals(program.body);
+    // 本体直下の let/const を TDZ の穴で初期化 (宣言前アクセス → ReferenceError)。
+    // lexicalSlots のマークは function hoisting より前に行う — 巻き上げされる
+    // 関数が後方の let/const を upvalue キャプチャするとき TDZ 付きで読ませるため
+    for (const slot of this.pendingLexicals.values()) {
+      this.lexicalSlots.add(slot);
+      this.emit("StaHole", slot);
+    }
     // function hoisting: 関数宣言を先にコンパイルしてグローバルに登録
     for (const stmt of program.body) {
       if (stmt.type === "FunctionDeclaration") {
@@ -415,6 +603,14 @@ class BytecodeCompiler {
     // 参照する」とき、compile 時点で locals に無く global 扱いになる
     // (navier-stokes の this.update が var dens_prev より前にあるパターン)
     this.hoistVarNames(body);
+    // lexical (let/const) の先行スキャン (compileProgram と同じ理由:
+    // ソース上で前方にある関数宣言/クロージャが後方の lexical を参照できるように)
+    this.preScanLexicals(body);
+    // 本体直下の let/const を TDZ の穴で初期化 (宣言前アクセス → ReferenceError)
+    for (const slot of this.pendingLexicals.values()) {
+      this.lexicalSlots.add(slot);
+      this.emit("StaHole", slot);
+    }
     // 本体をコンパイル
     for (const stmt of body) {
       this.compileStatement(stmt);
@@ -621,6 +817,27 @@ class BytecodeCompiler {
         this.emit("StaLocal", discSlot);
         this.emit("Pop");
 
+        // case 内の function 宣言と let/const は switch ブロックに block-scoped
+        // (strict)。BlockStatement と同じ scopeStack シャドウイングで、
+        // function 宣言は比較フェーズより前に巻き上げる (case の test からも
+        // 呼べるため)。let/const は外に漏らさない (pop で不可視に戻る)
+        const switchFnDecls = stmt.cases.flatMap((c: any) =>
+          (c.consequent ?? []).filter((s: any) => s.type === "FunctionDeclaration"));
+        const switchLexicals = stmt.cases.flatMap((c: any) =>
+          (c.consequent ?? []).filter((s: any) => s.type === "VariableDeclaration" && s.kind !== "var"));
+        const hasSwitchScoped = switchFnDecls.length > 0 || switchLexicals.length > 0;
+        if (hasSwitchScoped) {
+          this.scopeStack.push(new Map(this.locals));
+          for (const s of switchFnDecls) {
+            if ((s as any).id?.name) this.locals.delete((s as any).id.name);
+          }
+        }
+        this.blockDepth++;
+        // case 内 let/const を TDZ の穴で初期化。switch 全体が 1 lexical スコープ
+        // なので、別 case へジャンプして宣言前の lexical を読むと ReferenceError
+        if (hasSwitchScoped) this.beginLexicalScope(switchLexicals);
+        for (const s of switchFnDecls) this.compileStatement(s);
+
         this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: -1 });
 
         // Phase 1: 比較 → body へのジャンプ
@@ -641,11 +858,12 @@ class BytecodeCompiler {
         // 全不一致 → default or end
         const jumpToDefaultOrEnd = this.emit("Jump", 0);
 
-        // Phase 2: body (fall-through で連続配置)
+        // Phase 2: body (fall-through で連続配置)。function 宣言は巻き上げ済みなので skip
         const bodyOffsets: number[] = [];
         for (let i = 0; i < stmt.cases.length; i++) {
           bodyOffsets.push(this.currentOffset());
           for (const s of stmt.cases[i].consequent) {
+            if ((s as any).type === "FunctionDeclaration") continue;
             this.compileStatement(s);
           }
         }
@@ -667,6 +885,10 @@ class BytecodeCompiler {
         // break パッチ
         const loop = this.loopStack.pop()!;
         for (const bp of loop.breakPatches) this.patch(bp, switchEnd);
+        this.blockDepth--;
+        if (hasSwitchScoped) {
+          this.locals = this.scopeStack.pop()!;
+        }
         break;
       }
 
@@ -696,10 +918,13 @@ class BytecodeCompiler {
       }
 
       case "ForStatement": {
-        // for (let/const ...) のブロックスコープ
+        // for (let/const ...) のブロックスコープ。blockDepth も上げて
+        // for-init の let が本体直下の予約スロット (pendingLexicals) を
+        // 誤って消費しないようにする
         const forHasBlockScoped = stmt.init?.type === "VariableDeclaration" && stmt.init.kind !== "var";
         if (forHasBlockScoped) {
           this.scopeStack.push(new Map(this.locals));
+          this.blockDepth++;
         }
         if (stmt.init) {
           if (stmt.init.type === "VariableDeclaration") {
@@ -738,6 +963,7 @@ class BytecodeCompiler {
         for (const bp of loop.breakPatches) this.patch(bp, this.currentOffset());
         if (forHasBlockScoped) {
           this.locals = this.scopeStack.pop()!;
+          this.blockDepth--;
         }
         break;
       }
@@ -750,23 +976,22 @@ class BytecodeCompiler {
         if (hasBlockScoped) {
           // スコープを push — 同名変数は新しいスロットに割り当てられる
           this.scopeStack.push(new Map(this.locals));
-          // ブロック内の let/const/function を強制的に新スロットに割り当て
+          // function 宣言は新スロット強制のため削除 (TDZ 対象外; 巻き上げで初期化)
           for (const s of stmt.body) {
-            if ((s as any).type === "VariableDeclaration" && (s as any).kind !== "var") {
-              for (const decl of (s as any).declarations) {
-                if (decl.id.type === "Identifier") {
-                  // 既存のマッピングを削除して新スロットを強制
-                  this.locals.delete(decl.id.name);
-                }
-              }
-            } else if ((s as any).type === "FunctionDeclaration" && (s as any).id?.name) {
+            if ((s as any).type === "FunctionDeclaration" && (s as any).id?.name) {
               this.locals.delete((s as any).id.name);
             }
           }
         }
+        this.blockDepth++;
+        // let/const を TDZ の穴で初期化 (宣言前アクセス → ReferenceError)
+        if (hasBlockScoped) {
+          this.beginLexicalScope(
+            stmt.body.filter((s: any) => s.type === "VariableDeclaration" && s.kind !== "var")
+          );
+        }
         // function 宣言をブロック先頭に巻き上げてからその他の文をコンパイル
         // (strict: ブロック内では宣言前から呼べ、ブロックの外には漏れない)
-        this.blockDepth++;
         for (const s of stmt.body) {
           if ((s as any).type === "FunctionDeclaration") this.compileStatement(s);
         }
@@ -1123,19 +1348,7 @@ class BytecodeCompiler {
 
       case "AssignmentExpression": {
         if (expr.left.type === "MemberExpression") {
-          if (expr.left.computed) {
-            // computed: obj[key] = value → SetPropertyComputed (pop value, pop key, pop obj)
-            this.compileExpression(expr.left.object);
-            this.compileExpression(expr.left.property);
-            this.compileExpression(expr.right);
-            this.emit("SetPropertyComputed");
-          } else {
-            // non-computed: obj.prop = value → SetPropertyAssign
-            this.compileExpression(expr.right);
-            this.compileExpression(expr.left.object);
-            const nameIdx = this.addConstant((expr.left.property as any).name);
-            this.emitWithIC("SetPropertyAssign", nameIdx);
-          }
+          this.compileMemberAssignment(expr);
           break;
         }
         if (expr.operator !== "=" && expr.left.type === "Identifier") {
@@ -1251,21 +1464,49 @@ class BytecodeCompiler {
 
       case "CallExpression": {
         if (expr.callee.type === "MemberExpression") {
-          // メソッド呼び出し: obj.method(args)
-          // 引数を push
-          for (const arg of expr.arguments) {
-            this.compileExpression(arg as Expression);
-          }
-          // obj を push
-          this.compileExpression(expr.callee.object);
-          // メソッドを push
-          this.emit("Dup"); // obj を複製 (this 用に残す)
-          if (expr.callee.computed) {
-            this.compileExpression(expr.callee.property);
-            this.emit("GetPropertyComputed");
-          } else if (expr.callee.property.type === "Identifier") {
-            const nameIdx = this.addConstant(expr.callee.property.name);
-            this.emitWithIC("GetProperty", nameIdx);
+          // メソッド呼び出し: obj.method(args)。CallMethod のスタック順は
+          // [args..., obj, method]。
+          // JS 仕様では callee (obj とメソッド解決) の評価が引数より先。obj が
+          // 単純参照 (Identifier/this) なら副作用が無く順序は観測不能なので、
+          // ベンチのホットパス (this.m()/obj.m()) は従来どおり「引数→obj」の
+          // 高速順を維持する。obj が式 (呼び出し等の副作用を持ちうる) のときだけ
+          // obj とメソッドを先に temp へ確定させてから引数を評価する
+          const objSimple = expr.callee.object.type === "Identifier" || expr.callee.object.type === "ThisExpression";
+          if (objSimple) {
+            for (const arg of expr.arguments) {
+              this.compileExpression(arg as Expression);
+            }
+            this.compileExpression(expr.callee.object);
+            this.emit("Dup"); // obj を複製 (this 用に残す)
+            if (expr.callee.computed) {
+              this.compileExpression(expr.callee.property);
+              this.emit("GetPropertyComputed");
+            } else if (expr.callee.property.type === "Identifier") {
+              const nameIdx = this.addConstant(expr.callee.property.name);
+              this.emitWithIC("GetProperty", nameIdx);
+            }
+          } else {
+            // obj とメソッド (computed key 含む) を引数より先に評価して temp へ
+            const tmpObj = this.localCount++;
+            const tmpMethod = this.localCount++;
+            this.compileExpression(expr.callee.object);
+            this.emit("StaLocal", tmpObj); this.emit("Pop");
+            this.emit("LdaLocal", tmpObj);
+            if (expr.callee.computed) {
+              this.compileExpression(expr.callee.property);
+              this.emit("GetPropertyComputed");
+            } else if (expr.callee.property.type === "Identifier") {
+              const nameIdx = this.addConstant(expr.callee.property.name);
+              this.emitWithIC("GetProperty", nameIdx);
+            }
+            this.emit("StaLocal", tmpMethod); this.emit("Pop");
+            // 引数を評価 → [args...]
+            for (const arg of expr.arguments) {
+              this.compileExpression(arg as Expression);
+            }
+            // [args..., obj, method]
+            this.emit("LdaLocal", tmpObj);
+            this.emit("LdaLocal", tmpMethod);
           }
           this.emit("CallMethod", expr.arguments.length);
         } else {

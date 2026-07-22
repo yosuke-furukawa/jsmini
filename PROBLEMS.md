@@ -1,12 +1,51 @@
 # PROBLEMS.md — 既知の未解決問題
 
-Phase 35 (差分ファザによるバグ一掃、PR #35) 時点で判明している未解決の問題台帳。
-divergence は `npm run fuzz -- --iterations 10000 --seed 1613533855 --isolate` で
-903/5000 件 → **6/10000 件**まで削減した後の残り。正しさの基準は node (strict mode)。
+差分ファザ (`npm run fuzz`) による収束状況と、残る既知の問題台帳。
+正しさの基準は **node (strict mode)**。
 
-## 1. ファザが検出し続けている divergence (JIT の数値表現の構造的限界)
+## 収束の履歴
 
-### 1-1. JIT: 計算で生まれた -0 が 0 になる
+| 時点 | divergence |
+|------|-----------|
+| Phase 35 開始 | 903 / 5000 |
+| Phase 35 完了 (PR #35) | 6 / 10000 |
+| Phase 36-6 完了 | **0 / 100000** (5 seed × 20000) |
+
+Phase 36-6 で差分ファザは完全収束した (5 seed × 20000 = 10 万プログラムで発散 0)。
+主な要因は下記の **intern 汚染バグの発見** で、これが偽発散を大量生成していた。
+
+## Phase 36 で解決済み (この台帳から除去)
+
+- **§1-2 JIT tagged slots の boolean** → 36-5 で TAG_FALSE/TAG_TRUE を追加して解決
+- **§2-1 switch case 内 function 宣言が TW で不可視** → 36-1 で解決
+- **§2-2 TW の host 配列メソッドが JSString を壊す** → TW_ARRAY_OVERRIDES で解決
+- **§2-3 メンバ代入 `obj.p = rhs` の評価順** → 36-1 で解決 (単純/複合とも obj 先)
+- **§2-4 const 閉包の巻き上げ順** → 36-1 で解決
+- **§3-1 `"5" == 5`** → 36-3 で ToNumber 段を追加して true
+- **§3-2 ユーザー定義 valueOf/toString** → 36-4 で解決
+- **§3-3 TW の `+=` が host string を生む** → 36-4 で解決
+- **TDZ (Temporal Dead Zone)** → 36-6 で実行時 TDZ を実装 (下記詳細)
+- **プリミティブへのプロパティ代入** → 36-6 で TypeError に統一 (intern 汚染の根治)
+- **TDZ とエラー優先順位** → 36-6 で spec 準拠 (TDZ > const-immutable, RHS 評価 > 書込)
+- **メソッド呼び出しの評価順** → 36-6 で obj を引数より先に
+
+### 36-6 の目玉: intern 汚染による差分ファザの信頼性バグ
+
+`"a".x = 5` (プリミティブ文字列へのプロパティ代入) を、TW は黙って intern 共有の
+JSString オブジェクトに書き込んでいた (spec 違反)。intern は全プログラムで共有
+されるため、この書き込みが**後続の差分実行に状態を漏らし**、無関係なプログラムで
+大量の偽発散を生んでいた (isolate でも再現 = 子プロセスも同一プロセスで多数の
+プログラムを実行するため)。strict では TypeError なので TW/VM 両方で throw に統一し
+根治。これだけで残存発散 ~130/10000 → 7/10000 に激減した。
+
+**教訓**: 共有可変状態 (intern プール等) を持つ処理系を差分ファジングするときは、
+プログラム間の状態リークが偽発散に化ける。1 発散を必ず `--repro <gen>` で単独
+再現して「単独では一致するのに連続実行だと発散する」パターン (= 状態リーク) を
+疑うこと。
+
+## 1. 残る既知の divergence
+
+### 1-1. JIT: 計算で生まれた -0 が 0 になる (保留)
 
 ```js
 function f0(p0) { return -p0; }   // p0 = 0 のとき実 JS は -0
@@ -14,135 +53,61 @@ for (var i = 0; i < 300; i++) console.log(f0(0));
 // TW/VM: -0    JIT (OSR 後): 0
 ```
 
-- i32 に -0 は存在しない。**定数の -0** は Phase 35-8 で修正済み (canFitI32 が
-  弾いて f64 化) だが、**演算結果として生まれる -0** (`-x` で x=0、`0 * -1` 等) は
-  range 分析では静的に追えない。
-- V8 も Smi は -0 を表現できず「-0 を生みうる演算」に deopt を仕込んで対処している。
-  同じことをするなら Negate/Mul に -0 チェック付き slow path が必要。コスト大・
-  実害小なので保留。
+- i32 に -0 は無い。**定数の -0** は 35-8 で解決済みだが、**演算結果の -0**
+  (`-x` で x=0 等) は range 分析で静的に追えない。
+- V8 も「-0 を生みうる演算」に deopt を仕込んで対処。Negate/Mul に -0 チェック
+  付き slow path が要る。**コスト大・実害小のため保留**。
+- 差分ファザの生成器はこのパターンをほぼ生成しないため発散数には出ない。
 
-### 1-2. JIT: tagged slots が boolean プロパティを number にする
-
-```js
-// this.k0 = false を持つオブジェクトをメソッドが触り、後で console.log すると
-// TW/VM: {"k0": false}    JIT (write-back 後): {"k0": 0}
-```
-
-- Phase 33 の tagged slots は 1bit タグ (偶数=30bit 数値, 奇数=object index) で、
-  boolean は数値 0/1 として copy-in され、write-back で number に化ける。
-- 対策候補: (a) bool を持つプロパティは copy-in 時に deopt、(b) タグ空間に
-  bool を追加 (TAG_FALSE/TAG_TRUE を null/undefined と同様の特殊値に)。
-  (b) が本筋。Phase 36 候補。
-
-## 2. ファザの生成器が踏まない構文の divergence (手動確認済み)
-
-### 2-1. switch の case 内 function 宣言が TW で見えない
+### 1-2. `.constructor` の host 境界差 (生成器から除外)
 
 ```js
-switch (1) { case 1: function sf() { return 9; } var x = sf(); }
-// 実 JS (strict): 9 (switch ブロック内で可視)   VM: 9   TW: ReferenceError
+[1, 2].constructor    // TW: function Array()   VM/JIT: function Object()
+(3).constructor       // TW: function Number()  VM/JIT: 同上のズレ
 ```
 
-- Phase 35-4 の function-in-block 修正は BlockStatement のみ対応。TW の
-  SwitchStatement は case 本体を素の env で評価しており巻き上げが無い。
-  VM は compileStatement 経由で動く。TW の SwitchStatement に
-  hoistFunctionDeclarations を足せば直る (小規模)。
+- TW は配列/数値を host のまま公開するので `.constructor` が host の
+  Array/Number を返す。VM は jsmini の Object (null prototype) を返す。
+- 収束させるには両エンジンで jsmini 独自の Array/Number コンストラクタと
+  prototype チェーンを一貫してモデル化する必要があり、大規模。**将来フェーズ**。
+- 既知確定発散なので差分ファザの generator では `.constructor` を生成しない
+  (新規バグ検出のノイズになるため。src/fuzz/generator.ts のメンバアクセス集合)。
 
-### 2-2. TW の host 配列メソッドが JSString 要素を壊す
-
-```js
-["a", "b"].join(",")
-// 実 JS: "a,b"   VM: "a,b" (自前 join)   TW: "[object Object],[object Object]"
-```
-
-- TW は `Array` を host のまま公開しているため、join/indexOf/includes 等の
-  host メソッドが JSString 要素を "[object Object]" として扱う。
-- VM は arrayPrototype に JSString 対応の自前実装を持つ。TW にも同等の
-  ラッパが必要 (対象メソッドの洗い出しから)。ファザの生成器は配列メソッド
-  呼び出しを生成しないため未検出だった。生成器の拡張候補でもある。
-
-### 2-3. メンバー代入 `obj.p = rhs` の評価順が rhs 先
-
-```js
-o().p = r();   // 実 JS の評価順: o → r。 VM は r → o (non-computed のみ)
-```
-
-- 実 JS は object 参照の評価が先。VM の SetPropertyAssign (non-computed) は
-  rhs を先にコンパイルしている。computed (`o[k] = v`) は正しい順。
-- TW も put 時に object 式を再評価する実装 (object が 2 回評価される) で同罪。
-- 両エンジンが同じ方向に間違っているため差分には映らない。副作用のある
-  object 式 + throw する rhs の組み合わせで実 JS と食い違う。
-
-### 2-4. const を閉包する関数の巻き上げ順エッジ
-
-```js
-const x = 1; function f() { x = 5; } f();
-// 実 JS/期待: TypeError (const 再代入)
-// 現状: f がプログラム先頭で hoisting コンパイルされる時点で constLocals が
-// 未登録のため StaGlobalStrict に落ち、ReferenceError になる
-```
-
-- どちらも throw はするので実害は小さいが、エラー種別が違う。
-- 直すなら compileProgram/compileFunctionBody の hoisting パスの前に
-  const 宣言名だけ先行スキャンして constLocals へ登録する。
-
-## 3. 全エンジン共通のスペック違反 (差分ファジングには映らない)
+## 2. 全エンジン共通のスペック違反 (差分ファジングには映らない)
 
 差分ファザは「TW/VM/JIT が同じ間違いをする」バグを検出できない。node との
-差分実行 (`--corpus` + 本家 Fuzzilli、あるいはリファレンス実行の追加) が将来課題。
+差分実行 (node をオラクルにする `--oracle node` 相当、あるいは本家 Fuzzilli 連携)
+が将来課題。現状で判明している共通違反は特に無いが、網羅はできていない。
 
-### 3-1. `==` が string と number を数値化比較しない
+## 3. 実行モデルの構造差 (仕様の範囲内 / ファザは判定不能として除外)
 
-```js
-"5" == 5   // 実 JS: true   jsmini (全エンジン): false
-```
-
-- Equal/NotEqual は「両辺 JSString なら内容比較、片方だけ JSString なら false」
-  という実装で、JS 仕様 7.2.14 の ToNumber 段が無い。
-- 修正自体は小さいが、`==` はベンチ/テスト全域で使われるため影響範囲の
-  確認込みで独立フェーズ推奨。
-
-### 3-2. ユーザー定義 valueOf/toString が host ビルトイン経由で呼ばれない
-
-```js
-var o = { toString: function() { return "hi"; } };
-String(o)    // 実 JS: "hi"   jsmini: "[object Object]"
-o - 0        // これは 42 になる (演算子経路の toPrimitive はユーザー定義を呼ぶ)
-```
-
-- 演算子 (`+` `-` 比較) の ToPrimitive はユーザー定義 valueOf/toString を呼ぶが、
-  String()/Number()/isNaN()/Math.* などビルトインの引数前処理 (numArg/strConv) は
-  「プレーンオブジェクト → "[object Object]"/NaN 固定」の近似。
-- 背景: jsmini のオブジェクトは host prototype が null で、host の ToString/
-  ToNumber に渡すと throw するため前処理が必要になった (Phase 35-1/35-5)。
-  正しくは前処理で VM の toPrimitive 相当を呼ぶべきだが、index.ts のビルトイン
-  層から VM インスタンスの toPrimitive を呼ぶ配線が要る。
-
-### 3-3. TW の `+=` が host string を生む
-
-```js
-var x = 1; x += [2];   // 実 JS: "12"
-```
-
-- 結果の見た目は "12" で一致するが、TW は host の string、VM は JSString を作る。
-  内部表現の不整合で、以後の JSString 前提の処理 (intern 比較等) から漏れる。
-  TW の複合代入 `+=` を evalBinaryExpression の Add と同じ経路に寄せれば解消。
-
-## 4. 実行モデルの構造差 (仕様の範囲内 / ファザは判定不能として除外)
-
-- **ホストスタックオーバーフロー**: TW は host 再帰で評価するため、深い再帰は
-  RangeError (host) になる。VM は自前フレームなのでステップ上限に当たる。
-  FUZZING.md の通り「判定不能」扱い。
+- **ホストスタックオーバーフロー**: TW は host 再帰で評価するため深い再帰は
+  RangeError (host)。VM は自前フレームでステップ上限。「判定不能」扱い。
 - **ステップ上限**: VM/JIT は maxSteps で停止するが TW には無い。無限ループは
   タイムアウト検出のみ。
+
+## 4. TDZ 実装の範囲 (36-6)
+
+実行時 TDZ は block / switch / 関数本体直下の let/const と、それらを閉包
+キャプチャする upvalue read/write をカバーする (専用オペコード LdaLocalTDZ /
+StaLocalTDZ / LdaUpvalueTDZ / StaUpvalueTDZ / StaHole / CheckTDZ)。
+
+- **for-init の let/const は TDZ 対象外**: `for (let i = f(); ...)` で f が i を
+  読むケースは穴を張っていない (宣言が本体より先に走るため実害ほぼ無し)。
+- **JIT は TDZ チェックを省略**: TDZ 版オペコードは JIT では通常版に map し、
+  StaHole/CheckTDZ は no-op。穴を踏むコードは throw して hot にならない (tier-up
+  しない) ため、cold パス = VM 解釈で正しく TDZ が効く。ホットパスの
+  LdaLocal/StaLocal は無変更でベンチ回帰なし。
 
 ## 5. 検証方法
 
 ```bash
-npm run fuzz -- --iterations 10000 --seed 1613533855 --isolate   # 再現 seed 固定
-npm run fuzz -- --repro <gen seed>                               # 1 件の詳細
-npx tsx --test src/vm/strict-semantics.test.ts                   # 回帰 51 ケース
+npm run fuzz -- --iterations 20000 --seed 111 --isolate   # 収束確認 (0 期待)
+npm run fuzz -- --repro <gen seed>                        # 1 件の詳細 (単独再現)
+npx tsx --test src/vm/strict-semantics.test.ts            # 回帰テスト
 ```
 
 修正の際は「正 = node (strict)」で確認し、TW/VM/JIT の 3 エンジンを同時に
 直して収束させること (片方だけ直すと divergence が増える)。
+1 発散は必ず `--repro` で単独再現し、minimize 済みファイルは不忠実なことがある
+ので gen seed から再現すること。

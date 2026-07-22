@@ -8,7 +8,7 @@ import {
   isJSFunction, createJSFunction, getProperty,
   collectBoundNames, bindPattern, assignPattern,
 } from "./values.js";
-import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, toNumericOperand, type JSString } from "../vm/js-string.js";
+import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, joinElementToString, toNumericOperand, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
 import { JSPromise, drainMicrotasks, isJSPromise } from "../runtime/promise.js";
 import "../runtime/host-patches.js";
@@ -168,14 +168,23 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     // 配列は安全 join 経由で数値化 (JSString 要素を host join に掛けると
     // "[object Object]" になる)
     if (Array.isArray(v)) return Number(arrayToPrimitiveString(v));
-    if (v !== null && typeof v === "object") return NaN;
+    if (v !== null && typeof v === "object") {
+      // ユーザー定義 valueOf/toString を呼ぶ (VM 側 tryUserToPrimitive と同じ規則)
+      const p = toPrimitive(v, "number");
+      if (isJSString(p)) return Number(jsStringToString(p));
+      return typeof p === "object" && p !== null ? NaN : p;
+    }
     return v;
   };
   // 文字列ビルトイン (String/parseInt/parseFloat) 用の前処理 (VM 側 strConv と同一規則)
   const twStrConv = (v: unknown): string => {
     if (isJSString(v)) return jsStringToString(v);
     if (Array.isArray(v)) return arrayToPrimitiveString(v);
-    if (v !== null && typeof v === "object") return "[object Object]";
+    if (v !== null && typeof v === "object") {
+      const p = toPrimitive(v, "string");
+      if (isJSString(p)) return jsStringToString(p);
+      return typeof p === "object" && p !== null ? "[object Object]" : String(p);
+    }
     return String(v);
   };
   // Number: JSString を受け取れるカスタムコンストラクタ (host Number の statics は引き継ぐ)
@@ -906,11 +915,15 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
     }
     case "SwitchStatement": {
       const disc = yield* evalExpression(stmt.discriminant, env);
+      // switch 全体が 1 つのブロックスコープ (strict)。case 内の function 宣言は
+      // switch ブロック先頭に巻き上げ (前方の case や test からも呼べ、外には漏れない)
+      const switchEnv = new Environment(env);
+      hoistFunctionDeclarations(stmt.cases.flatMap((c: any) => c.consequent ?? []), switchEnv);
       let matched = false;
       let result: unknown = undefined;
       for (const c of stmt.cases) {
         if (!matched && c.test !== null) {
-          const testVal = yield* evalExpression(c.test, env);
+          const testVal = yield* evalExpression(c.test, switchEnv);
           // JSString 対応の === 比較
           if (isJSString(disc) && isJSString(testVal)) {
             matched = jsStringEquals(disc, testVal);
@@ -922,7 +935,7 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
         if (matched) {
           for (const s of c.consequent) {
             try {
-              result = yield* evalStatement(s, env);
+              result = yield* evalStatement(s, switchEnv);
             } catch (e) {
               if (e instanceof BreakSignal && !e.label) return result;
               throw e;
@@ -1290,31 +1303,62 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         return value;
       }
 
-      // 複合代入: JS 仕様の評価順は「左辺の参照解決 + 現在値の読み出し → 右辺の評価」。
-      // 右辺を先に評価すると、未宣言変数への複合代入で右辺内の例外が
-      // ReferenceError より先に飛んでしまう
+      // JS 仕様の評価順:
+      // - メンバー代入は object (と computed key) の評価が右辺より先。ここで
+      //   1 回だけ評価して読み出しと書き戻しの両方に使う (以前は右辺が先な上に
+      //   書き戻しで object を再評価していた = 2 回評価)
+      // - 複合代入は「左辺の参照解決 + 現在値の読み出し → 右辺の評価」。
+      //   右辺を先に評価すると、未宣言変数への複合代入で右辺内の例外が
+      //   ReferenceError より先に飛んでしまう
+      const isMember = expr.left.type === "MemberExpression";
+      let memberObj: Record<string, unknown> | null = null;
+      let memberKey = "";
+      // プリミティブ (null/undefined/string/number/boolean/symbol) へのプロパティ
+      // 代入は strict では TypeError (ReferenceError でも暗黙 no-op でもない)。
+      // 特に文字列は intern 共有オブジェクトなので、書き込みを許すと後続プログラムに
+      // 状態が漏れる。単純代入 (=) は RHS 評価後、複合代入は現在値読み出し時に throw
+      const isPrimitiveTarget = (v: unknown): boolean => {
+        if (v === null || v === undefined) return true;
+        const t = typeof v;
+        if (t === "string" || t === "number" || t === "boolean" || t === "bigint") return true;
+        return isJSString(v) || isJSSymbol(v);
+      };
+      const primTargetError = () => {
+        const what = memberObj === null ? "null" : memberObj === undefined ? "undefined"
+          : `${isJSString(memberObj) ? "string" : typeof memberObj}`;
+        return new TypeError(`Cannot set properties of ${what} (setting '${memberKey}')`);
+      };
+      if (isMember) {
+        memberObj = (yield* evalExpression(expr.left.object, env)) as Record<string, unknown>;
+        memberKey = yield* resolveMemberKey(expr.left, env);
+      }
       let newValue: unknown;
       if (expr.operator === "=") {
         newValue = yield* evalExpression(expr.right, env);
       } else {
-        let currentValue: unknown;
-        if (expr.left.type === "MemberExpression") {
-          const obj = (yield* evalExpression(expr.left.object, env)) as JSObject;
-          currentValue = getProperty(obj, yield* resolveMemberKey(expr.left, env));
-        } else {
-          currentValue = env.get(expr.left.name);
-        }
+        // 複合代入は現在値を読む。null/undefined はプロパティ読み出し自体が
+        // TypeError。string/number/boolean/symbol は読みは undefined を返し
+        // (throw しない)、書き込み時に TypeError になる (RHS 評価が先)
+        if (isMember && (memberObj === null || memberObj === undefined)) throw primTargetError();
+        const currentValue = isMember
+          ? getProperty(memberObj as JSObject, memberKey)
+          : env.get(expr.left.name);
         const rightValue = yield* evalExpression(expr.right, env);
         switch (expr.operator) {
-          case "+=":
-            if (isJSString(currentValue) || isJSString(rightValue)) {
-              const l = isJSString(currentValue) ? currentValue : createSeqString(String(currentValue));
-              const r = isJSString(rightValue) ? rightValue : createSeqString(String(rightValue));
+          case "+=": {
+            // 二項 + と同じ規則: ToPrimitive → どちらかが文字列なら JSString 連結
+            // (host + に任せると host string が生まれ、intern 前提の比較から漏れる)
+            const lp = toPrimitive(currentValue);
+            const rp = toPrimitive(rightValue);
+            if (isJSString(lp) || isJSString(rp) || typeof lp === "string" || typeof rp === "string") {
+              const l = isJSString(lp) ? lp : createSeqString(String(lp));
+              const r = isJSString(rp) ? rp : createSeqString(String(rp));
               newValue = jsStringConcat(l, r);
             } else {
-              newValue = (currentValue as number) + (rightValue as number);
+              newValue = (lp as number) + (rp as number);
             }
             break;
+          }
           case "-=": newValue = toNumericOperand(currentValue) - toNumericOperand(rightValue); break;
           case "*=": newValue = toNumericOperand(currentValue) * toNumericOperand(rightValue); break;
           case "/=": newValue = toNumericOperand(currentValue) / toNumericOperand(rightValue); break;
@@ -1323,10 +1367,9 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         }
       }
 
-      if (expr.left.type === "MemberExpression") {
-        const obj = (yield* evalExpression(expr.left.object, env)) as Record<string, unknown>;
-        const key = yield* resolveMemberKey(expr.left, env);
-        obj[key] = newValue;
+      if (isMember) {
+        if (isPrimitiveTarget(memberObj)) throw primTargetError();
+        memberObj![memberKey] = newValue;
       } else {
         env.set(expr.left.name, newValue);
       }
@@ -1564,6 +1607,57 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment,
   return undefined;
 }
 
+// 配列メソッドのうち文字列化/要素比較を含むものの自前実装 (VM index.ts の
+// arrayPrototype と同一規則)。TW の配列は host メソッドに委譲しているが、
+// host の join/sort/indexOf は JSString 要素を "[object Object]" として扱う
+// (要素比較は intern されない concat 由来文字列も内容比較で見つける)
+const TW_ARRAY_OVERRIDES: Record<string, Function> = {
+  join: function(this: unknown[], sep?: unknown) {
+    const s = sep === undefined ? "," : joinElementToString(sep);
+    const parts: string[] = [];
+    for (let i = 0; i < this.length; i++) parts.push(joinElementToString(this[i]));
+    return internString(parts.join(s));
+  },
+  toString: function(this: unknown[]) {
+    return internString(arrayToPrimitiveString(this));
+  },
+  indexOf: function(this: unknown[], item: unknown, from?: number) {
+    const start = from ?? 0;
+    for (let i = start; i < this.length; i++) {
+      const el = this[i];
+      if (el === item || (isJSString(el) && isJSString(item) && jsStringEquals(el, item))) return i;
+    }
+    return -1;
+  },
+  lastIndexOf: function(this: unknown[], item: unknown, from?: number) {
+    const start = from ?? this.length - 1;
+    for (let i = Math.min(start, this.length - 1); i >= 0; i--) {
+      const el = this[i];
+      if (el === item || (isJSString(el) && isJSString(item) && jsStringEquals(el, item))) return i;
+    }
+    return -1;
+  },
+  includes: function(this: unknown[], item: unknown, from?: number) {
+    const start = from ?? 0;
+    for (let i = start; i < this.length; i++) {
+      const el = this[i];
+      if (el === item || (isJSString(el) && isJSString(item) && jsStringEquals(el, item))) return true;
+    }
+    return false;
+  },
+  sort: function(this: unknown[], cmpFn?: unknown) {
+    // comparator は evalCallExpression の汎用ラップ済み (JSFunction → host callable)。
+    // 既定比較は ToString の辞書順 — joinElementToString で JSString/オブジェクト要素も安全に
+    const cmp = typeof cmpFn === "function"
+      ? (a: unknown, b: unknown) => (cmpFn as Function)(a, b) as number
+      : (a: unknown, b: unknown) => {
+          const sa = joinElementToString(a), sb = joinElementToString(b);
+          return sa < sb ? -1 : sa > sb ? 1 : 0;
+        };
+    return this.sort(cmp);
+  },
+};
+
 function* evalCallExpression(
   expr: Expression & { type: "CallExpression" },
   env: Environment,
@@ -1625,6 +1719,12 @@ function* evalCallExpression(
         };
         return bound;
       }
+    }
+    // 配列の文字列感受性メソッドは自前実装で上書き (host 実装は JSString を
+    // "[object Object]" にしてしまう)。map/filter 等の callback 系は host +
+    // 汎用 JSFunction ラップで正しく動くので対象外
+    if (Array.isArray(thisValue) && typeof key === "string" && TW_ARRAY_OVERRIDES[key]) {
+      fn = TW_ARRAY_OVERRIDES[key];
     }
     // (JSPromise の then/catch は getProperty の前で処理済み)
     // JSString のメソッド: ネイティブ文字列メソッドに委譲
@@ -1918,7 +2018,10 @@ function* evalBinaryExpression(
   const right = toPrimitive(rawRight);
   switch (expr.operator) {
     case "+":
-      if (isJSString(left) || isJSString(right)) {
+      // TW の toPrimitive はプレーンオブジェクトで host string を返すことが
+      // あるので、host string も文字列連結の対象にして JSString を生成する
+      // (host string のまま流すと intern 前提の内容比較から漏れる)
+      if (isJSString(left) || isJSString(right) || typeof left === "string" || typeof right === "string") {
         const l = isJSString(left) ? left : createSeqString(String(left));
         const r = isJSString(right) ? right : createSeqString(String(right));
         return jsStringConcat(l, r);
@@ -1959,22 +2062,28 @@ function* evalBinaryExpression(
         default: return ln >= rn;
       }
     }
-    case "==":
+    case "==": {
       if (isJSString(left) && isJSString(right)) return jsStringEquals(left, right);
-      if (isJSString(left) || isJSString(right)) return false;
       // 両辺オブジェクトなら参照比較 (JS 仕様 7.2.14)。ToPrimitive しない。
       // これを怠ると別オブジェクト同士が "[object Object]" 同士で true になる
       if (isEqObjectTW(rawLeft) && isEqObjectTW(rawRight)) return rawLeft === rawRight;
-      return left == right;
+      // JSString は host string に解いて host の == に委ねる。
+      // string↔number/boolean の ToNumber 段 ("5" == 5 → true) を host が行う
+      const lh = isJSString(left) ? jsStringToString(left) : left;
+      const rh = isJSString(right) ? jsStringToString(right) : right;
+      return lh == rh;
+    }
     case "===":
       if (isJSString(rawLeft) && isJSString(rawRight)) return jsStringEquals(rawLeft, rawRight);
       if (isJSString(rawLeft) || isJSString(rawRight)) return false;
       return rawLeft === rawRight;
-    case "!=":
+    case "!=": {
       if (isJSString(left) && isJSString(right)) return !jsStringEquals(left, right);
-      if (isJSString(left) || isJSString(right)) return true;
       if (isEqObjectTW(rawLeft) && isEqObjectTW(rawRight)) return rawLeft !== rawRight;
-      return left != right;
+      const lh = isJSString(left) ? jsStringToString(left) : left;
+      const rh = isJSString(right) ? jsStringToString(right) : right;
+      return lh != rh;
+    }
     case "!==":
       if (isJSString(rawLeft) && isJSString(rawRight)) return !jsStringEquals(rawLeft, rawRight);
       if (isJSString(rawLeft) || isJSString(rawRight)) return true;

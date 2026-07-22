@@ -12,6 +12,42 @@ import type { IRFunction } from "../ir/types.js";
 
 // ブラウザ (playground) には process が無いので安全にガード
 const DEBUG_WASM = typeof process !== "undefined" && !!process.env?.DEBUG_WASM;
+
+// 関数の Return が boolean を返すかの保守的判定 (bytecode ベース)。
+// JIT は bool を i32 0/1 で表現するため、そのまま返すと false が number 0 に
+// 化ける。全 Return が bool 由来なら "bool" (呼び出し境界でデコード)、
+// bool と非 bool が混在なら "mixed" (誤デコードを避けて compile しない)。
+// bool 由来 = true/false リテラル・比較・論理否定の直後、または
+// 「bool 由来しか代入されない local」の読み出し (線形近似の保守判定)
+const BOOL_PRODUCERS = new Set([
+  "LdaTrue", "LdaFalse", "LogicalNot",
+  "LessThan", "GreaterThan", "LessEqual", "GreaterEqual",
+  "Equal", "NotEqual", "StrictEqual", "StrictNotEqual",
+]);
+function classifyBoolReturns(func: BytecodeFunction): "none" | "bool" | "mixed" {
+  const bc = func.bytecode;
+  const boolSlots = new Set<number>();
+  const nonBoolSlots = new Set<number>();
+  for (let i = 0; i < bc.length; i++) {
+    if ((bc[i].op === "StaLocal" || bc[i].op === "StaLocalTDZ") && bc[i].operand !== undefined) {
+      if (i > 0 && BOOL_PRODUCERS.has(bc[i - 1].op)) boolSlots.add(bc[i].operand!);
+      else nonBoolSlots.add(bc[i].operand!);
+    }
+  }
+  let sawBool = false, sawOther = false;
+  for (let i = 0; i < bc.length; i++) {
+    if (bc[i].op !== "Return") continue;
+    const prev = i > 0 ? bc[i - 1] : undefined;
+    // 関数末尾の暗黙エピローグ (LdaUndefined; Return) は分類から除外。
+    // fall-through 経路の undefined は数値モデルでは元々 0 で表現されており
+    // (bool デコードでも falsy のまま)、これを数えると全関数が混在判定になる
+    if (i === bc.length - 1 && prev?.op === "LdaUndefined") continue;
+    const isBool = prev !== undefined && (BOOL_PRODUCERS.has(prev.op) ||
+      ((prev.op === "LdaLocal" || prev.op === "LdaLocalTDZ") && prev.operand !== undefined && boolSlots.has(prev.operand) && !nonBoolSlots.has(prev.operand)));
+    if (isBool) sawBool = true; else sawOther = true;
+  }
+  return sawBool ? (sawOther ? "mixed" : "bool") : "none";
+}
 // ネストアクセス import が「VM に返すべき状況」(数値の deref 等) を検出した
 // ときに投げる sentinel。executeWasm が捕まえて deopt → VM 再実行する
 // (ネスト load は純粋読みで write-back 前なので再実行は安全)
@@ -30,6 +66,7 @@ type CachedWasm = {
   arrayArgIndices: number[];
   stringArgIndices: number[];  // 文字列引数の位置
   spec: WasmNumericType;       // i32 or f64
+  resultBool?: boolean;        // 全 Return が bool (リテラル/比較結果) → i32 0/1 を boolean にデコード
   // WasmGC 配列ヘルパー関数
   createArray: ((len: number) => unknown) | null;
   getArray: ((arr: unknown, idx: number) => number) | null;
@@ -177,6 +214,15 @@ export class JitManager {
     const allSame = wasmArgTypes.length === 0 || wasmArgTypes.every(t => t === wasmArgTypes[0]);
     const spec: WasmNumericType = allSame && (wasmArgTypes.length === 0 || wasmArgTypes[0] === "i32") ? "i32" : "f64";
 
+    // Return が bool の関数: 全 bool なら境界デコード、混在なら compile しない
+    const boolRet = classifyBoolReturns(func);
+    if (boolRet === "mixed") {
+      this.wasmCache.set(func, null);
+      (func as { __jitCached?: CachedWasm | null }).__jitCached = null;
+      this.logTier(func, "Bytecode VM (bool/非bool 混在 return)", callCount);
+      return null;
+    }
+
     // IR パスを優先 (配列対応含む)
     let compiled: CachedWasm | null = null;
     if (this.useIR) {
@@ -207,6 +253,7 @@ export class JitManager {
       }
     }
 
+    if (compiled && boolRet === "bool") compiled.resultBool = true;
     this.wasmCache.set(func, compiled);
     (func as { __jitCached?: CachedWasm | null }).__jitCached = compiled;
 
@@ -396,7 +443,8 @@ export class JitManager {
           const map = cached.objMap;
           const names = result.nestedPropNames;
           result.slotHolder.fn = (tagged: number, propId: number): number => {
-            if (!(tagged & 1) || tagged === 1 || tagged === 3) throw DEOPT_SENTINEL;
+            // 9 未満の奇数はタグ (null/undefined/false/true) — オブジェクトではない
+            if (!(tagged & 1) || tagged < 9) throw DEOPT_SENTINEL;
             const obj = table[tagged >> 1];
             if (!isJSObject(obj)) throw DEOPT_SENTINEL;
             const hcN = getHiddenClass(obj as any);
@@ -406,6 +454,7 @@ export class JitManager {
             if (typeof v === "number" && Number.isInteger(v) && v < 536870912 && v > -536870912) return v << 1;
             if (v === null) return 1;
             if (v === undefined) return 3;
+            if (typeof v === "boolean") return v ? 7 : 5;
             if (typeof v === "object") {
               let idx = map.get(v);
               if (idx === undefined) { idx = table.length; table.push(v); map.set(v, idx); }
@@ -625,7 +674,8 @@ export class JitManager {
         }
         // tagged スロット準備 (object table は呼び出しごとにリセットして再利用)
         const tagged = cached.taggedProps;
-        if (tagged) { cached.objTable!.length = 2; cached.objMap!.clear(); }
+        // index 0..3 はタグ予約 (null=1, undefined=3, false=5, true=7) — 最初のオブジェクトは tag 9
+        if (tagged) { cached.objTable!.length = 4; cached.objMap!.clear(); }
         for (let i = 0; i < cached.propNames.length; i++) {
           const slotIdx = slotIdxs[i];
           const v = slotIdx !== undefined ? slots[slotIdx] : undefined;
@@ -638,6 +688,8 @@ export class JitManager {
               view[i] = 1;
             } else if (v === undefined) {
               view[i] = 3;
+            } else if (typeof v === "boolean") {
+              view[i] = v ? 7 : 5;
             } else if (typeof v === "object") {
               let idx = cached.objMap!.get(v);
               if (idx === undefined) { idx = cached.objTable!.length; cached.objTable!.push(v); cached.objMap!.set(v, idx); }
@@ -723,8 +775,13 @@ export class JitManager {
         const t = result;
         if (t === 1) result = null;
         else if (t === 3) result = undefined;
+        else if (t === 5) result = false;
+        else if (t === 7) result = true;
         else if (t & 1) result = cached.objTable![t >> 1];
         else result = t >> 1;
+      } else if (cached.resultBool && typeof result === "number") {
+        // 全 Return が bool の関数: i32 0/1 を boolean に戻す
+        result = result !== 0;
       }
       // this の StoreProperty write-back: JIT 内で書き換えたプロパティを
       // linear memory から VM の HiddenClass オブジェクトへ反映する。
@@ -743,6 +800,8 @@ export class JitManager {
             const t = view[off];
             if (t === 1) val = null;
             else if (t === 3) val = undefined;
+            else if (t === 5) val = false;
+            else if (t === 7) val = true;
             else if (t & 1) val = cached.objTable![t >> 1];
             else val = t >> 1;
           }

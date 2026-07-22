@@ -46,8 +46,14 @@ export type Opcode =
   | "CheckGlobal"     // CheckGlobal <nameIndex> — グローバルの存在チェックのみ (push しない)。callee 解決を引数評価より先にするため
   | "LdaLocal"        // LdaLocal <slot> — ローカル変数を push
   | "StaLocal"        // StaLocal <slot> — スタックトップをローカル変数に格納 (pop しない)
+  | "LdaLocalTDZ"     // LdaLocalTDZ <slot> — lexical (let/const) をロード。TDZ の穴なら ReferenceError
+  | "StaLocalTDZ"     // StaLocalTDZ <slot> — lexical への再代入。TDZ の穴なら ReferenceError (初期化前代入)
+  | "StaHole"         // StaHole <slot> — スロットを TDZ の穴で初期化 (lexical スコープ入口)
+  | "CheckTDZ"        // CheckTDZ <slot> — スロットが穴なら ReferenceError (push しない)。const 再代入の TDZ 優先判定用
   | "LdaUpvalue"      // LdaUpvalue <index> — キャプチャされた外部変数を push
+  | "LdaUpvalueTDZ"   // LdaUpvalueTDZ <index> — lexical をキャプチャして読む。TDZ の穴なら ReferenceError
   | "StaUpvalue"      // StaUpvalue <index> — スタックトップをキャプチャ変数に格納 (pop しない)
+  | "StaUpvalueTDZ"   // StaUpvalueTDZ <index> — lexical キャプチャへの再代入。TDZ の穴なら ReferenceError
   | "DefineGetter"    // DefineGetter <nameIndex> — pop getter func, peek obj, define getter
   | "DefineSetter"    // DefineSetter <nameIndex> — pop setter func, peek obj, define setter
 

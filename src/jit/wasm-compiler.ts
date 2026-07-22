@@ -442,17 +442,26 @@ function translateRange(
   for (let pc = start; pc < end; pc++) {
     const instr = bytecode[pc];
     switch (instr.op) {
+      case "LdaLocalTDZ": // TDZ チェックは JIT では省略 (穴を踏むコードは cold)
       case "LdaLocal":
         out.push(WASM_OP.local_get, instr.operand!);
         break;
+      case "StaHole":
+        // TDZ の穴初期化。JIT では no-op (実 StaLocal が値を決める)
+        break;
+      case "CheckTDZ":
+        break; // const-TDZ 優先判定。JIT では no-op (cold)
+      case "LdaUpvalueTDZ": // TDZ チェックは JIT では省略
       case "LdaUpvalue":
         // upvalue は通常パラメータの後に追加パラメータとして渡される
         // local index = func.paramCount + (hasThis ? 1 : 0) + upvalue index
         out.push(WASM_OP.local_get, func.paramCount + (ctx.hasThis ? 1 : 0) + instr.operand!);
         break;
+      case "StaUpvalueTDZ": // TDZ 再代入チェックは JIT では省略
       case "StaUpvalue":
         out.push(WASM_OP.local_set, func.paramCount + (ctx.hasThis ? 1 : 0) + instr.operand!);
         break;
+      case "StaLocalTDZ": // TDZ 再代入チェックは JIT では省略
       case "StaLocal":
         // jsmini の StaLocal は値をスタックに残す (peek)
         // Wasm の local.set は値を消費する

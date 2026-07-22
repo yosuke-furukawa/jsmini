@@ -2,7 +2,7 @@ import { compile } from "./compiler.js";
 import { VM } from "./vm.js";
 import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
-import { isJSString, jsStringToString, internString, createSeqString, arrayToPrimitiveString } from "./js-string.js";
+import { isJSString, jsStringToString, internString, createSeqString, arrayToPrimitiveString, joinElementToString, jsStringEquals } from "./js-string.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass } from "./js-object.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
 import { Heap } from "./heap.js";
@@ -110,27 +110,37 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
       for (let i = 0; i < items.length; i++) this[s + i] = items[i];
       return removed;
     },
+    // 要素比較: JSString 同士は内容比較 (concat 由来の非 intern 文字列も見つける)
     indexOf: function(this: unknown[], item: unknown, from?: number) {
       const start = from ?? 0;
       for (let i = start; i < this.length; i++) {
-        if (this[i] === item) return i;
+        const el = this[i];
+        if (el === item || (isJSString(el) && isJSString(item) && jsStringEquals(el, item))) return i;
+      }
+      return -1;
+    },
+    lastIndexOf: function(this: unknown[], item: unknown, from?: number) {
+      const start = from ?? this.length - 1;
+      for (let i = Math.min(start, this.length - 1); i >= 0; i--) {
+        const el = this[i];
+        if (el === item || (isJSString(el) && isJSString(item) && jsStringEquals(el, item))) return i;
       }
       return -1;
     },
     includes: function(this: unknown[], item: unknown, from?: number) {
       const start = from ?? 0;
       for (let i = start; i < this.length; i++) {
-        if (this[i] === item) return true;
+        const el = this[i];
+        if (el === item || (isJSString(el) && isJSString(item) && jsStringEquals(el, item))) return true;
       }
       return false;
     },
     join: function(this: unknown[], sep?: unknown) {
-      const s = sep !== undefined ? (isJSString(sep) ? jsStringToString(sep) : String(sep)) : ",";
+      // 要素は joinElementToString で安全に文字列化 (jsmini オブジェクト要素は
+      // host prototype が null で host String() が throw する)
+      const s = sep === undefined ? "," : joinElementToString(sep);
       const parts: string[] = [];
-      for (let i = 0; i < this.length; i++) {
-        const v = this[i];
-        parts.push(v === null || v === undefined ? "" : (isJSString(v) ? jsStringToString(v) : String(v)));
-      }
+      for (let i = 0; i < this.length; i++) parts.push(joinElementToString(this[i]));
       return internString(parts.join(s));
     },
     concat: function(this: unknown[], ...args: unknown[]) {
@@ -150,8 +160,10 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     sort: function(this: unknown[], fn?: unknown) {
       const cmp = fn ? (a: unknown, b: unknown) => vm.callFunction(fn, undefined, [a, b]) as number
                       : (a: unknown, b: unknown) => {
-                          const sa = isJSString(a) ? jsStringToString(a) : String(a);
-                          const sb = isJSString(b) ? jsStringToString(b) : String(b);
+                          // 既定比較は ToString の辞書順。joinElementToString で
+                          // オブジェクト要素の null-proto throw を避ける
+                          const sa = joinElementToString(a);
+                          const sb = joinElementToString(b);
                           return sa < sb ? -1 : sa > sb ? 1 : 0;
                         };
       // top-down merge sort: O(N log N)、stable (ES2019+ で要求)。
@@ -248,7 +260,9 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
       return this;
     },
     toString: function(this: unknown[]) {
-      return (this as any).join();
+      // (this as any).join() だと host の Array.prototype.join に飛んで
+      // JSString 要素が "[object Object]" になる → 安全 join を直接使う
+      return internString(arrayToPrimitiveString(this));
     },
   };
 
@@ -329,12 +343,37 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   // "Cannot convert object to primitive value" を投げてしまう。JS 仕様ではプレーン
   // オブジェクトの ToPrimitive は "[object Object]" → NaN なので、ここで NaN に潰す。
   // (配列は host Array.prototype 経由で正しく数値化できるので host に委ねる)
+  // jsmini オブジェクトのユーザー定義 valueOf/toString を呼んでプリミティブ化を
+  // 試みる。ユーザー定義 (bytecode 関数) が無ければ NO_USER_PRIM (呼び出し元の既定へ。
+  // ユーザー関数が undefined を返すケースと区別する)。
+  // ユーザー定義があるのに全部オブジェクトを返したら TypeError (仕様 / TW と同じ)
+  const NO_USER_PRIM = Symbol("no-user-prim");
+  const tryUserToPrimitive = (v: unknown, hint: "number" | "string"): unknown => {
+    const order = hint === "number" ? ["valueOf", "toString"] : ["toString", "valueOf"];
+    let found = false;
+    for (const name of order) {
+      const m = isJSObject(v) ? jsObjGet(v, name) : (v as Record<string, unknown>)[name];
+      const isUserFn = m !== null && typeof m === "object" && ("bytecode" in (m as any) || "__closure" in (m as any));
+      if (isUserFn) {
+        found = true;
+        const r = vm.callFunction(m, v, []);
+        if (r === null || r === undefined || typeof r !== "object" || isJSString(r)) return r;
+      }
+    }
+    if (found) throw new TypeError("Cannot convert object to primitive value");
+    return NO_USER_PRIM;
+  };
+
   const numArg = (v: unknown): unknown => {
     if (isJSString(v)) return Number(jsStringToString(v));
     // 配列は安全 join 経由で数値化 (host に渡すと jsmini オブジェクト要素の
     // null proto で join が throw する)
     if (Array.isArray(v)) return Number(arrayToPrimitiveString(v));
-    if (v !== null && typeof v === "object") return NaN;
+    if (v !== null && typeof v === "object") {
+      const p = tryUserToPrimitive(v, "number");
+      if (p !== NO_USER_PRIM) return isJSString(p) ? Number(jsStringToString(p)) : p;
+      return NaN;
+    }
     return v;
   };
   // host の文字列ビルトイン (String/parseInt/parseFloat) 用の前処理。
@@ -345,7 +384,11 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   const strConv = (v: unknown): string => {
     if (isJSString(v)) return jsStringToString(v);
     if (Array.isArray(v)) return arrayToPrimitiveString(v);
-    if (v !== null && typeof v === "object") return "[object Object]";
+    if (v !== null && typeof v === "object") {
+      const p = tryUserToPrimitive(v, "string");
+      if (p !== NO_USER_PRIM) return isJSString(p) ? jsStringToString(p) : String(p);
+      return "[object Object]";
+    }
     return String(v);
   };
 
