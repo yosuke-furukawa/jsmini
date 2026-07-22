@@ -68,13 +68,15 @@ describe("Strength Reduction", () => {
     assert.ok(hasOpcode(ir, "ShiftLeft"), "Mul(x, 8) should become ShiftLeft");
   });
 
-  it("x * 0 → 0", () => {
+  it("x * 0 は -0 を生みうるので畳まない (f64 関数)", () => {
+    // a * 0 は a が負なら -0 (-5*0=-0)。functionNeedsF64 が f64 化するので
+    // Const 0 (+0) への畳み込みは抑止され、f64.mul が -0 を保持する
     const ir = getIR(`
       function f(a) { return a * 0; }
     `, "f");
 
     strengthReduce(ir);
-    assert.ok(!hasOpcode(ir, "Mul"), "Mul should be eliminated");
+    assert.ok(hasOpcode(ir, "Mul"), "Mul は -0 保持のため残る");
   });
 
   it("x * 1 → x", () => {

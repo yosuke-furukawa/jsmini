@@ -135,6 +135,23 @@ describe("JIT の数値表現 — i32 で表現できない値", () => {
       assert.ok(Object.is(jit, -0), `useIR=${useIR} で -0 が保存される`);
     }
   });
+  // 計算で生まれる -0 (Negate/Mul)。VM と JIT (direct/IR 両パス) が Object.is で一致
+  function negZeroAgree(src: string, expectNegZero: boolean) {
+    const vm = vmEvaluate(src);
+    assert.equal(Object.is(vm, -0), expectNegZero, `VM の -0 判定`);
+    for (const useIR of [false, true]) {
+      const jit = vmEvaluate(src, { jit: true, jitThreshold: 4, useIR });
+      assert.ok(Object.is(jit, vm), `useIR=${useIR}: 1/x=${1/(jit as number)} が VM (${1/(vm as number)}) と一致`);
+    }
+  }
+  const loop = (params: string, body: string, call: string) =>
+    `function f0(${params}) { return ${body}; } var r = 1; for (var i = 0; i < 300; i++) { r = f0(${call}); } r;`;
+  it("Negate: -x (x=0) は -0", () => negZeroAgree(loop("p", "-p", "0"), true));
+  it("Mul: 変数×変数 0*-1 は -0", () => negZeroAgree(loop("a,b", "a * b", "0,-1"), true));
+  it("Mul: 変数×変数 -1*0 は -0", () => negZeroAgree(loop("a,b", "a * b", "-1,0"), true));
+  it("Mul: 負×0 (-5*0) は -0", () => negZeroAgree(loop("p", "(-p-1) * 0", "4"), true));
+  it("Mul: x*正定数 (0*4) は +0 (回帰: i32 高速パス維持)", () => negZeroAgree(loop("p", "p * 4", "0"), false));
+  it("Add: -x+0 (-0+0) は +0", () => negZeroAgree(loop("p", "-p + 0", "0"), false));
 });
 
 describe("Phase 36-3 — == の ToNumber 段 (JS 仕様 7.2.14)", () => {

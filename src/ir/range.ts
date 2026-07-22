@@ -209,8 +209,18 @@ export function functionNeedsF64(irFunc: IRFunction, excludeIds?: Set<number>): 
     }
   }
   const ranges = analyzeRanges(irFunc);
-  const opById = new Map<number, { opcode: string; value?: unknown }>();
+  const rangeOf = (id: number): Range => ranges.get(id) ?? RANGE_I32;
+  const opById = new Map<number, { opcode: string; value?: unknown; args?: number[] }>();
   for (const b of irFunc.blocks) for (const o of b.ops) opById.set(o.id, o);
+  // -0 を生みうる Negate/Mul を含む関数は f64 に昇格する。i32 には -0 が無く
+  // 0 に化けて `console.log(-0)` や `1 / (0 * -1)` が実 JS と食い違うため。
+  // f64.neg / f64.mul は -0 をネイティブに保持する (deopt 不要)。
+  for (const b of irFunc.blocks) {
+    for (const op of b.ops) {
+      if (excludeIds?.has(op.id)) continue;
+      if (opProducesNegZero(op, rangeOf)) return true;
+    }
+  }
   for (const [id, range] of ranges) {
     // tagged スロット値 (参照タグ等) は数値 range の対象外 (Phase 33)
     if (excludeIds?.has(id)) continue;
@@ -218,6 +228,21 @@ export function functionNeedsF64(irFunc: IRFunction, excludeIds?: Set<number>): 
     const o = opById.get(id);
     if (o && (o.opcode === "Undefined" || (o.opcode === "Const" && (o.value === null || o.value === undefined)))) continue;
     if (!canFitI32(range)) return true;
+  }
+  return false;
+}
+
+// op が実行時に -0 を生みうるか (operand range から保守的に判定)。
+//   -x が -0 になるのは x が +0 のとき → operand が 0 を取りうる
+//   x*y が -0 になるのは積が 0 かつ符号が負 → 一方が 0 を取りうる & 他方が負を取りうる
+function opProducesNegZero(op: Op, rangeOf: (id: number) => Range): boolean {
+  const includesZero = (r: Range) => r.min <= 0 && r.max >= 0;
+  if (op.opcode === "Negate") {
+    return includesZero(rangeOf(op.args[0]));
+  }
+  if (op.opcode === "Mul") {
+    const a = rangeOf(op.args[0]), b = rangeOf(op.args[1]);
+    return (includesZero(a) && b.min < 0) || (includesZero(b) && a.min < 0);
   }
   return false;
 }
