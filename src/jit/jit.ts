@@ -625,10 +625,12 @@ export class JitManager {
         if (id < 0) { this.deoptimize(func, args); return null; }
         wasmArgs.push(id);
       } else if (typeof a === "number") {
-        // i32 特殊化のとき、小数が渡されたら deopt
-        if (cached.spec === "i32" && !Number.isInteger(a)) {
+        // i32 特殊化のとき、小数または -0 が渡されたら deopt。
+        // -0 は i32 の copy-in で 0 に潰れるため (`id(-0)` が +0 を返す)。
+        // 実 JS では引数の -0 は保持されるので VM 実行に落とす (稀なので実害小)
+        if (cached.spec === "i32" && (!Number.isInteger(a) || Object.is(a, -0))) {
           this.deoptimize(func, args);
-          this.logTier(func, "Bytecode VM (after deopt: float to i32)", callCount);
+          this.logTier(func, "Bytecode VM (after deopt: float/-0 to i32)", callCount);
           return null;
         }
         wasmArgs.push(a);
@@ -755,7 +757,8 @@ export class JitManager {
       if (!this.globalsMap) { this.deoptimize(func, args); return null; }
       for (const gname of cached.globalNames) {
         const v = this.globalsMap.get(gname);
-        if (typeof v !== "number" || (cached.spec === "i32" && !Number.isInteger(v))) {
+        // -0 は i32 copy-in で 0 に潰れるので引数と同様に deopt
+        if (typeof v !== "number" || (cached.spec === "i32" && (!Number.isInteger(v) || Object.is(v, -0)))) {
           this.deoptimize(func, args);
           this.logTier(func, "Bytecode VM (after deopt: non-numeric global " + gname + ")", callCount);
           return null;

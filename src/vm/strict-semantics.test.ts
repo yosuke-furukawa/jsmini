@@ -152,6 +152,11 @@ describe("JIT の数値表現 — i32 で表現できない値", () => {
   it("Mul: 負×0 (-5*0) は -0", () => negZeroAgree(loop("p", "(-p-1) * 0", "4"), true));
   it("Mul: x*正定数 (0*4) は +0 (回帰: i32 高速パス維持)", () => negZeroAgree(loop("p", "p * 4", "0"), false));
   it("Add: -x+0 (-0+0) は +0", () => negZeroAgree(loop("p", "-p + 0", "0"), false));
+  // 引数として渡された -0 の保持 (i32 特殊化では -0 arg で deopt)
+  it("引数 -0 を素通しすると -0", () => negZeroAgree(loop("a", "a", "-0"), true));
+  it("引数 -0 に *1 しても -0", () => negZeroAgree(loop("a", "a * 1", "-0"), true));
+  it("引数 -0 に +0 すると +0", () => negZeroAgree(loop("a", "a + 0", "-0"), false));
+  it("通常の整数引数は i32 高速のまま一致", () => negZeroAgree(loop("a", "a * 2", "3"), false));
 });
 
 describe("Phase 36-3 — == の ToNumber 段 (JS 仕様 7.2.14)", () => {
