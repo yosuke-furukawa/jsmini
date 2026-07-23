@@ -913,6 +913,15 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   // ステップ数上限
   if (options.maxSteps) vm.maxSteps = options.maxSteps;
 
+  // 外部から渡されたグローバル変数を注入 (test262 の native ハーネス等)。
+  // 既存のビルトインは上書きしない
+  if (options.globals) {
+    const g = (vm as any).globals as Map<string, unknown>;
+    for (const [k, v] of Object.entries(options.globals)) {
+      if (!g.has(k)) vm.setGlobal(k, v);
+    }
+  }
+
   const rawValue = vm.execute(func);
   // スクリプト実行完了後に microtask を drain
   drainMicrotasks();
