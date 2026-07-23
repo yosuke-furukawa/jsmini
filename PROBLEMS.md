@@ -68,7 +68,7 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 ## 4. ビルトイン不在・部分実装
 
 - **完全不在**: `Proxy` / `Reflect` / `BigInt`
-- `class E extends Error` が両エンジンとも不正 (TW は例外、VM は message 消失)
+- ~~`class E extends Error` が両エンジンとも不正~~ → Phase 39 で解決 (message 付与)
 - メソッド歯抜け ("Not a function" 384 件): ES2025 系
   (`Map.prototype.getOrInsertComputed` 等) を含む
 - RegExp: `\p{...}` unicode property escapes (514 件)、v-flag (80 件)。
