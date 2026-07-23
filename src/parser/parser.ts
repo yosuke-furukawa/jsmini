@@ -222,6 +222,17 @@ export function parse(source: string): Program {
       let key: any;
       let computed = false;
       let isGenerator = false;
+      let isAsync = false;
+
+      // async method: class C { async m() {} } / async *g() {}
+      // `async` がメソッド名/フィールド名の場合 (`async() {}` / `async = 1` /
+      // `async;`) は修飾子として食べない
+      if (current().type === "Async"
+          && tokens[pos + 1]?.type !== "LeftParen" && tokens[pos + 1]?.type !== "Equals"
+          && tokens[pos + 1]?.type !== "Semicolon" && tokens[pos + 1]?.type !== "RightBrace") {
+        eat("Async");
+        isAsync = true;
+      }
 
       // generator method: class C { *gen() {} }
       if (current().type === "Star") {
@@ -274,7 +285,7 @@ export function parse(source: string): Program {
       }
 
       // メソッド
-      if (current().type === "LeftParen" || isGenerator) {
+      if (current().type === "LeftParen" || isGenerator || isAsync) {
         const kind = !computed && key.type !== "PrivateIdentifier" && key.name === "constructor" ? "constructor" : "method";
         eat("LeftParen");
         resetParamState();
@@ -285,7 +296,7 @@ export function parse(source: string): Program {
         }
         eat("RightParen");
         const mbody = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
-        body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody, generator: isGenerator } as any, kind, computed, static: isStatic });
+        body.push({ type: "MethodDefinition", key, value: { type: "FunctionExpression", id: null, params, body: mbody, generator: isGenerator, async: isAsync } as any, kind, computed, static: isStatic });
         continue;
       }
 
@@ -621,6 +632,7 @@ export function parse(source: string): Program {
     "Typeof", "Throw", "Try", "Catch", "Finally", "New", "This",
     "Class", "Extends", "Super", "Of", "In", "Instanceof",
     "Do", "Switch", "Case", "Default", "Delete", "Void", "Yield",
+    "Async", "Await",
   ]);
 
   function parsePropertyKey(): { type: "Identifier"; name: string } {
@@ -1147,7 +1159,8 @@ export function parse(source: string): Program {
           const param = parseIdentifier();
           eat("Arrow");
           const arrowBody = current().type === "LeftBrace" ? parseBlockStatement() : parseAssignment();
-          return { type: "ArrowFunctionExpression", params: [param], body: arrowBody, async: true } as any;
+          // expression フラグが無いと式本体 (=> 1) が block 前提でコンパイルされ壊れる
+          return { type: "ArrowFunctionExpression", params: [param], body: arrowBody, expression: (arrowBody as any).type !== "BlockStatement", async: true } as any;
         }
         if (peek().type === "LeftParen") {
           // async (...) => body — try as async arrow
@@ -1163,7 +1176,7 @@ export function parse(source: string): Program {
           if (current().type === "Arrow") {
             eat("Arrow");
             const arrowBody = current().type === "LeftBrace" ? parseBlockStatement() : parseAssignment();
-            return { type: "ArrowFunctionExpression", params: arrowParams, body: arrowBody, async: true } as any;
+            return { type: "ArrowFunctionExpression", params: arrowParams, body: arrowBody, expression: (arrowBody as any).type !== "BlockStatement", async: true } as any;
           }
           // not an async arrow — fall through (unlikely)
         }
@@ -1277,6 +1290,17 @@ export function parse(source: string): Program {
       let propKind: "init" | "get" | "set" = "init";
       let computed = false;
       let isGenerator = false;
+      let isAsync = false;
+
+      // async method: { async m() {} } / { async *g() {} }
+      // `async` がキーの場合 (`{async: 1}` / `{async}` / `{async() {}}`) は
+      // 修飾子として食べない
+      if (current().type === "Async"
+          && tokens[pos + 1]?.type !== "LeftParen" && tokens[pos + 1]?.type !== "Colon"
+          && tokens[pos + 1]?.type !== "Comma" && tokens[pos + 1]?.type !== "RightBrace") {
+        eat("Async");
+        isAsync = true;
+      }
 
       // generator method: { *foo() {} }
       if (current().type === "Star") {
@@ -1331,8 +1355,8 @@ export function parse(source: string): Program {
         );
       }
       let value: Expression;
-      if (current().type === "LeftParen" || isGenerator) {
-        // メソッド省略記法: { foo() {} } or { *foo() {} }
+      if (current().type === "LeftParen" || isGenerator || isAsync) {
+        // メソッド省略記法: { foo() {} } / { *foo() {} } / { async foo() {} }
         eat("LeftParen");
         resetParamState();
         const params: any[] = [];
@@ -1342,7 +1366,7 @@ export function parse(source: string): Program {
         }
         eat("RightParen");
         const body = parseBlockStatement();
-        value = { type: "FunctionExpression", id: null, params, body, generator: isGenerator } as any;
+        value = { type: "FunctionExpression", id: null, params, body, generator: isGenerator, async: isAsync } as any;
       } else if (current().type === "Colon") {
         eat("Colon");
         value = parseAssignment();

@@ -755,6 +755,7 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
         prototype: {},
       };
       if ((member.value as any).generator) (fn as any).isGenerator = true;
+      if ((member.value as any).async) (fn as any).isAsync = true;
       (target as any)[name] = fn;
     } else if (member.kind === "get" || member.kind === "set") {
       const fn: JSFunction = {

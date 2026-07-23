@@ -364,6 +364,42 @@ describe("Phase 39 — class computed key の文字列化一貫性", () => {
     agree(`[3, 1, 2].map(function (x) { return x * 2; }).join(",");`, "6,2,4"));
 });
 
+describe("Phase 39 — async メソッドのパースと実行", () => {
+  // async の結果は microtask drain 後にしか見えないので console.log 捕捉で検証
+  function logsAgree(src: string, expected: string) {
+    const capture = (f: (log: (...a: unknown[]) => void) => unknown): string => {
+      const logs: unknown[] = [];
+      f((...a) => logs.push(...a));
+      return logs.join(",");
+    };
+    const tw = capture((log) => evaluate(src, { log } as any));
+    const vm = capture((log) => vmEvaluate(src, { console: { log } } as any));
+    assert.equal(tw, expected, "TW");
+    assert.equal(vm, expected, "VM");
+  }
+  it("class の async メソッド", () =>
+    logsAgree(`class C { async m() { return 7; } } new C().m().then(function (v) { console.log(v); });`, "7"));
+  it("static async メソッド", () =>
+    logsAgree(`class C { static async m() { return 8; } } C.m().then(function (v) { console.log(v); });`, "8"));
+  it("async メソッド内の await", () =>
+    logsAgree(`class C { async m() { var v = await Promise.resolve(5); return v + 1; } } new C().m().then(function (v) { console.log(v); });`, "6"));
+  it("object リテラルの async メソッド", () =>
+    logsAgree(`var o = { async m() { return 9; } }; o.m().then(function (v) { console.log(v); });`, "9"));
+  it("async メソッド内の this (VM は runAsyncFunction が this を落としていた)", () =>
+    logsAgree(`class C { constructor() { this.x = 40; } async m() { return this.x + 2; } } new C().m().then(function (v) { console.log(v); });`, "42"));
+  it("継承した async メソッド", () =>
+    logsAgree(`class A { async m() { return 5; } } class B extends A {} new B().m().then(function (v) { console.log(v); });`, "5"));
+  // async をキー/名前として使う (回帰)
+  it("async という名のメソッド・フィールド", () =>
+    agree(`class C { async() { return 1; } async2 = 0; } var o = { async: 2 }; new C().async() + o.async;`, 3));
+  it("async *g() のパース", () =>
+    agree(`class C { async *g() {} } typeof new C().g;`, "function"));
+  it("async arrow の式本体 (expression フラグ欠落で壊れていた)", () =>
+    logsAgree(`var f = async (x) => x + 1; f(2).then(function (v) { console.log(v); });`, "3"));
+  it("async arrow 単一引数 + block 本体", () =>
+    logsAgree(`var f = async x => { return x * 2; }; f(3).then(function (v) { console.log(v); });`, "6"));
+});
+
 describe("Phase 38 — ラベル付き break/continue と for-in の loop エントリ", () => {
   // VM はラベル付き非ループ文への break を解決できず、未パッチ Jump 0 が
   // プログラム先頭へ飛んで無限ループしていた (test262 JIT ランがハングした原因)

@@ -5,10 +5,10 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 
 ## 現状サマリ (2026-07-23, Phase 39 時点)
 
-- test262: **TW 59.0% / VM 59.7% / JIT ~59.5%** (12,459 件実行、noStrict 等 2,114 件スキップ)
+- test262: **TW 59.2% / VM 59.8% / JIT ~59.6%** (12,459 件実行、noStrict 等 2,114 件スキップ)
   — Phase 39 のハーネス拡充で 3 モードとも約 +5pt (TW 53.8 / VM 54.5 / JIT 54.3 から)、
   class 継承実装でさらに +0.1pt
-- 内部テスト 1,215 全パス / 差分ファザ **0 / 100,000** で収束維持
+- 内部テスト 1,223 全パス / 差分ファザ **0 / 100,000** で収束維持
 - ただし TW↔VM には test262 で **TW だけ失敗 / VM だけ失敗**の非対称が残る
   (ファザの generator が class/label 等を生成しないため未検出だった領域)
 
@@ -30,9 +30,13 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 | class computed key `[String(fn)]` | ✅ **Phase 39 で解決** | ✅ |
 
 - **class 継承 (extends/super/static 継承/フィールド順/Error 継承) と
-  spread (呼び出し/object) は Phase 39 で 3 エンジン一致に**。ただし class 系
-  test262 の主残件は継承ではなく private `#` の一部ポジション (296 件) /
-  **async メソッドのパース不可** (121 件) / 属性モデル (§2)
+  spread (呼び出し/object)、async メソッドは Phase 39 で 3 エンジン一致に**。
+  class 系 test262 の主残件は private `#` の一部ポジション (296 件) と
+  属性モデル (§2)。async 系で直したもの: class/object リテラルの async
+  メソッド + async *g のパース、`async` をキー/メソッド名/フィールド名として
+  使用可、VM の runAsyncFunction が this を落とすバグ、async arrow の
+  式本体 (expression フラグ欠落)。残り: `for (async.x of ...)` 等の
+  「識別子としての async」(contextual keyword 化が必要、3 件)
 - TW の class computed key は Phase 39 で解決: native 呼び出し時の JSFunction
   ラッパーに元関数をタグ付けし、String(fn) をキー正規化と同じ "[object Object]"
   に統一 (jsmini は関数ソーステキストを保持しないため、仕様のソーステキスト

@@ -269,7 +269,7 @@ export class VM {
   }
 
   // Async function → JSPromise を返し、内部 VM で body を駆動
-  private runAsyncFunction(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[]): JSPromise {
+  private runAsyncFunction(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[], thisValue?: unknown): JSPromise {
     const vm = new VM();
     vm.globals = this.globals;
     vm.heap = this.heap;
@@ -290,7 +290,7 @@ export class VM {
 
         vm.frames.push({
           func, pc, locals: savedLocals,
-          thisValue: undefined,
+          thisValue, // async メソッドの this (従来は undefined 固定で this が消えていた)
           icSlots: vm.createICSlots(func),
           upvalueBoxes,
         });
@@ -1560,7 +1560,7 @@ export class VM {
                 const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj, closure.capturedBoxes);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
-              const asyncPromise = this.runAsyncFunction(fn, locals, closure.capturedBoxes);
+              const asyncPromise = this.runAsyncFunction(fn, locals, closure.capturedBoxes, thisObj);
               this.push(asyncPromise);
             } else if (fn.isGenerator) {
               const genObj = this.createGeneratorObject(fn, locals, closure.capturedBoxes);
@@ -1590,7 +1590,7 @@ export class VM {
                 const jitResult = this.jit.tryCall(fn, args, [], thisObj);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
-              const asyncPromise = this.runAsyncFunction(fn, locals, []);
+              const asyncPromise = this.runAsyncFunction(fn, locals, [], thisObj);
               this.push(asyncPromise);
             } else if (fn.isGenerator) {
               const genObj = this.createGeneratorObject(fn, locals, []);
