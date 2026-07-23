@@ -21,7 +21,11 @@ class BytecodeCompiler {
   private parent: BytecodeCompiler | null;
   private isFunction: boolean;
   // ループスタック: break/continue のジャンプ先パッチ用
-  private loopStack: { label?: string; breakPatches: number[]; continuePatches: number[]; continueTarget: number }[] = [];
+  // break/continue のジャンプ先スタック。kind:
+  //   loop   — while/do-while/for/for-of/for-in (break/continue とも対象)
+  //   switch — switch (break のみ対象。continue は透過して外のループへ)
+  //   label  — ラベル付き非ループ文 `lbl: { ... }` (break lbl のみ対象)
+  private loopStack: { label?: string; kind: "loop" | "switch" | "label"; breakPatches: number[]; continuePatches: number[]; continueTarget: number }[] = [];
   private icSlotCount = 0;
   private hasRestParam = false;
   private isGenerator = false;
@@ -68,11 +72,24 @@ class BytecodeCompiler {
     return this.bytecode.length;
   }
 
-  // ラベルに一致するループを探す (ラベルなしは最内ループ)
-  findLoop(label: string | null) {
-    if (!label) return this.loopStack.length > 0 ? this.loopStack[this.loopStack.length - 1] : null;
+  // break のジャンプ先を探す。ラベルなしは最内の loop/switch (label エントリは
+  // 透過)、ラベル付きは一致するエントリ (ラベル付きブロック含む)
+  findBreakTarget(label: string | null) {
     for (let i = this.loopStack.length - 1; i >= 0; i--) {
-      if (this.loopStack[i].label === label) return this.loopStack[i];
+      const e = this.loopStack[i];
+      if (label ? e.label === label : e.kind !== "label") return e;
+    }
+    return null;
+  }
+
+  // continue のジャンプ先を探す。対象はループのみ (switch/label は透過。
+  // `continue` が switch エントリに捕まると patch されない Jump 0 が残り
+  // プログラム先頭に飛ぶバグになっていた)
+  findContinueTarget(label: string | null) {
+    for (let i = this.loopStack.length - 1; i >= 0; i--) {
+      const e = this.loopStack[i];
+      if (e.kind !== "loop") continue;
+      if (!label || e.label === label) return e;
     }
     return null;
   }
@@ -838,7 +855,7 @@ class BytecodeCompiler {
         if (hasSwitchScoped) this.beginLexicalScope(switchLexicals);
         for (const s of switchFnDecls) this.compileStatement(s);
 
-        this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: -1 });
+        this.loopStack.push({ label: (stmt as any).__label__, kind: "switch", breakPatches: [], continuePatches: [], continueTarget: -1 });
 
         // Phase 1: 比較 → body へのジャンプ
         const jumpToBody: number[] = []; // 一致時のジャンプ (パッチ対象)
@@ -895,7 +912,7 @@ class BytecodeCompiler {
       case "DoWhileStatement": {
         // do { body } while (test);
         const loopStart = this.currentOffset();
-        this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
+        this.loopStack.push({ label: (stmt as any).__label__, kind: "loop", breakPatches: [], continuePatches: [], continueTarget: loopStart });
         this.compileStatement(stmt.body);
         this.compileExpression(stmt.test);
         this.emit("JumpIfTrue", loopStart);
@@ -906,7 +923,7 @@ class BytecodeCompiler {
 
       case "WhileStatement": {
         const loopStart = this.currentOffset();
-        this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
+        this.loopStack.push({ label: (stmt as any).__label__, kind: "loop", breakPatches: [], continuePatches: [], continueTarget: loopStart });
         this.compileExpression(stmt.test);
         const exitJump = this.emit("JumpIfFalse", 0);
         this.compileStatement(stmt.body);
@@ -937,7 +954,7 @@ class BytecodeCompiler {
         const loopStart = this.currentOffset();
         // continue は update を実行してからループ先頭に戻る
         // → continue のジャンプ先は update の先頭
-        this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: -1 }); // 後でパッチ
+        this.loopStack.push({ label: (stmt as any).__label__, kind: "loop", breakPatches: [], continuePatches: [], continueTarget: -1 }); // 後でパッチ
         let exitJump = -1;
         if (stmt.test) {
           this.compileExpression(stmt.test);
@@ -1117,14 +1134,15 @@ class BytecodeCompiler {
       }
 
       case "BreakStatement": {
-        const breakJump = this.emit("Jump", 0); // 後でパッチ
-        const target = this.findLoop(stmt.label);
-        if (target) target.breakPatches.push(breakJump);
+        // 先にターゲットを解決してから Jump を emit する。逆順だとターゲット
+        // 不在時に operand 0 の Jump が残り、プログラム先頭へ飛ぶ無限ループになる
+        const target = this.findBreakTarget(stmt.label);
+        if (target) target.breakPatches.push(this.emit("Jump", 0)); // 後でパッチ
         break;
       }
 
       case "ContinueStatement": {
-        const loop = this.findLoop(stmt.label);
+        const loop = this.findContinueTarget(stmt.label);
         if (loop) {
           if (loop.continueTarget >= 0) {
             this.emit("Jump", loop.continueTarget);
@@ -1136,9 +1154,23 @@ class BytecodeCompiler {
       }
 
       case "LabeledStatement": {
-        // ラベルを子のループに伝播するため、ループ文なら label を付けてコンパイル
-        (stmt.body as any).__label__ = stmt.label;
-        this.compileStatement(stmt.body);
+        const bodyType = (stmt.body as any).type;
+        const isLoopOrSwitch = bodyType === "WhileStatement" || bodyType === "DoWhileStatement"
+          || bodyType === "ForStatement" || bodyType === "ForOfStatement"
+          || bodyType === "ForInStatement" || bodyType === "SwitchStatement";
+        if (isLoopOrSwitch) {
+          // ループ/switch はラベルを伝播して自前の loopStack エントリに載せる
+          // (continue label はループのエントリでしか解決できないため)
+          (stmt.body as any).__label__ = stmt.label;
+          this.compileStatement(stmt.body);
+        } else {
+          // ラベル付き非ループ文 (`lbl: { ... break lbl; ... }` 等):
+          // break lbl 専用のエントリを積み、文の終端へパッチする
+          this.loopStack.push({ label: stmt.label, kind: "label", breakPatches: [], continuePatches: [], continueTarget: -1 });
+          this.compileStatement(stmt.body);
+          const entry = this.loopStack.pop()!;
+          for (const bp of entry.breakPatches) this.patch(bp, this.currentOffset());
+        }
         break;
       }
 
@@ -1176,8 +1208,14 @@ class BytecodeCompiler {
         ldaTmp(counterSlot, counterG);
         this.emit("GetPropertyComputed");
         this.compileBindingTarget(stmt.left.declarations[0].id);
-        // body
+        // body。break/continue 用のエントリ (従来は積んでおらず、break が外の
+        // ループに捕まる or 未パッチ Jump 0 で先頭に飛ぶバグだった)
+        this.loopStack.push({ label: (stmt as any).__label__, kind: "loop", breakPatches: [], continuePatches: [], continueTarget: -1 });
         this.compileStatement(stmt.body);
+        // continue はここ (i++) にジャンプ
+        const forInLoop = this.loopStack.pop()!;
+        const incStart = this.currentOffset();
+        for (const cp of forInLoop.continuePatches) this.patch(cp, incStart);
         // i++
         ldaTmp(counterSlot, counterG);
         this.emit("LdaConst", this.addConstant(1));
@@ -1186,6 +1224,7 @@ class BytecodeCompiler {
         this.emit("Pop");
         this.emit("Jump", loopStart);
         this.patch(exitJump, this.currentOffset());
+        for (const bp of forInLoop.breakPatches) this.patch(bp, this.currentOffset());
         break;
       }
 
@@ -1201,7 +1240,7 @@ class BytecodeCompiler {
         this.emit("Pop");
 
         const loopStart = this.currentOffset();
-        this.loopStack.push({ label: (stmt as any).__label__, breakPatches: [], continuePatches: [], continueTarget: loopStart });
+        this.loopStack.push({ label: (stmt as any).__label__, kind: "loop", breakPatches: [], continuePatches: [], continueTarget: loopStart });
 
         // IteratorNext: pop iterator, push result
         if (useLocal) this.emit("LdaLocal", iterSlot); else this.emit("LdaGlobal", iterG);

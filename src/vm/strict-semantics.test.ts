@@ -298,3 +298,29 @@ describe("Phase 36-6 — TDZ とエラー優先順位 (spec 7.x SetMutableBindin
       `const b = true; switch (0) { case 1: const v = 1; break; default: b.x += (true ? v : 0); }`,
       ReferenceError));
 });
+
+describe("Phase 38 — ラベル付き break/continue と for-in の loop エントリ", () => {
+  // VM はラベル付き非ループ文への break を解決できず、未パッチ Jump 0 が
+  // プログラム先頭へ飛んで無限ループしていた (test262 JIT ランがハングした原因)
+  it("ラベル付きブロックへの break", () =>
+    agree(`var i = 0; woohoo: { while (true) { i++; if (i == 10) break woohoo; } } i;`, 10));
+  it("ネストしたラベル付きブロックの外側へ break", () =>
+    agree(`var x = 0; a: { b: { x = 1; break a; x = 2; } x = 3; } x;`, 1));
+  it("ラベル付き if への break", () =>
+    agree(`var y = 0; li: if (true) { y = 1; break li; y = 2; } y;`, 1));
+  // switch エントリが continue を捕まえて未パッチ Jump 0 になっていた
+  it("switch 内の continue は外のループへ", () =>
+    agree(`var s = ""; for (var i = 0; i < 3; i++) { switch (i) { case 0: continue; default: } s += i; } s;`, "12"));
+  // for-in は loopStack エントリ自体が無く break が無限ループ / continue が no-op だった
+  it("for-in 内の break", () =>
+    agree(`var s = ""; for (var k in { a: 1, b: 2, c: 3 }) { if (k == "b") break; s += k; } s;`, "a"));
+  it("for-in 内の continue", () =>
+    agree(`var s = ""; for (var k in { a: 1, b: 2, c: 3 }) { if (k == "b") continue; s += k; } s;`, "ac"));
+  it("ラベル付き for-in を内側ループから break", () =>
+    agree(`var s = ""; li: for (var k in { a: 1, b: 2 }) { for (var j = 0; j < 2; j++) { if (k == "b") break li; s += k + j; } } s;`, "a0a1"));
+  // 回帰: 既存のループ/switch の break/continue
+  it("ラベル付き continue で外側ループへ (回帰)", () =>
+    agree(`var s = ""; outer: for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { if (j == 1) continue outer; s += ("" + i + j); } } s;`, "001020"));
+  it("switch を挟んで外側ループを break (回帰)", () =>
+    agree(`var r = 0; out: for (var i = 0; i < 3; i++) { switch (i) { case 1: break out; } r = i; } r;`, 0));
+});
