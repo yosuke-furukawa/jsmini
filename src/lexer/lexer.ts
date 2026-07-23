@@ -129,8 +129,8 @@ export function tokenize(source: string): Token[] {
         throw new SyntaxError(`Unterminated regex literal at line ${line}, column ${startCol}`);
       }
       advance(); // closing /
-      // フラグ: g i m s u y d (Unicode/sticky/dotAll/hasIndices)
-      while (pos < source.length && /[gimsuyd]/.test(peek())) advance();
+      // フラグ: g i m s u y d v (Unicode/sticky/dotAll/hasIndices/unicodeSets)
+      while (pos < source.length && /[gimsuydv]/.test(peek())) advance();
       pushToken("RegExp", source.slice(startPos, pos), startCol);
       continue;
     }
