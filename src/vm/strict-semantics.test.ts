@@ -299,6 +299,34 @@ describe("Phase 36-6 — TDZ とエラー優先順位 (spec 7.x SetMutableBindin
       ReferenceError));
 });
 
+describe("Phase 39 — class 継承 (extends / super)", () => {
+  it("メソッド継承", () => agree(`class A { m(){ return 1; } } class B extends A {} new B().m();`, 1));
+  it("super() が親 ctor を this 付きで実行", () =>
+    agree(`class A { constructor(x){ this.v = x; } } class B extends A { constructor(){ super(7); } } new B().v;`, 7));
+  it("デフォルト派生 ctor は引数を転送", () =>
+    agree(`class A { constructor(x, y){ this.v = x + y; } } class B extends A {} new B(3, 4).v;`, 7));
+  it("super.m() は親メソッドを現在の this で呼ぶ", () =>
+    agree(`class A { m(){ return this.x; } } class B extends A { constructor(){ super(); this.x = 42; } m(){ return super.m(); } } new B().m();`, 42));
+  it("2 段継承チェーンのメソッド解決", () =>
+    agree(`class A { m(){ return 1; } } class B extends A {} class C extends B {} new C().m();`, 1));
+  it("中間クラスの super.m() 連鎖", () =>
+    agree(`class A { m(){ return 1; } } class B extends A { m(){ return super.m() * 10; } } class C extends B { m(){ return super.m() + 5; } } new C().m();`, 15));
+  it("static メソッドの継承", () =>
+    agree(`class A { static s(){ return 5; } } class B extends A {} B.s();`, 5));
+  it("instanceof が継承チェーンを辿る", () =>
+    agree(`class A {} class B extends A {} (new B() instanceof A) ? 1 : 0;`, 1));
+  it("メソッドのオーバーライド", () =>
+    agree(`class A { m(){ return 1; } } class B extends A { m(){ return 2; } } new B().m();`, 2));
+  it("フィールドは親→子の順で初期化", () =>
+    agree(`class A { pa = 1; } class B extends A { cb = 2; } var b = new B(); b.pa + b.cb;`, 3));
+  it("明示的 super() でも親フィールドが初期化される", () =>
+    agree(`class A { pa = 1; } class B extends A { cb = 2; constructor(){ super(); } } var b = new B(); b.pa + b.cb;`, 3));
+  it("Error 継承 (デフォルト ctor) で message が付く", () =>
+    agree(`class E extends Error {} var e; try { throw new E("boom"); } catch (x) { e = x; } e.message;`, "boom"));
+  it("Error 継承 (明示的 super(m))", () =>
+    agree(`class E extends Error { constructor(m){ super(m); this.code = 9; } } var e = new E("bad"); e.message + e.code;`, "bad9"));
+});
+
 describe("Phase 38 — ラベル付き break/continue と for-in の loop エントリ", () => {
   // VM はラベル付き非ループ文への break を解決できず、未パッチ Jump 0 が
   // プログラム先頭へ飛んで無限ループしていた (test262 JIT ランがハングした原因)

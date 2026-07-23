@@ -689,7 +689,7 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
       isClass: true,
       prototype: {},
     };
-  } else if (superClass) {
+  } else if (superClass && (superClass as any).params) {
     ctorFn = {
       [JS_FUNCTION_BRAND]: true,
       name: className,
@@ -699,6 +699,19 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
       isClass: true,
       prototype: {},
     };
+  } else if (superClass) {
+    // host コンストラクタ (Error 等) の派生デフォルト ctor。
+    // 本体は空にし、NewExpression 側で host インスタンスの own props をコピーする
+    ctorFn = {
+      [JS_FUNCTION_BRAND]: true,
+      name: className,
+      params: [],
+      body: { type: "BlockStatement", body: [] } as any,
+      closure: env,
+      isClass: true,
+      prototype: {},
+    };
+    (ctorFn as any).__hostSuperDefault = superClass;
   } else {
     ctorFn = {
       [JS_FUNCTION_BRAND]: true,
@@ -711,9 +724,13 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
     };
   }
 
-  // インスタンスフィールドを __instanceFields に保存 (new 時に初期化)
-  if (instanceFields.length > 0) {
-    (ctorFn as any).__instanceFields = instanceFields;
+  // インスタンスフィールドを __instanceFields に保存 (new 時に初期化)。
+  // 派生クラスのデフォルト ctor (親の params/body を再利用) は super() を
+  // 実行しないため、親のフィールドをマージして new 時にまとめて初期化する
+  const parentFields = (!ctorMethod && superClass && (superClass as any).__instanceFields)
+    ? (superClass as any).__instanceFields as any[] : [];
+  if (instanceFields.length > 0 || parentFields.length > 0) {
+    (ctorFn as any).__instanceFields = [...parentFields, ...instanceFields];
   }
 
   // メソッド/getter/setter を prototype (or class 自体 for static) に登録
@@ -780,7 +797,12 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
 
   // extends: プロトタイプチェーンを接続
   if (superClass) {
-    ctorFn.prototype[PROTO_KEY] = superClass.prototype;
+    if ((superClass as any).prototype) {
+      ctorFn.prototype[PROTO_KEY] = (superClass as any).prototype;
+    }
+    // 静的側: B.staticMethod() が親の static を見つけられるように
+    // (getProperty は PROTO_KEY チェーンを辿る)
+    (ctorFn as any)[PROTO_KEY] = superClass;
     const classEnv = new Environment(env);
     classEnv.define("__super__", superClass);
     ctorFn.closure = classEnv;
@@ -1287,6 +1309,17 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       return result;
     }
     case "MemberExpression": {
+      // super.x の読み出し — 親 prototype チェーンから解決
+      if (expr.object.type === "Identifier" && (expr.object as any).name === "__super__") {
+        const superFn = env.get("__super__") as any;
+        const key = yield* resolveMemberKey(expr, env);
+        let proto: any = superFn?.prototype;
+        while (proto && typeof proto === "object") {
+          if (Object.prototype.hasOwnProperty.call(proto, key)) return proto[key];
+          proto = proto[PROTO_KEY];
+        }
+        return undefined;
+      }
       const obj = yield* evalExpression(expr.object, env);
       if (obj === null || obj === undefined) {
         if ((expr as any).optional) return undefined; // ?. → undefined
@@ -1407,8 +1440,11 @@ function* evalNewExpression(
   const constructor = yield* evalExpression(expr.callee, env);
   const args = yield* evalArguments(expr.arguments, env);
 
-  // 組み込みコンストラクタ (Error 等)
-  if (typeof constructor === "object" && constructor !== null && "__nativeConstructor" in constructor) {
+  // 組み込みコンストラクタ (Error 等)。own プロパティ判定にする —
+  // `class E extends Error` は PROTO_KEY 経由で __nativeConstructor が
+  // 見えてしまうが、E 自体は JSFunction なので通常経路で実行する
+  if (typeof constructor === "object" && constructor !== null
+      && Object.prototype.hasOwnProperty.call(constructor, "__nativeConstructor")) {
     const ctor = constructor as { name: string };
     if (ctor.name === "Error") {
       return { message: args[0] ?? "" };
@@ -1432,6 +1468,25 @@ function* evalNewExpression(
   // 新しいオブジェクトを作成し、prototype チェーンを接続
   const newObj: Record<string, unknown> = {};
   newObj[PROTO_KEY] = constructor.prototype;
+
+  // native/host コンストラクタ (Error 等) の派生デフォルト ctor:
+  // 親のプロパティ (message 等) を this に与える
+  if ((constructor as any).__hostSuperDefault) {
+    const hostCtor = (constructor as any).__hostSuperDefault;
+    if (hostCtor && typeof hostCtor === "object" && hostCtor.__nativeConstructor) {
+      // jsmini の native コンストラクタ (Error)
+      if (hostCtor.name === "Error") newObj.message = args[0] ?? "";
+    } else if (typeof hostCtor === "function") {
+      try {
+        const tmp = new (hostCtor as new (...a: unknown[]) => object)(...args);
+        if (tmp && typeof tmp === "object") {
+          for (const k of Object.getOwnPropertyNames(tmp)) {
+            newObj[k] = (tmp as Record<string, unknown>)[k];
+          }
+        }
+      } catch { /* host ctor が失敗しても継続 */ }
+    }
+  }
 
   // 関数スコープを作成し this を新オブジェクトにバインド
   const fnEnv = new Environment(constructor.closure, true);
@@ -1666,6 +1721,27 @@ function* evalCallExpression(
   let thisValue: unknown = undefined;
   let fn: unknown;
   if (expr.callee.type === "MemberExpression") {
+    // super.m(...) — メソッドは親 prototype チェーンから解決し、
+    // this は現在の this のまま呼ぶ (従来は superClass の静的側を見る誤実装だった)
+    if (expr.callee.object.type === "Identifier" && (expr.callee.object as any).name === "__super__") {
+      const superFn = env.get("__super__") as any;
+      const key = yield* resolveMemberKey(expr.callee, env);
+      let proto: any = superFn?.prototype;
+      let method: unknown = undefined;
+      while (proto && typeof proto === "object") {
+        if (Object.prototype.hasOwnProperty.call(proto, key)) { method = proto[key]; break; }
+        proto = proto[PROTO_KEY];
+      }
+      const superArgs = yield* evalArguments(expr.arguments, env);
+      const selfThis = env.getThis();
+      if (isJSFunction(method)) {
+        return yield* evalCallWithJSFunction(method, superArgs, env, selfThis);
+      }
+      if (typeof method === "function") {
+        return (method as Function).apply(selfThis, superArgs);
+      }
+      throw new TypeError(`super.${String(key)} is not a function`);
+    }
     thisValue = yield* evalExpression(expr.callee.object, env);
     const key = yield* resolveMemberKey(expr.callee, env);
     fn = getProperty(thisValue as JSObject, key);
@@ -1768,11 +1844,42 @@ function* evalCallExpression(
     return result;
   }
 
+  // super() で親が native (jsmini の Error オブジェクト) / host コンストラクタ:
+  // 親の与えるプロパティ (message 等) を this に反映する
+  if (expr.callee.type === "Identifier" && expr.callee.name === "__super__" && !isJSFunction(fn)) {
+    const self = env.getThis() as Record<string, unknown> | undefined;
+    if (fn && typeof fn === "object" && (fn as any).__nativeConstructor) {
+      if ((fn as any).name === "Error" && self && typeof self === "object") {
+        self.message = args[0] ?? "";
+      }
+      return undefined;
+    }
+    if (typeof fn === "function") {
+      try {
+        const tmp = new (fn as new (...a: unknown[]) => object)(...args);
+        if (tmp && typeof tmp === "object" && self && typeof self === "object") {
+          for (const k of Object.getOwnPropertyNames(tmp)) {
+            self[k] = (tmp as Record<string, unknown>)[k];
+          }
+        }
+      } catch { /* host ctor 失敗は無視 */ }
+      return undefined;
+    }
+  }
+
   // super() 呼び出し: 親コンストラクタを現在の this で実行
   if (expr.callee.type === "Identifier" && expr.callee.name === "__super__" && isJSFunction(fn)) {
     const superFn = fn;
     const superEnv = new Environment(superFn.closure, true);
     superEnv.setThis(env.getThis());
+    // 親の instance fields を初期化 (親の ctor 本体より先)
+    if ((superFn as any).__instanceFields) {
+      const selfObj = env.getThis() as Record<string, unknown>;
+      for (const field of (superFn as any).__instanceFields) {
+        const fname = classKeyName(field.key, field.computed, superEnv);
+        selfObj[fname] = field.value ? yield* evalExpression(field.value, superEnv) : undefined;
+      }
+    }
     for (let i = 0; i < superFn.params.length; i++) {
       const param = superFn.params[i];
       if (param.type === "RestElement") {

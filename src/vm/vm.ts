@@ -522,8 +522,14 @@ export class VM {
   // BytecodeFunction を直接呼び出す (ToPrimitive, Promise handler 等の内部用)
   private callInternal(func: BytecodeFunction, thisValue: unknown, args: unknown[]): unknown {
     const locals = new Array(func.localCount).fill(undefined);
-    for (let i = 0; i < args.length && i < func.paramCount; i++) {
-      locals[i] = args[i];
+    if (func.hasRestParam) {
+      const restIdx = func.paramCount - 1;
+      for (let i = 0; i < restIdx; i++) locals[i] = i < args.length ? args[i] : undefined;
+      locals[restIdx] = args.slice(restIdx);
+    } else {
+      for (let i = 0; i < args.length && i < func.paramCount; i++) {
+        locals[i] = args[i];
+      }
     }
     const savedSp = this.sp;
     const baseFrameCount = this.frames.length;
@@ -1629,8 +1635,11 @@ export class VM {
           if (ctor.prototype) {
             jsObjSet(newObj, "__proto__", ctor.prototype);
           }
-          if (ctor.__nativeConstructor) {
-            // ネイティブコンストラクタ (Error 等)
+          if (ctor.__nativeConstructor && !ctor.bytecode) {
+            // ネイティブコンストラクタ (Error 等)。bytecode を持つ場合は
+            // native の派生クラス (class E extends Error) なので bytecode 側で
+            // 実行する (__nativeConstructor は setPrototypeOf の静的継承で
+            // 親から見えてしまうため own の bytecode を優先)
             if (ctor.name === "Error") {
               this.push({ message: args[0] ?? "" });
             } else {
@@ -1663,8 +1672,15 @@ export class VM {
             }
             // BytecodeFunction
             const locals = new Array(ctor.localCount).fill(undefined);
-            for (let i = 0; i < ctor.paramCount; i++) {
-              locals[i] = i < args.length ? args[i] : undefined;
+            if (ctor.hasRestParam) {
+              // rest param (派生クラスのデフォルト ctor の引数転送等)
+              const restIdx = ctor.paramCount - 1;
+              for (let i = 0; i < restIdx; i++) locals[i] = i < args.length ? args[i] : undefined;
+              locals[restIdx] = args.slice(restIdx);
+            } else {
+              for (let i = 0; i < ctor.paramCount; i++) {
+                locals[i] = i < args.length ? args[i] : undefined;
+              }
             }
             this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor), upvalueBoxes: [] });
             (frame as any).__pendingNewObj = newObj;
@@ -1685,6 +1701,118 @@ export class VM {
           } else {
             throw new TypeError("Not a constructor");
           }
+          break;
+        }
+
+        // class 継承 (Phase 39)
+        case "ClassLink": {
+          // stack: [child, parent] → pop parent, peek child (child は残す)
+          const parent = this.pop() as any;
+          const child = this.peek() as any;
+          if (parent === null || parent === undefined) break; // class C extends null
+          // prototype チェーン: child.prototype (host object) → parent.prototype。
+          // GetProperty の host フォールバックが host proto チェーンを辿るので
+          // メソッド継承はこのリンクだけで効く (parent が host Error 等でも同様)
+          const parentProto = parent.prototype;
+          if (child.prototype && parentProto && typeof parentProto === "object") {
+            Object.setPrototypeOf(child.prototype, parentProto);
+          }
+          // 静的側: child (BytecodeFunction = host object) の proto を parent に。
+          // finish() が全内部フィールドを own prop で持つのでシャドウは安全
+          if (typeof parent === "object" || typeof parent === "function") {
+            try { Object.setPrototypeOf(child, parent); } catch { /* host 制約 */ }
+          }
+          child.__superClass = parent;
+          child.__homeProto = parentProto; // ctor 内の super.m 用
+          // メソッドに super 解決情報をタグ付け (super()/super.m 用)。
+          // instance メソッド → parent.prototype、static メソッド → parent
+          const INTERNAL_KEYS = new Set(["name", "paramCount", "localCount", "hasRestParam", "isGenerator", "isAsync",
+            "bytecode", "constants", "handlers", "icSlotCount", "upvalues", "__jitCached",
+            "prototype", "__instanceFields", "__superClass", "__homeProto"]);
+          const tagFns = (holder: unknown, home: unknown) => {
+            if (!holder || typeof holder !== "object") return;
+            for (const key of Object.getOwnPropertyNames(holder)) {
+              if (INTERNAL_KEYS.has(key)) continue;
+              const v = (holder as any)[key];
+              if (v && typeof v === "object" && "bytecode" in v) {
+                v.__superClass = parent;
+                v.__homeProto = home;
+              }
+            }
+          };
+          tagFns(child.prototype, parentProto);
+          tagFns(child, parent);
+          break;
+        }
+        case "CallSuper":
+        case "CallSuperArray": {
+          let superArgs: unknown[];
+          if (instr.op === "CallSuperArray") {
+            const arr = this.pop();
+            superArgs = Array.isArray(arr) ? arr : [];
+          } else {
+            const argc = instr.operand!;
+            superArgs = new Array(argc);
+            for (let i = argc - 1; i >= 0; i--) superArgs[i] = this.pop();
+          }
+          const parentCtor = (frame.func as any).__superClass;
+          if (!parentCtor) {
+            const err = new SyntaxError("'super' keyword unexpected here");
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
+          const self = frame.thisValue;
+          if (parentCtor.__nativeConstructor && !parentCtor.bytecode) {
+            // jsmini の native コンストラクタ (Error): Construct の native 分岐と
+            // 同じプロパティを this に与える
+            if (parentCtor.name === "Error" && isJSObject(self)) {
+              jsObjSet(self, "message", superArgs[0] ?? "");
+            }
+            this.push(undefined);
+            break;
+          }
+          if (typeof parentCtor === "function") {
+            // host コンストラクタ: 一時インスタンスを作って own props を this にコピー
+            try {
+              const tmp = new (parentCtor as new (...a: unknown[]) => object)(...superArgs);
+              if (tmp && typeof tmp === "object" && isJSObject(self)) {
+                for (const k of Object.getOwnPropertyNames(tmp)) {
+                  jsObjSet(self, k, (tmp as Record<string, unknown>)[k]);
+                }
+              }
+            } catch (e) {
+              if (!this.unwindToHandler(e, this._runBaseFrameCount)) throw e;
+              break;
+            }
+            this.push(undefined);
+            break;
+          }
+          // 親の instance fields を初期化 (Construct と同じ規則: リテラルのみ)
+          if (parentCtor.__instanceFields && isJSObject(self)) {
+            for (const field of parentCtor.__instanceFields as any[]) {
+              const fname = field.key?.name as string | undefined;
+              if (!fname) continue;
+              let value: unknown = undefined;
+              if (field.value && field.value.type === "Literal") value = field.value.value;
+              jsObjSet(self, fname, value);
+            }
+          }
+          const superResult = this.callFunction(parentCtor, self, superArgs);
+          if (superResult === THROWN_SENTINEL) continue;
+          this.push(undefined);
+          break;
+        }
+        case "GetSuperProp": {
+          const name = constants[instr.operand!] as string;
+          const fn = frame.func as any;
+          const home = fn.__homeProto ?? fn.__superClass?.prototype;
+          if (!home) {
+            const err = new SyntaxError("'super' keyword unexpected here");
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
+          const val = isJSObject(home) ? jsObjGet(home, name) : (home as Record<string, unknown>)[name];
+          this.push(val);
           break;
         }
 

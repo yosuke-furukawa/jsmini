@@ -100,6 +100,12 @@ export type Opcode =
   | "Construct"       // Construct <argc> — new 演算子
   | "LoadThis"        // 現在の this を push
 
+  // class 継承 (Phase 39)
+  | "ClassLink"       // pop parent, peek child — prototype チェーンをリンクし __superClass/__homeProto をタグ付け
+  | "CallSuper"       // CallSuper <argc> — super(...) 呼び出し。frame.func.__superClass を this 付きで同期実行
+  | "CallSuperArray"  // pop 配列を引数列として super(...) (派生クラスのデフォルト ctor の引数転送用)
+  | "GetSuperProp"    // GetSuperProp <nameIdx> — super.name の解決 (frame.func.__homeProto から読む)
+
   // 制御フロー
   | "Jump"            // Jump <offset> — 無条件ジャンプ (pc = operand)
   | "JumpIfFalse"     // JumpIfFalse <offset> — falsy なら pc = operand (pop する)
