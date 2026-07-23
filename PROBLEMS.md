@@ -5,10 +5,10 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 
 ## 現状サマリ (2026-07-23, Phase 39 時点)
 
-- test262: **TW 58.8% / VM 59.5% / JIT 59.3%** (12,459 件実行、noStrict 等 2,114 件スキップ)
+- test262: **TW 58.8% / VM 59.7% / JIT ~59.5%** (12,459 件実行、noStrict 等 2,114 件スキップ)
   — Phase 39 のハーネス拡充で 3 モードとも約 +5pt (TW 53.8 / VM 54.5 / JIT 54.3 から)、
   class 継承実装でさらに +0.1pt
-- 内部テスト 1,198 全パス / 差分ファザ **0 / 100,000** で収束維持
+- 内部テスト 1,210 全パス / 差分ファザ **0 / 100,000** で収束維持
 - ただし TW↔VM には test262 で **TW だけ失敗 / VM だけ失敗**の非対称が残る
   (ファザの generator が class/label 等を生成しないため未検出だった領域)
 
@@ -25,20 +25,21 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 | `class B extends A {}` | ✅ | ✅ **Phase 39 で解決** (ClassLink/CallSuper/GetSuperProp) |
 | `super()` / `super.m()` | ✅ 39 で修正 | ✅ **Phase 39 で解決** (TW の super.m は静的側参照の誤実装だった) |
 | Error 継承 (message 付与) | ✅ 39 で解決 | ✅ 39 で解決 |
-| `f(...args)` spread 呼び出し | ✅ | ❌ ExecStmt fallback 未実装 |
-| `{...obj}` object spread | ✅ | ❌ **黙って null を返す** (エラーですらない) |
+| `f(...args)` spread 呼び出し | ✅ | ✅ **Phase 39 で解決** (CallSpread/CallMethodSpread/ConstructSpread) |
+| `{...obj}` object spread | ✅ ({..."ab"} は 39 で修正) | ✅ **Phase 39 で解決** (CopyDataProps) |
 | class computed key `[String(fn)]` | ❌ キー正規化ブレ | ✅ |
 
-- **class 継承 (extends/super/static 継承/フィールド順/Error 継承) は Phase 39 で
-  3 エンジン一致に**。ただし class 系 test262 の主残件は継承ではなく
-  private `#` の一部ポジション (296 件) / **async メソッドのパース不可** (121 件) /
-  属性モデル (§2) だったため、スコア寄与は小さい (機能としては本質)
-- object spread の「黙って null」は静かに間違う系で特に危険
+- **class 継承 (extends/super/static 継承/フィールド順/Error 継承) と
+  spread (呼び出し/object) は Phase 39 で 3 エンジン一致に**。ただし class 系
+  test262 の主残件は継承ではなく private `#` の一部ポジション (296 件) /
+  **async メソッドのパース不可** (121 件) / 属性モデル (§2)
 - TW の class computed key は「メソッド定義時」と「アクセス時」のキー文字列化が
   不一致 (`c[String(() => {})]()` が TW だけ失敗)。host 値と JSString/JSObject が
   混在する TW アーキテクチャの境界変換ブレが原因
 - super の残課題: `super.x = v` (代入) 未対応 / getter・setter 経由の super 解決は
   非対応 (メソッドと素の読みのみ)
+- spread の残課題: spread 呼び出しは callFunction 同期実行のため JIT profiling の
+  対象外 (頻度が低いので許容)。generator/async callee への spread は未検証
 
 ## 2. 両エンジン共通の欠落: オブジェクトモデル
 
@@ -113,7 +114,7 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 |---|---|---|
 | 1 | ~~VM に class 継承 (extends/super) を実装~~ | **Phase 39 で完了** (3 エンジン一致)。class 系の残件は private #/async メソッドパース/属性モデル |
 | 2 | プロパティ属性モデル + accessor descriptor | 220+268 件 + onlyStrict TypeError 系。verifyProperty 本実装とセットで |
-| 3 | spread call / object spread の VM 実装 | 「黙って null」の根絶 |
+| 3 | ~~spread call / object spread の VM 実装~~ | **Phase 39 で完了** (「黙って null」根絶) |
 | 4 | ~~test262 ハーネス注入の充実~~ | **Phase 39 で完了** (3 モード +5pt) |
 | 5 | パーサ strict early error (eval/arguments) | onlyStrict 14 件 + SyntaxError 系 55 件 |
 | 6 | fuzzer generator に class/label/spread 追加 | 1〜3 の修正を差分ファザで守れる検出網 |
