@@ -347,6 +347,23 @@ describe("Phase 39 — spread 呼び出しと object spread", () => {
     agree(`var log = ""; function o() { log += "o"; return { m() { return log; } }; } function a() { log += "a"; return 1; } o().m(...[a()]);`, "oa"));
 });
 
+describe("Phase 39 — class computed key の文字列化一貫性", () => {
+  // jsmini は関数のソーステキストを保持しないため String(fn) は仕様の
+  // ソーステキストではなく "[object Object]" 近似。重要なのは
+  // 「キー定義時とアクセス時の正規化が一致する」こと (TW は host ラッパーの
+  // ソースを漏らして不一致だった)
+  it("class computed key を String(fn) で引ける", () =>
+    agree(`class C { [() => {}]() { return 1; } } new C()[String(() => {})]();`, 1));
+  it("static computed key も同様", () =>
+    agree(`class C { static [() => {}]() { return 2; } } C[String(() => {})]();`, 2));
+  it("object リテラルの computed fn key", () =>
+    agree(`var o = { [() => {}]: 7 }; o[String(() => {})];`, 7));
+  it("fn 値キーの直接アクセス (回帰)", () =>
+    agree(`class C { [() => {}]() { return 1; } } new C()[() => {}]();`, 1));
+  it("コールバック系 host メソッドは壊れない (回帰)", () =>
+    agree(`[3, 1, 2].map(function (x) { return x * 2; }).join(",");`, "6,2,4"));
+});
+
 describe("Phase 38 — ラベル付き break/continue と for-in の loop エントリ", () => {
   // VM はラベル付き非ループ文への break を解決できず、未パッチ Jump 0 が
   // プログラム先頭へ飛んで無限ループしていた (test262 JIT ランがハングした原因)

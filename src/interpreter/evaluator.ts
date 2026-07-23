@@ -180,6 +180,11 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   const twStrConv = (v: unknown): string => {
     if (isJSString(v)) return jsStringToString(v);
     if (Array.isArray(v)) return arrayToPrimitiveString(v);
+    // JSFunction の host ラッパー (native 呼び出し時に自動ラップされたもの):
+    // ラッパー自身のソーステキストではなく、プロパティキー正規化
+    // (classKeyName/resolveMemberKey) と同じ "[object Object]" に揃える。
+    // これが揃わないと class computed key `[fn]` を `String(fn)` で引けない
+    if (typeof v === "function" && (v as any).__wrappedJSFunction) return "[object Object]";
     if (v !== null && typeof v === "object") {
       const p = toPrimitive(v, "string");
       if (isJSString(p)) return jsStringToString(p);
@@ -1910,11 +1915,16 @@ function* evalCallExpression(
 
   // ネイティブ関数 (console.log 等)
   if (typeof fn === "function") {
-    // コールバック系メソッド: jsmini 関数を呼べるようにラップ
+    // コールバック系メソッド: jsmini 関数を呼べるようにラップ。
+    // ラッパーには元の JSFunction をタグ付けする — String(fn) 等の文字列化が
+    // ラッパー自身のソーステキストを漏らさないように (twStrConv が参照)
     const wrappedArgs = args.some(a => isJSFunction(a))
-      ? args.map(a =>
-          isJSFunction(a) ? (...nativeArgs: unknown[]) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env)) : a
-        )
+      ? args.map(a => {
+          if (!isJSFunction(a)) return a;
+          const w = (...nativeArgs: unknown[]) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env));
+          (w as any).__wrappedJSFunction = a;
+          return w;
+        })
       : args;
     if (thisValue !== undefined) {
       return (fn as Function).apply(thisValue, wrappedArgs);
