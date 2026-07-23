@@ -3,11 +3,12 @@
 jsmini の「できていないこと」の台帳。正しさの基準は **node (strict mode)**。
 前半は現状の欠落の全体地図 (2026-07-23 調査)、後半は差分ファザの収束履歴と教訓。
 
-## 現状サマリ (2026-07-23, Phase 38 時点)
+## 現状サマリ (2026-07-23, Phase 39 時点)
 
-- test262: **TW 53.8% / VM 54.5% / JIT 54.3%** (12,459 件実行、noStrict 等 2,114 件スキップ)
-- 内部テスト 1,176 全パス / 差分ファザ **0 / 100,000** で収束維持
-- ただし TW↔VM には test262 で **TW だけ失敗 755 件 / VM だけ失敗 672 件**の非対称が残る
+- test262: **TW 58.7% / VM 59.4% / JIT 59.2%** (12,459 件実行、noStrict 等 2,114 件スキップ)
+  — Phase 39 のハーネス拡充で 3 モードとも約 +5pt (TW 53.8 / VM 54.5 / JIT 54.3 から)
+- 内部テスト 1,185 全パス / 差分ファザ **0 / 100,000** で収束維持
+- ただし TW↔VM には test262 で **TW だけ失敗 / VM だけ失敗**の非対称が残る
   (ファザの generator が class/label 等を生成しないため未検出だった領域)
 
 ---
@@ -77,9 +78,21 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 - async テストの実行方式 (`$DONE`) 未対応 → **1,629 件スキップ**
   (async/await 自体は JSPI 含め動くのにカウント外)
 - module 未対応 (9 件スキップ)
-- **test262 ハーネス未注入**: `buildString` / `testExtendedCharacterClass` /
-  `isConstructor` / `$MAX_ITERATIONS` が無く、`verifyProperty` は空実装
-  → **~600 件は機能が実装済みでも落ちる** (最もコスパの良い改善)
+- **test262 ハーネス**: Phase 39 でほぼ解消 (Test262Error 本物化 / SameValue /
+  regExpUtils + native buildString / isConstructor 近似 / $MAX_ITERATIONS)。
+  残り: `verifyProperty` は属性モデル (§2) 待ちで空実装のまま、`$262` (createRealm
+  等 20 件) は未対応。isConstructor は Reflect.construct 不在のため new 近似で
+  本家と結果が異なるケースあり
+
+## 5b. Phase 39 のハーネス作業で判明した新規エンジン課題
+
+- **`e.constructor === Ctor` が両エンジンで false** — constructor プロパティの
+  追跡が無い (instanceof は動く)。test262 の `__split.constructor is expected to
+  equal Array` 系や assert.throws の第 2 判定がこれで落ちる
+- **TW: 文字列の for-of が不可** ("iterable is not iterable")。VM は動く
+- **TW: String.fromCharCode がサロゲートペアで長さ不正** (2 単位が length 4 になる)。
+  VM は正しい。TW の JSString 変換境界のバグ
+- **String.fromCodePoint が両エンジンに無い** (ハーネスは fromCharCode 手計算で回避)
 
 ## 6. 品質保証の穴 (差分ファザの検出網)
 
@@ -95,9 +108,10 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 | 1 | VM に class 継承 (extends/super) を実装 | class 1,611 件の大半 + VM-only 失敗 326 件 |
 | 2 | プロパティ属性モデル + accessor descriptor | 220+268 件 + onlyStrict TypeError 系。verifyProperty 本実装とセットで |
 | 3 | spread call / object spread の VM 実装 | 「黙って null」の根絶 |
-| 4 | test262 ハーネス注入の充実 | ~600 件を実装済み機能のまま回収、最小工数 |
+| 4 | ~~test262 ハーネス注入の充実~~ | **Phase 39 で完了** (3 モード +5pt) |
 | 5 | パーサ strict early error (eval/arguments) | onlyStrict 14 件 + SyntaxError 系 55 件 |
 | 6 | fuzzer generator に class/label/spread 追加 | 1〜3 の修正を差分ファザで守れる検出網 |
+| 7 | constructor 追跡 + TW 文字列 for-of / fromCharCode (§5b) | assert.throws 第 2 判定系 + RegExp exec 系の一部 |
 
 ---
 
