@@ -234,7 +234,10 @@ function runTest(filePath: string): TestResult {
 
   // 無限ループ防止: ステップ数上限
   let steps = 0;
-  const opts = useVM
+  // VM/JIT は maxSteps、TW は onStep カウンタで無限ループを止める。
+  // 以前は --jit が TW 用の onStep (vmEvaluate は無視する) を受け取っており、
+  // ステップ上限なし → 無限ループするテストでランナー全体がハングしていた
+  const opts = useVM || useJIT
     ? { maxSteps: 100_000 }
     : { onStep: () => { if (++steps > 100_000) throw new Error("timeout: exceeded 100k steps"); } };
 
