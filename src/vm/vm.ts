@@ -1816,6 +1816,102 @@ export class VM {
           break;
         }
 
+        // spread 呼び出し (Phase 39): 引数配列 + callFunction による同期実行。
+        // Call/CallMethod のホットパス (JIT profiling 等) は通らないが、
+        // spread 呼び出しは頻度が低いので許容
+        case "CallSpread": {
+          const callee = this.pop();
+          const arr = this.pop();
+          const args = Array.isArray(arr) ? arr : [];
+          try {
+            const result = this.callFunction(callee, undefined, args);
+            if (result === THROWN_SENTINEL) continue;
+            this.push(result);
+          } catch (e) {
+            if (!this.unwindToHandler(e, this._runBaseFrameCount)) throw e;
+          }
+          break;
+        }
+        case "CallMethodSpread": {
+          const method = this.pop();
+          const obj = this.pop();
+          const arr = this.pop();
+          const args = Array.isArray(arr) ? arr : [];
+          try {
+            const result = this.callFunction(method, obj, args);
+            if (result === THROWN_SENTINEL) continue;
+            this.push(result);
+          } catch (e) {
+            if (!this.unwindToHandler(e, this._runBaseFrameCount)) throw e;
+          }
+          break;
+        }
+        case "ConstructSpread": {
+          const ctor = this.pop() as any;
+          const arr = this.pop();
+          const args = Array.isArray(arr) ? arr : [];
+          try {
+            if (ctor && typeof ctor === "object" && ctor.__nativeConstructor && !ctor.bytecode) {
+              // native コンストラクタ (Error)
+              this.push(ctor.name === "Error" ? { message: args[0] ?? "" } : (() => { throw new Error(`Unknown native constructor: ${ctor.name}`); })());
+              break;
+            }
+            if (typeof ctor === "function") {
+              this.push(new (ctor as new (...a: unknown[]) => object)(...args));
+              break;
+            }
+            // BytecodeFunction / closure: Construct と同じ流儀で newObj を作り同期実行
+            const target = (ctor && typeof ctor === "object" && "__closure" in ctor) ? (ctor as any).func : ctor;
+            if (!target || typeof target !== "object" || !("bytecode" in target)) {
+              throw new TypeError("Not a constructor");
+            }
+            if (!target.prototype) {
+              const proto = this.heap.allocate(createJSObject());
+              jsObjSet(proto, "__proto__", this.objectPrototype);
+              target.prototype = proto;
+            }
+            const newObj = this.heap.allocate(createJSObject());
+            this.maybeGC();
+            jsObjSet(newObj, "__proto__", target.prototype);
+            if (target.__instanceFields) {
+              for (const field of target.__instanceFields as any[]) {
+                const fname = field.key?.name as string | undefined;
+                if (!fname) continue;
+                let value: unknown = undefined;
+                if (field.value && field.value.type === "Literal") value = field.value.value;
+                jsObjSet(newObj, fname, value);
+              }
+            }
+            const result = this.callFunction(ctor, newObj, args);
+            if (result === THROWN_SENTINEL) continue;
+            this.push(typeof result === "object" && result !== null ? result : newObj);
+          } catch (e) {
+            if (!this.unwindToHandler(e, this._runBaseFrameCount)) throw e;
+          }
+          break;
+        }
+        case "CopyDataProps": {
+          // {...src}: src の own enumerable props を target (peek) にコピー。
+          // null/undefined/プリミティブは no-op (spec 準拠)
+          const src = this.pop();
+          const target = this.peek();
+          if (src === null || src === undefined || !isJSObject(target)) break;
+          if (isJSString(src)) {
+            const s = jsStringToString(src);
+            for (let i = 0; i < s.length; i++) jsObjSet(target, String(i), internString(s[i]));
+          } else if (Array.isArray(src)) {
+            for (let i = 0; i < src.length; i++) jsObjSet(target, String(i), src[i]);
+          } else if (isJSObject(src)) {
+            for (const [k] of getHiddenClass(src).properties) {
+              if (k === "__proto__") continue;
+              jsObjSet(target, k, jsObjGet(src, k));
+            }
+          } else if (typeof src === "object") {
+            for (const k of Object.keys(src)) jsObjSet(target, k, (src as Record<string, unknown>)[k]);
+          }
+          break;
+        }
+
         // Return
         case "Return": {
           let returnValue = this.pop();

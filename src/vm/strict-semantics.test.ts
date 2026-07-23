@@ -327,6 +327,26 @@ describe("Phase 39 — class 継承 (extends / super)", () => {
     agree(`class E extends Error { constructor(m){ super(m); this.code = 9; } } var e = new E("bad"); e.message + e.code;`, "bad9"));
 });
 
+describe("Phase 39 — spread 呼び出しと object spread", () => {
+  it("spread 呼び出し f(...args)", () => agree(`function f(a, b) { return a + b; } f(...[1, 2]);`, 3));
+  it("固定引数と spread の混在", () => agree(`function f(a, b, c) { return a + b + c; } f(1, ...[2, 3]);`, 6));
+  it("spread → rest param", () => agree(`function f(...xs) { return xs.length; } f(...[1, 2, 3], 4);`, 4));
+  it("メソッドの spread 呼び出し (this 維持)", () =>
+    agree(`var o = { v: 10, m(a) { return this.v + a; } }; o.m(...[5]);`, 15));
+  it("host メソッドへの spread (Math.max)", () => agree(`Math.max(...[3, 9, 4]);`, 9));
+  it("new C(...args)", () =>
+    agree(`class P { constructor(x, y) { this.s = x + y; } } new P(...[5, 6]).s;`, 11));
+  it("object spread (従来 VM は黙って空にしていた)", () =>
+    agree(`var a = { x: 1 }; var b = { ...a, y: 2 }; b.x + b.y;`, 3));
+  it("後書きが上書き / 前書きは上書きされる", () =>
+    agree(`var a = { y: 9 }; var b = { y: 2, ...a }; var c = { ...a, y: 2 }; "" + b.y + c.y;`, "92"));
+  it("配列の object spread ({...[7,8]})", () => agree(`var b = { ...[7, 8] }; b[0] + b[1];`, 15));
+  it("文字列の object spread ({...'ab'})", () => agree(`var b = { ..."ab" }; b[0] + b[1];`, "ab"));
+  it("null/undefined の spread は no-op", () => agree(`var b = { ...null, k: 1 }; b.k;`, 1));
+  it("評価順: メソッド obj が引数より先", () =>
+    agree(`var log = ""; function o() { log += "o"; return { m() { return log; } }; } function a() { log += "a"; return 1; } o().m(...[a()]);`, "oa"));
+});
+
 describe("Phase 38 — ラベル付き break/continue と for-in の loop エントリ", () => {
   // VM はラベル付き非ループ文への break を解決できず、未パッチ Jump 0 が
   // プログラム先頭へ飛んで無限ループしていた (test262 JIT ランがハングした原因)

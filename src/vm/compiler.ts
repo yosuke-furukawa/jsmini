@@ -383,6 +383,21 @@ class BytecodeCompiler {
     }
   }
 
+  // spread を含む引数リストを実行時配列としてスタックに積む
+  // (配列リテラルの SpreadElement と同じ CreateArray/ArrayPush/ArraySpread を再利用)
+  private emitArgsArray(args: any[]): void {
+    this.emit("CreateArray", 0);
+    for (const arg of args) {
+      if (arg.type === "SpreadElement") {
+        this.compileExpression(arg.argument);
+        this.emit("ArraySpread");
+      } else {
+        this.compileExpression(arg);
+        this.emit("ArrayPush");
+      }
+    }
+  }
+
   // 派生クラスのデフォルト constructor: constructor(...args) { super(...args); }
   // rest param で全引数を束ねて CallSuperArray で親 ctor へ転送する
   private compileDefaultDerivedCtor(): void {
@@ -1331,6 +1346,13 @@ class BytecodeCompiler {
         break;
 
       case "NewExpression": {
+        if (expr.arguments.some((a: any) => a.type === "SpreadElement")) {
+          // new C(...args): 引数を配列に集約して ConstructSpread
+          this.emitArgsArray(expr.arguments);
+          this.compileExpression(expr.callee);
+          this.emit("ConstructSpread");
+          break;
+        }
         for (const arg of expr.arguments) {
           this.compileExpression(arg as Expression);
         }
@@ -1423,7 +1445,12 @@ class BytecodeCompiler {
         this.emit("CreateObject");
         for (const prop of expr.properties) {
           if (prop.type === "SpreadElement") {
-            // TODO: spread
+            // {...src}: src の own enumerable props をコピー
+            // (従来は TODO で黙って捨てており {...a} が空オブジェクトになっていた)
+            this.emit("Dup");
+            this.compileExpression((prop as any).argument);
+            this.emit("CopyDataProps");
+            this.emit("Pop");
             continue;
           }
           // stack: [obj] → Dup → [obj, obj] → value → [obj, obj, value]
@@ -1487,6 +1514,38 @@ class BytecodeCompiler {
             this.compileExpression(arg as Expression);
           }
           this.emit("CallSuper", expr.arguments.length);
+          break;
+        }
+        // spread 呼び出し f(...args) / obj.m(...args): 引数を配列に集約して
+        // CallSpread / CallMethodSpread (callFunction による同期実行) に落とす
+        if (expr.arguments.some((a: any) => a.type === "SpreadElement")) {
+          if (expr.callee.type === "MemberExpression") {
+            // 評価順 (obj → 引数) を守るため obj とメソッドを temp に確定してから
+            // 引数配列を作る (Phase 36-6 の複雑 obj パスと同じ方式)
+            const tmpObj = this.localCount++;
+            const tmpMethod = this.localCount++;
+            this.compileExpression(expr.callee.object);
+            this.emit("StaLocal", tmpObj); this.emit("Pop");
+            this.emit("LdaLocal", tmpObj);
+            if (expr.callee.computed) {
+              this.compileExpression(expr.callee.property);
+              this.emit("GetPropertyComputed");
+            } else {
+              this.emitWithIC("GetProperty", this.addConstant(expr.callee.property.name));
+            }
+            this.emit("StaLocal", tmpMethod); this.emit("Pop");
+            this.emitArgsArray(expr.arguments);
+            this.emit("LdaLocal", tmpObj);
+            this.emit("LdaLocal", tmpMethod);
+            this.emit("CallMethodSpread");
+          } else {
+            if (expr.callee.type === "Identifier" && this.resolvesToGlobal(expr.callee.name)) {
+              this.emit("CheckGlobal", this.addConstant(expr.callee.name));
+            }
+            this.emitArgsArray(expr.arguments);
+            this.compileExpression(expr.callee);
+            this.emit("CallSpread");
+          }
           break;
         }
         // super.m(...) — メソッドは親 prototype (__homeProto) から解決し、

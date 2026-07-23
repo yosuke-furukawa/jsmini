@@ -1245,7 +1245,14 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       for (const prop of expr.properties) {
         if (prop.type === "SpreadElement") {
           const source = (yield* evalExpression(prop.argument, env)) as Record<string, unknown>;
-          if (source) Object.assign(obj, source);
+          if (isJSString(source)) {
+            // {..."ab"} = {0:"a", 1:"b"}。JSString は Object.assign だと内部
+            // フィールドが漏れるので 1 文字ずつインデックスキーで展開する
+            const s = jsStringToString(source);
+            for (let i = 0; i < s.length; i++) (obj as Record<string, unknown>)[String(i)] = createSeqString(s[i]);
+          } else if (source) {
+            Object.assign(obj, source);
+          }
         } else {
           const rawKey = prop.computed ? yield* evalExpression(prop.key, env) : undefined;
           const key = prop.computed ? (isJSSymbol(rawKey) ? rawKey.key : isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey)) : (prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value));

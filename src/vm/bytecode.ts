@@ -106,6 +106,12 @@ export type Opcode =
   | "CallSuperArray"  // pop 配列を引数列として super(...) (派生クラスのデフォルト ctor の引数転送用)
   | "GetSuperProp"    // GetSuperProp <nameIdx> — super.name の解決 (frame.func.__homeProto から読む)
 
+  // spread 呼び出し (Phase 39)。引数はコンパイル時に配列へ集約し callFunction で同期実行
+  | "CallSpread"        // stack: [argsArray, callee] — f(...args)
+  | "CallMethodSpread"  // stack: [argsArray, obj, method] — obj.m(...args)
+  | "ConstructSpread"   // stack: [argsArray, ctor] — new C(...args)
+  | "CopyDataProps"     // pop source, peek target — own enumerable props を target にコピー ({...obj})
+
   // 制御フロー
   | "Jump"            // Jump <offset> — 無条件ジャンプ (pc = operand)
   | "JumpIfFalse"     // JumpIfFalse <offset> — falsy なら pc = operand (pop する)
