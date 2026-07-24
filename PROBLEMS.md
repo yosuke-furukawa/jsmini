@@ -5,10 +5,10 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 
 ## 現状サマリ (2026-07-23, Phase 39 時点)
 
-- test262: **TW 59.2% / VM 59.8% / JIT ~59.6%** (12,459 件実行、noStrict 等 2,114 件スキップ)
+- test262: **TW 59.6% / VM 59.3% / JIT ~59.2%** (verifyProperty 本実装で基準が正直化 — 旧数値と直接比較不可) (12,459 件実行、noStrict 等 2,114 件スキップ)
   — Phase 39 のハーネス拡充で 3 モードとも約 +5pt (TW 53.8 / VM 54.5 / JIT 54.3 から)、
   class 継承実装でさらに +0.1pt
-- 内部テスト 1,223 全パス / 差分ファザ **0 / 100,000** で収束維持
+- 内部テスト 1,242 全パス / 差分ファザ **0 / 100,000** で収束維持
 - ただし TW↔VM には test262 で **TW だけ失敗 / VM だけ失敗**の非対称が残る
   (ファザの generator が class/label 等を生成しないため未検出だった領域)
 
@@ -49,13 +49,18 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 
 ## 2. 両エンジン共通の欠落: オブジェクトモデル
 
-- **プロパティ属性 (writable/enumerable/configurable) が飾り**:
-  `Object.freeze` / `Object.defineProperty` は関数として存在するが実効性がなく、
-  `writable: false` でも普通に書けてしまう (strict なら TypeError のはず)。
-  test262 "Expected a TypeError" **220 件**の根
-- **accessor descriptor 未対応**: `defineProperty(o, "x", { get })` が
-  "accessor descriptors not yet supported" → **268 件**
-  (オブジェクトリテラルの `get x(){}` は動く)
+- ~~プロパティ属性が飾り~~ / ~~accessor descriptor 未対応~~ → **Phase 39 で解決**。
+  VM は JSObject に sparse な __attrs__ (デフォルト外のみ記録、ホットパスは
+  1 チェック素通り) + OrdinarySet 近似の checked store。TW は host object なので
+  host defineProperty/freeze に委譲 (JSFunction get/set はラップ + identity 復元)。
+  freeze/seal/defineProperty(get/set)/gOPD/再定義制限/enumerable フィルタ/
+  class メソッド non-enumerable/fn.name・length 記述子まで実装。
+  verifyProperty ハーネスも本実装化 (空実装の見かけパスが剥がれ、基準が正直化)
+- 残り: 属性系の細部 — 名前推論の一部 (`name.value` 不一致 ~28 件)、
+  computed key メソッドの属性、Symbol キーのプロパティ属性、
+  BytecodeFunction 内部フィールド (paramCount 等) が列挙に漏れる問題。
+  JIT の StoreProperty (wasm write-back) は attrs チェックを通らない
+  (frozen オブジェクトが hot 関数内で書かれるケース — 実害は限定的)
 - **`.constructor` の host 境界差**: `[1,2].constructor` が TW=host Array /
   VM=jsmini Object (null prototype)。収束には両エンジンで独自 Array/Number
   コンストラクタ + prototype チェーンの一貫モデル化が必要 (大規模)。
@@ -119,7 +124,7 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 | # | 施策 | 期待効果 |
 |---|---|---|
 | 1 | ~~VM に class 継承 (extends/super) を実装~~ | **Phase 39 で完了** (3 エンジン一致)。class 系の残件は private #/async メソッドパース/属性モデル |
-| 2 | プロパティ属性モデル + accessor descriptor | 220+268 件 + onlyStrict TypeError 系。verifyProperty 本実装とセットで |
+| 2 | ~~プロパティ属性モデル + accessor descriptor~~ | **Phase 39 で完了** (accessor 271 件解消、verifyProperty 本実装で基準正直化) |
 | 3 | ~~spread call / object spread の VM 実装~~ | **Phase 39 で完了** (「黙って null」根絶) |
 | 4 | ~~test262 ハーネス注入の充実~~ | **Phase 39 で完了** (3 モード +5pt) |
 | 5 | パーサ strict early error (eval/arguments) | onlyStrict 14 件 + SyntaxError 系 55 件 |
