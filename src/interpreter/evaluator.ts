@@ -386,7 +386,23 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   };
   twObjectWrapper.assign = Object.assign;
   twObjectWrapper.create = Object.create;
-  twObjectWrapper.freeze = (obj: unknown) => obj;
+  twObjectWrapper.freeze = (obj: unknown) => {
+    // TW のオブジェクトは host object なので host freeze で属性が実効する
+    // (evaluator の代入は strict モードの TS コードなので違反は TypeError)
+    if (obj && typeof obj === "object") Object.freeze(obj);
+    return obj;
+  };
+  twObjectWrapper.seal = (obj: unknown) => {
+    if (obj && typeof obj === "object") Object.seal(obj);
+    return obj;
+  };
+  twObjectWrapper.preventExtensions = (obj: unknown) => {
+    if (obj && typeof obj === "object") Object.preventExtensions(obj);
+    return obj;
+  };
+  twObjectWrapper.isFrozen = (obj: unknown) => (obj && typeof obj === "object") ? Object.isFrozen(obj) : true;
+  twObjectWrapper.isSealed = (obj: unknown) => (obj && typeof obj === "object") ? Object.isSealed(obj) : true;
+  twObjectWrapper.isExtensible = (obj: unknown) => (obj && typeof obj === "object") ? Object.isExtensible(obj) : false;
   const twToKey = (key: unknown): string | symbol => {
     if (isJSString(key)) return jsStringToString(key);
     return typeof key === "symbol" ? key : String(key);
@@ -396,14 +412,41 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
       throw new TypeError("Object.defineProperty called on non-object");
     }
     const k = twToKey(key);
-    if (desc && typeof desc === "object" && ("get" in desc || "set" in desc)) {
-      throw new TypeError("accessor descriptors not yet supported");
+    if (!desc || typeof desc !== "object") throw new TypeError("Property description must be an object");
+    // host defineProperty に「指定されたフィールドだけ」を渡す — デフォルト
+    // (新規は false×3) と再定義検証 (configurable:false 等) は host が spec 通り
+    // 実施する。get/set が JSFunction なら host callable に包む
+    const hostDesc: PropertyDescriptor = {};
+    if ("value" in desc) hostDesc.value = desc.value;
+    if ("writable" in desc) hostDesc.writable = !!desc.writable;
+    if ("enumerable" in desc) hostDesc.enumerable = !!desc.enumerable;
+    if ("configurable" in desc) hostDesc.configurable = !!desc.configurable;
+    // 共有ビルトイン prototype への定義は省略時 writable/configurable を true に
+    // (jsmini は host prototype を全 evaluate 間で共有するため。VM 側と同方針)
+    const twSharedProtos: unknown[] = [Object.prototype, Array.prototype, String.prototype, Number.prototype, Boolean.prototype, Function.prototype, RegExp.prototype];
+    if (twSharedProtos.includes(obj)) {
+      if (!("configurable" in desc)) hostDesc.configurable = true;
+      if (!("writable" in desc) && !("get" in desc) && !("set" in desc)) hostDesc.writable = true;
     }
-    if (desc && typeof desc === "object" && "value" in desc) {
-      // enumerable は JS デフォルト (false) — 素の代入だと for-in を汚染する
-      // (Object.prototype への定義で顕在化)。writable/configurable は true
-      Object.defineProperty(obj, k, { value: desc.value, writable: true, configurable: true });
+    if ("get" in desc) {
+      const g = desc.get;
+      if (g === undefined || typeof g === "function") hostDesc.get = g;
+      else {
+        const w = function(this: unknown) { return callJSFunctionSync(g, this, []); };
+        (w as any).__wrappedJSFunction = g; // gOPD で元の JSFunction を返すためのタグ
+        hostDesc.get = w;
+      }
     }
+    if ("set" in desc) {
+      const st = desc.set;
+      if (st === undefined || typeof st === "function") hostDesc.set = st;
+      else {
+        const w = function(this: unknown, v: unknown) { callJSFunctionSync(st, this, [v]); };
+        (w as any).__wrappedJSFunction = st;
+        hostDesc.set = w;
+      }
+    }
+    Object.defineProperty(obj, k, hostDesc);
     return obj;
   };
   twObjectWrapper.defineProperties = (obj: unknown, descs: any) => {
@@ -415,15 +458,45 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     return obj;
   };
   twObjectWrapper.getOwnPropertyDescriptor = (obj: unknown, key: unknown) => {
+    // native 呼び出し時に JSFunction は host ラッパーに包まれて届く → 元へ復元
+    if (typeof obj === "function" && (obj as any).__wrappedJSFunction) {
+      obj = (obj as any).__wrappedJSFunction;
+    }
+    // host 関数 (ビルトイン) の name/length も spec 属性 + intern 文字列で合成
+    if (typeof obj === "function") {
+      const k0 = twToKey(key);
+      if (k0 === "name" || k0 === "length") {
+        return {
+          value: k0 === "name" ? internString((obj as Function).name ?? "") : (obj as Function).length,
+          writable: false, enumerable: false, configurable: true,
+        };
+      }
+      return Object.getOwnPropertyDescriptor(obj, k0);
+    }
     if (obj === null || typeof obj !== "object") return undefined;
     const k = twToKey(key);
-    if (!Object.prototype.hasOwnProperty.call(obj, k)) return undefined;
-    return {
-      value: (obj as any)[k],
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    };
+    // JSFunction の name/length は spec 属性で合成 (writable:false,
+    // enumerable:false, configurable:true)。fn.name への後書き (名前推論) が
+    // あるためオブジェクト自体は変更しない
+    if (isJSFunction(obj) && (k === "name" || k === "length")) {
+      let fnLen = 0;
+      for (const prm of ((obj as any).params ?? []) as any[]) {
+        if (prm.type === "AssignmentPattern" || prm.type === "RestElement") break;
+        fnLen++;
+      }
+      return {
+        value: k === "name" ? internString((obj as any).name ?? "") : fnLen,
+        writable: false, enumerable: false, configurable: true,
+      };
+    }
+    // host の descriptor をそのまま返す (属性は host が正しく追跡している)。
+    // accessor の get/set がラップ済み JSFunction なら元へ復元 (identity 維持)
+    const hd = Object.getOwnPropertyDescriptor(obj, k);
+    if (hd) {
+      if (hd.get && (hd.get as any).__wrappedJSFunction) (hd as any).get = (hd.get as any).__wrappedJSFunction;
+      if (hd.set && (hd.set as any).__wrappedJSFunction) (hd as any).set = (hd.set as any).__wrappedJSFunction;
+    }
+    return hd;
   };
   twObjectWrapper.getPrototypeOf = (obj: unknown) => {
     if (obj === null || typeof obj !== "object") return null;
@@ -756,7 +829,8 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
       };
       if ((member.value as any).generator) (fn as any).isGenerator = true;
       if ((member.value as any).async) (fn as any).isAsync = true;
-      (target as any)[name] = fn;
+      // class メソッドは spec 準拠で non-enumerable
+      Object.defineProperty(target as object, name, { value: fn, writable: true, enumerable: false, configurable: true });
     } else if (member.kind === "get" || member.kind === "set") {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,

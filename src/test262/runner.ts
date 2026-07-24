@@ -151,10 +151,31 @@ assert.compareArray = function(actual, expected, message) {
   throw new Test262Error(message + " ([" + actual + "] vs [" + expected + "])");
 };
 
-// --- propertyHelper (最小実装) ---
-// verifyProperty は属性モデル (writable/enumerable/configurable の enforcement)
-// が engine に無いため空実装のまま (PROBLEMS.md §2 とセットで本実装予定)
-function verifyProperty(obj, name, desc) {
+// --- propertyHelper ---
+// Phase 39 の属性モデル実装に伴い descriptor 比較の本実装
+// (本家 propertyHelper.js の descriptor 検証部分。restore オプションと
+//  挙動ベースの二重検証は省略)
+function verifyProperty(obj, name, desc, options) {
+  var d = Object.getOwnPropertyDescriptor(obj, name);
+  if (desc === undefined) {
+    if (d !== undefined) {
+      throw new Test262Error("verifyProperty: expected " + name + " to be absent");
+    }
+    return true;
+  }
+  if (d === undefined) {
+    throw new Test262Error("verifyProperty: property " + name + " not found");
+  }
+  var checks = ["value", "get", "set", "writable", "enumerable", "configurable"];
+  for (var i = 0; i < checks.length; i++) {
+    var field = checks[i];
+    if (Object.prototype.hasOwnProperty.call(desc, field)) {
+      if (!assert._isSameValue(d[field], desc[field])) {
+        throw new Test262Error("verifyProperty: " + name + "." + field + " should be " + desc[field] + " but got " + d[field]);
+      }
+    }
+  }
+  return true;
 }
 
 function verifyWritable(obj, name, verifyProp, value) {

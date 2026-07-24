@@ -111,6 +111,8 @@ export type Opcode =
   | "CallMethodSpread"  // stack: [argsArray, obj, method] — obj.m(...args)
   | "ConstructSpread"   // stack: [argsArray, ctor] — new C(...args)
   | "CopyDataProps"     // pop source, peek target — own enumerable props を target にコピー ({...obj})
+  | "DefineMethodProp"  // DefineMethodProp <nameIdx> — pop value, peek target。class メソッド定義
+                        // (spec 準拠の non-enumerable, writable, configurable)
 
   // 制御フロー
   | "Jump"            // Jump <offset> — 無条件ジャンプ (pc = operand)
@@ -154,6 +156,7 @@ export type UpvalueInfo = {
 
 export type BytecodeFunction = {
   name: string;
+  length?: number;         // spec の fn.length (デフォルト/rest より前のパラメータ数)
   paramCount: number;
   localCount: number;
   hasRestParam?: boolean;  // 最後のパラメータが ...rest

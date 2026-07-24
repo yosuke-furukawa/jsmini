@@ -30,6 +30,7 @@ class BytecodeCompiler {
   private hasRestParam = false;
   private isGenerator = false;
   private isAsync = false;
+  private fnLength = 0; // spec の fn.length (デフォルト/rest より前のパラメータ数)
   private lexicalLocals = new Set<string>(); // let/const で宣言されたローカル変数名
   private constLocals = new Set<string>(); // const で宣言された変数名 (再代入を禁止するため)
   private blockDepth = 0; // BlockStatement のネスト深さ (ブロック内 function 宣言の判定用)
@@ -340,7 +341,8 @@ class BytecodeCompiler {
           if ((member.value as any).async) mc.isAsync = true;
           mc.compileFunctionBody(member.value.params, member.value.body.body);
           this.emit("LdaConst", this.addConstant(mc.finish(name!)));
-          this.emitWithIC("SetProperty", this.addConstant(name!));
+          // class メソッドは spec 準拠で non-enumerable (Object.keys/for-in に出ない)
+          this.emit("DefineMethodProp", this.addConstant(name!));
         }
         this.emit("Pop");
       } else if (member.kind === "get" || member.kind === "set") {
@@ -417,6 +419,7 @@ class BytecodeCompiler {
   finish(name: string): BytecodeFunction {
     return {
       name,
+      length: this.fnLength,
       paramCount: this.paramCount,
       localCount: this.localCount,
       hasRestParam: this.hasRestParam,
@@ -687,6 +690,13 @@ class BytecodeCompiler {
   compileFunctionBody(params: any[], body: Statement[], isArrow?: boolean): void {
     // パラメータをローカルスロットに登録
     this.paramCount = params.length;
+    // fn.length = 最初のデフォルト値/rest より前のパラメータ数 (spec)
+    let fnLen = 0;
+    for (const p of params) {
+      if (p.type === "AssignmentPattern" || p.type === "RestElement") break;
+      fnLen++;
+    }
+    this.fnLength = fnLen;
     const destructureParams: { slot: number; pattern: any }[] = [];
     const defaultParams: { slot: number; defaultExpr: any }[] = [];
     for (const param of params) {

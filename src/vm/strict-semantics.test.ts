@@ -400,6 +400,49 @@ describe("Phase 39 — async メソッドのパースと実行", () => {
     logsAgree(`var f = async x => { return x * 2; }; f(3).then(function (v) { console.log(v); });`, "6"));
 });
 
+describe("Phase 39 — プロパティ属性モデル (writable/enumerable/configurable)", () => {
+  it("freeze 後の書込は TypeError", () =>
+    allThrow(`var o = Object.freeze({ x: 1 }); o.x = 2;`, TypeError));
+  it("freeze 後の新規プロパティも TypeError", () =>
+    allThrow(`var o = Object.freeze({}); o.y = 1;`, TypeError));
+  it("writable:false への書込は TypeError", () =>
+    allThrow(`var o = {}; Object.defineProperty(o, "x", { value: 1, writable: false }); o.x = 2;`, TypeError));
+  it("configurable:false の削除は TypeError", () =>
+    allThrow(`var o = {}; Object.defineProperty(o, "x", { value: 1, configurable: false }); delete o.x;`, TypeError));
+  it("configurable:false の再定義は TypeError", () =>
+    allThrow(`var o = {}; Object.defineProperty(o, "x", { value: 1 }); Object.defineProperty(o, "x", { value: 2 });`, TypeError));
+  it("defineProperty のデフォルト属性は false", () =>
+    agree(`var o = {}; Object.defineProperty(o, "x", { value: 1 }); var d = Object.getOwnPropertyDescriptor(o, "x"); "" + d.writable + d.enumerable + d.configurable;`, "falsefalsefalse"));
+  it("enumerable:false は keys/for-in/spread に出ない", () =>
+    agree(`var o = { a: 1 }; Object.defineProperty(o, "h", { value: 2, enumerable: false }); var s = Object.keys(o).join(","); for (var k in o) s += "|" + k; s += "!" + Object.keys({ ...o }).join(","); s;`, "a|a!a"));
+  it("seal は書込可・追加不可", () =>
+    agree(`var o = Object.seal({ x: 1 }); o.x = 5; var r = ""; try { o.y = 1; } catch (e) { r = "TE"; } r + o.x;`, "TE5"));
+  it("isFrozen / isExtensible", () =>
+    agree(`var o = Object.freeze({ x: 1 }); (Object.isFrozen(o) ? 1 : 0) + (Object.isExtensible(o) ? 0 : 2);`, 3));
+});
+
+describe("Phase 39 — accessor descriptor (defineProperty get/set)", () => {
+  it("getter を defineProperty で定義", () =>
+    agree(`var o = {}; Object.defineProperty(o, "x", { get: function () { return 9; } }); o.x;`, 9));
+  it("setter を defineProperty で定義", () =>
+    agree(`var o = {}; var got = 0; Object.defineProperty(o, "x", { set: function (v) { got = v * 2; } }); o.x = 21; got;`, 42));
+  it("getter のみへの代入は TypeError", () =>
+    allThrow(`var o = {}; Object.defineProperty(o, "x", { get: function () { return 1; } }); o.x = 5;`, TypeError));
+  it("gOPD が get/set を返す", () =>
+    agree(`var g = function () { return 1; }; var o = {}; Object.defineProperty(o, "x", { get: g }); Object.getOwnPropertyDescriptor(o, "x").get === g ? 1 : 0;`, 1));
+});
+
+describe("Phase 39 — class メソッドと関数の属性", () => {
+  it("class メソッドは non-enumerable", () =>
+    agree(`class C { m() {} n() {} } Object.keys(C.prototype).length;`, 0));
+  it("class static メソッドも non-enumerable (記述子検査)", () =>
+    agree(`class C { static s() {} } Object.getOwnPropertyDescriptor(C, "s").enumerable ? 1 : 0;`, 0));
+  it("fn.length はデフォルト/rest 前まで", () =>
+    agree(`function f(a, b, c) {} function g(a, b = 1, c) {} function h(a, ...r) {} "" + f.length + g.length + h.length;`, "311"));
+  it("fn.name/length の記述子属性は spec 準拠", () =>
+    agree(`function foo(a) {} var dn = Object.getOwnPropertyDescriptor(foo, "name"); var dl = Object.getOwnPropertyDescriptor(foo, "length"); "" + dn.value + dn.writable + dn.enumerable + dn.configurable + "/" + dl.value;`, "foofalsefalsetrue/1"));
+});
+
 describe("Phase 38 — ラベル付き break/continue と for-in の loop エントリ", () => {
   // VM はラベル付き非ループ文への break を解決できず、未パッチ Jump 0 が
   // プログラム先頭へ飛んで無限ループしていた (test262 JIT ランがハングした原因)

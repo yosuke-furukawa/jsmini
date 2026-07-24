@@ -2,7 +2,7 @@ import type { BytecodeFunction, Instruction } from "./bytecode.js";
 import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
-import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots, isAccessorDescriptor, createAccessorDescriptor } from "./js-object.js";
+import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots, isAccessorDescriptor, createAccessorDescriptor, setPropertyChecked, STORE_OK, STORE_NO_SETTER, STORE_NOT_EXTENSIBLE, getPropAttrs, type JSObjectInternal } from "./js-object.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, toNumericOperand, type JSString } from "./js-string.js";
 import { isJSSymbol } from "./js-symbol.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
@@ -456,6 +456,24 @@ export class VM {
   }
 
   // getter/setter 関数を呼び出すヘルパー
+  // JSObject への属性チェック付き store (spec 9.1.9 OrdinarySet の近似)。
+  // writable:false / non-extensible / setter 無し accessor → strict の TypeError。
+  // 戻り値: true = 完了 (データ書込 or setter 呼び出し) / false = unwind 済み
+  storeJSObjectChecked(obj: JSObjectInternal, name: string, value: unknown): boolean {
+    const r = setPropertyChecked(obj, name, value);
+    if (r === STORE_OK) return true;
+    if (typeof r === "object") {
+      this.callGetterSetter(r.set, obj, value);
+      return true;
+    }
+    const err = new TypeError(
+      r === STORE_NOT_EXTENSIBLE ? `Cannot add property ${name}, object is not extensible`
+      : r === STORE_NO_SETTER ? `Cannot set property ${name} of object which has only a getter`
+      : `Cannot assign to read only property '${name}' of object`);
+    if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+    return false;
+  }
+
   callGetterSetter(fn: unknown, thisValue: unknown, arg: unknown): unknown {
     const isClosure = typeof fn === "object" && fn !== null && (fn as any).__closure;
     const func = isClosure ? (fn as any).func as BytecodeFunction : fn as BytecodeFunction;
@@ -1082,8 +1100,8 @@ export class VM {
           const obj = this.peek();
           const name = constants[instr.operand!] as string;
           if (isJSObject(obj)) {
-            jsObjSet(obj, name, value);
-            // IC 更新
+            // 属性チェック付き store (writable:false/frozen → TypeError, setter → 呼び出し)
+            if (!this.storeJSObjectChecked(obj, name, value)) break;
             const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
             if (ic) icUpdate(ic, getHiddenClass(obj), name);
           } else if (isJSString(obj) || isJSSymbol(obj)) {
@@ -1094,6 +1112,24 @@ export class VM {
             break;
           } else {
             (obj as Record<string, unknown>)[name] = value;
+          }
+          break;
+        }
+        case "DefineMethodProp": {
+          // class メソッド定義: non-enumerable / writable / configurable (spec 準拠)。
+          // object リテラルのメソッドは enumerable なので SetProperty のまま
+          const value = this.pop();
+          const target = this.peek();
+          const name = constants[instr.operand!] as string;
+          if (isJSObject(target)) {
+            jsObjSet(target, name, value);
+            const a = getPropAttrs(target, name);
+            if (!a || a.enumerable) {
+              // enumerable:false を記録 (writable/configurable は true)
+              (target.__attrs__ ?? (target.__attrs__ = new Map())).set(name, { writable: true, enumerable: false, configurable: true });
+            }
+          } else if (target && (typeof target === "object" || typeof target === "function")) {
+            Object.defineProperty(target, name, { value, writable: true, enumerable: false, configurable: true });
           }
           break;
         }
@@ -1142,14 +1178,9 @@ export class VM {
           const value = this.pop();
           const name = constants[instr.operand!] as string;
           if (isJSObject(obj)) {
-            const existing = jsObjGet(obj, name);
-            if (isAccessorDescriptor(existing) && existing.set) {
-              this.callGetterSetter(existing.set, obj, value);
-            } else {
-              jsObjSet(obj, name, value);
-              const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
-              if (ic) icUpdate(ic, getHiddenClass(obj), name);
-            }
+            if (!this.storeJSObjectChecked(obj, name, value)) break;
+            const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
+            if (ic) icUpdate(ic, getHiddenClass(obj), name);
           } else if (isJSString(obj) || isJSSymbol(obj)) {
             const err = new TypeError(`Cannot create property '${name}' on ${isJSString(obj) ? "string" : "symbol"}`);
             if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
@@ -1198,6 +1229,16 @@ export class VM {
                 this.push(val);
               }
             } else {
+              // closure オブジェクトの name/length は中の BytecodeFunction へ転送
+              if ((name === "name" || name === "length") && typeof obj === "object" && obj !== null && "__closure" in obj) {
+                const cf = (obj as any).func;
+                this.push(name === "name" ? internString(cf?.name ?? "") : (cf?.length ?? 0));
+                break;
+              }
+              if (name === "name" && typeof obj === "object" && obj !== null && "bytecode" in obj) {
+                this.push(internString((obj as any).name ?? ""));
+                break;
+              }
               // BytecodeFunction の prototype を遅延作成
               if (name === "prototype" && typeof obj === "object" && obj !== null && "bytecode" in obj && !(obj as any).prototype) {
                 const proto = this.heap.allocate(createJSObject());
@@ -1271,7 +1312,7 @@ export class VM {
           } else {
             const keyStr = toPropertyKeyString(key);
             if (isJSObject(obj)) {
-              jsObjSet(obj, keyStr, value);
+              if (!this.storeJSObjectChecked(obj, keyStr, value)) break;
             } else if (isJSString(obj) || isJSSymbol(obj)) {
               const err = new TypeError(`Cannot create property '${keyStr}' on ${isJSString(obj) ? "string" : "symbol"}`);
               if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
@@ -1360,8 +1401,15 @@ export class VM {
           const obj = this.pop();
           const name = constants[instr.operand!] as string;
           if (isJSObject(obj)) {
+            // configurable:false の削除は strict の TypeError
+            if (getPropAttrs(obj, name)?.configurable === false) {
+              const err = new TypeError(`Cannot delete property '${name}' of object`);
+              if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+              break;
+            }
             jsObjSet(obj, name, undefined);
             delete obj[name];
+            obj.__attrs__?.delete(name);
           } else if (obj && typeof obj === "object") {
             delete (obj as Record<string, unknown>)[name];
           }
@@ -1373,8 +1421,14 @@ export class VM {
           const obj = this.pop();
           const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
           if (isJSObject(obj)) {
+            if (getPropAttrs(obj, keyStr)?.configurable === false) {
+              const err = new TypeError(`Cannot delete property '${keyStr}' of object`);
+              if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+              break;
+            }
             jsObjSet(obj, keyStr, undefined);
             delete (obj as any)[keyStr];
+            obj.__attrs__?.delete(keyStr);
           } else if (obj && typeof obj === "object") {
             delete (obj as Record<string, unknown>)[keyStr];
           }
@@ -1726,7 +1780,7 @@ export class VM {
           child.__homeProto = parentProto; // ctor 内の super.m 用
           // メソッドに super 解決情報をタグ付け (super()/super.m 用)。
           // instance メソッド → parent.prototype、static メソッド → parent
-          const INTERNAL_KEYS = new Set(["name", "paramCount", "localCount", "hasRestParam", "isGenerator", "isAsync",
+          const INTERNAL_KEYS = new Set(["name", "length", "paramCount", "localCount", "hasRestParam", "isGenerator", "isAsync",
             "bytecode", "constants", "handlers", "icSlotCount", "upvalues", "__jitCached",
             "prototype", "__instanceFields", "__superClass", "__homeProto"]);
           const tagFns = (holder: unknown, home: unknown) => {
@@ -1904,7 +1958,9 @@ export class VM {
           } else if (isJSObject(src)) {
             for (const [k] of getHiddenClass(src).properties) {
               if (k === "__proto__") continue;
-              jsObjSet(target, k, jsObjGet(src, k));
+              if (getPropAttrs(src, k)?.enumerable === false) continue; // non-enumerable は spread 対象外
+              const v = jsObjGet(src, k);
+              jsObjSet(target, k, isAccessorDescriptor(v) ? (v.get ? this.callGetterSetter(v.get, src, undefined) : undefined) : v);
             }
           } else if (typeof src === "object") {
             for (const k of Object.keys(src)) jsObjSet(target, k, (src as Record<string, unknown>)[k]);
