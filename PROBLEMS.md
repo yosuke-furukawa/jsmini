@@ -98,9 +98,9 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 - module 未対応 (9 件スキップ)
 - **test262 ハーネス**: Phase 39 でほぼ解消 (Test262Error 本物化 / SameValue /
   regExpUtils + native buildString / isConstructor 近似 / $MAX_ITERATIONS)。
-  残り: `verifyProperty` は属性モデル (§2) 待ちで空実装のまま、`$262` (createRealm
-  等 20 件) は未対応。isConstructor は Reflect.construct 不在のため new 近似で
-  本家と結果が異なるケースあり
+  `verifyProperty` も属性モデル実装に伴い本実装化 (Phase 39 後半)。
+  残り: `$262` (createRealm 等 20 件) は未対応。isConstructor は
+  Reflect.construct 不在のため new 近似で本家と結果が異なるケースあり
 
 ## 5b. Phase 39 のハーネス作業で判明した新規エンジン課題
 
