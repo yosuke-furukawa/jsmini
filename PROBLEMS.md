@@ -8,7 +8,7 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 - test262: **TW 59.7% / VM 59.4% / JIT ~59.2%** (verifyProperty 本実装で基準が正直化 — 旧数値と直接比較不可) (12,459 件実行、noStrict 等 2,114 件スキップ)
   — Phase 39 のハーネス拡充で 3 モードとも約 +5pt (TW 53.8 / VM 54.5 / JIT 54.3 から)、
   class 継承実装でさらに +0.1pt
-- 内部テスト 1,259 全パス / 差分ファザ **0 / 100,000** で収束維持
+- 内部テスト 1,272 全パス / 差分ファザ **0 / 100,000** で収束維持
 - ただし TW↔VM には test262 で **TW だけ失敗 / VM だけ失敗**の非対称が残る
   (ファザの generator が class/label 等を生成しないため未検出だった領域)
 
@@ -116,10 +116,16 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 
 ## 6. 品質保証の穴 (差分ファザの検出網)
 
-- generator が **class / label / getter-setter / spread を生成しない**
-  → §1 の TW↔VM 差分 (755+672 件分の挙動差) が全部すり抜けた実績。
-  Phase 38 のラベルバグ (VM だけ無限ループ 3 種) も test262 で初検出だった
+- ~~generator が class/label/getter-setter/spread を生成しない~~ → **Phase 39 で解決**。
+  拡張で VM バグ 8 種を発見・修正 (getter throw の catch 不達 / 非リテラル field /
+  closure 化 class の prototype・super / インスタンス比較の toPrimitive など)。
+  527→4 件に収束 (残りは評価順/logs 件数差のノイズ)。
+  **スコープ規律の教訓**: 生成器で class/fn/let を「実行が保証されない文脈」
+  (switch case / ループ本体 / labeled block) から後続参照可能にすると、
+  未定義参照プログラムを量産してノイズになる。guaranteed フラグで抑止
 - `--oracle node` 未実装 → 「3 エンジン揃って間違う」系は検出不能のまま
+- 残る差分ファザの 4 件: 評価順 (throw 直前の console.log が実行されるか) と
+  logs 件数差。完了値・エラー型は 3 エンジン一致で実害は小さい
 
 ## 効果順の推奨ロードマップ
 
@@ -130,7 +136,7 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 | 3 | ~~spread call / object spread の VM 実装~~ | **Phase 39 で完了** (「黙って null」根絶) |
 | 4 | ~~test262 ハーネス注入の充実~~ | **Phase 39 で完了** (3 モード +5pt) |
 | 5 | ~~パーサ strict early error (eval/arguments)~~ | **Phase 39 で完了** (SyntaxError 系 83→70、残は class 内 eval 意味論) |
-| 6 | fuzzer generator に class/label/spread 追加 | 1〜3 の修正を差分ファザで守れる検出網 |
+| 6 | ~~fuzzer generator に class/label/spread 追加~~ | **Phase 39 で完了** (拡張で VM バグ 8 種発見・修正、527→4 件収束) |
 | 7 | constructor 追跡 + TW 文字列 for-of / fromCharCode (§5b) | assert.throws 第 2 判定系 + RegExp exec 系の一部 |
 
 ---
