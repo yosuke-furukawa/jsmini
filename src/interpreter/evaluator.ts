@@ -388,16 +388,17 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   twObjectWrapper.create = Object.create;
   twObjectWrapper.freeze = (obj: unknown) => {
     // TW のオブジェクトは host object なので host freeze で属性が実効する
-    // (evaluator の代入は strict モードの TS コードなので違反は TypeError)
-    if (obj && typeof obj === "object") Object.freeze(obj);
+    // (evaluator の代入は strict モードの TS コードなので違反は TypeError)。
+    // JSString (intern 共有) は凍結せず no-op — プリミティブ扱い (ES2015+)
+    if (obj && typeof obj === "object" && !isJSString(obj)) Object.freeze(obj);
     return obj;
   };
   twObjectWrapper.seal = (obj: unknown) => {
-    if (obj && typeof obj === "object") Object.seal(obj);
+    if (obj && typeof obj === "object" && !isJSString(obj)) Object.seal(obj);
     return obj;
   };
   twObjectWrapper.preventExtensions = (obj: unknown) => {
-    if (obj && typeof obj === "object") Object.preventExtensions(obj);
+    if (obj && typeof obj === "object" && !isJSString(obj)) Object.preventExtensions(obj);
     return obj;
   };
   twObjectWrapper.isFrozen = (obj: unknown) => (obj && typeof obj === "object") ? Object.isFrozen(obj) : true;
@@ -408,7 +409,9 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     return typeof key === "symbol" ? key : String(key);
   };
   twObjectWrapper.defineProperty = (obj: unknown, key: unknown, desc: any) => {
-    if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
+    // JSString は intern 共有オブジェクトなので定義を許すと全プログラムに汚染が
+    // 漏れる。spec 通りプリミティブは TypeError (VM 側と同方針)
+    if (obj === null || isJSString(obj) || (typeof obj !== "object" && typeof obj !== "function")) {
       throw new TypeError("Object.defineProperty called on non-object");
     }
     const k = twToKey(key);

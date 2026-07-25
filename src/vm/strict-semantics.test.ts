@@ -400,6 +400,34 @@ describe("Phase 39 — async メソッドのパースと実行", () => {
     logsAgree(`var f = async x => { return x * 2; }; f(3).then(function (v) { console.log(v); });`, "6"));
 });
 
+describe("Phase 39 — generator 拡張で発見した VM バグ", () => {
+  // getter/setter の throw が外側の catch に届く (別 VM 起動をやめ callFunction に)
+  it("getter の throw を外側 catch が捕まえる", () =>
+    agree(`var o = { get g() { throw 1; } }; var r = 0; try { o.g; } catch (e) { r = e; } r;`, 1));
+  it("setter の throw を捕まえる", () =>
+    agree(`var o = { set s(v) { throw 2; } }; var r = 0; try { o.s = 1; } catch (e) { r = e; } r;`, 2));
+  it("spread 中の getter throw", () =>
+    agree(`var o = { get g() { throw 3; } }; var r = 0; try { ({ ...o }); } catch (e) { r = e; } r;`, 3));
+  // 非リテラル class field は ctor prologue で初期化 (VM は undefined だった)
+  it("非リテラル instance field", () => agree(`class C { f = 1 + 2; } new C().f;`, 3));
+  it("field が外側変数を参照", () => agree(`var base = 10; class C { f = base * 2; } new C().f;`, 20));
+  it("field が this を参照", () => agree(`class C { a = 5; b = this.a + 1; } new C().b;`, 6));
+  it("継承 + 親子 field 初期化", () => agree(`class A { pa = 1; } class B extends A { cb = 2; } var b = new B(); b.pa + b.cb;`, 3));
+  // 外側変数をキャプチャした class (closure 化) の prototype/instanceof/super
+  it("キャプチャ class のメソッド", () => agree(`let a = 5; class C { f = a; m() { return this.f * 2; } } new C().m();`, 10));
+  it("キャプチャ class の instanceof", () => agree(`let a = 1; class C { f = a; m() {} } (new C() instanceof C) ? 1 : 0;`, 1));
+  it("キャプチャ派生 class + super + getter (tagFns が getter を発火させていた)", () =>
+    agree(`let v = 1; class A { m() { return 1; } } class B extends A { m2() { return super.m() + v; } get g() { return 5; } } new B().m2();`, 2));
+  // class インスタンス < 文字列 (toPrimitive が host string を返し数値経路に落ちていた)
+  it("class インスタンス < 文字列", () => agree(`class C {} var v = new C(); (v < "hello") ? 1 : 0;`, 1));
+  // typeof の TDZ
+  it("typeof は lexical の TDZ を尊重", () =>
+    allThrow(`{ if (typeof v0) {} let v0 = ""; }`, ReferenceError));
+  // super(...args) spread (ExecExpr フォールバックになっていた)
+  it("super(...args) spread", () =>
+    agree(`class A { constructor(x, y) { this.v = x + y; } } class B extends A { constructor() { super(...[3, 4]); } } new B().v;`, 7));
+});
+
 describe("Phase 39 — strict early error (eval/arguments の束縛・代入禁止)", () => {
   // jsmini は strict 専用なのでパース時に常に検査する (spec 13.1.1 ほか)
   it("var eval は SyntaxError", () => allThrow(`var eval;`, SyntaxError));

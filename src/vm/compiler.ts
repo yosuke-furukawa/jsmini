@@ -31,6 +31,10 @@ class BytecodeCompiler {
   private isGenerator = false;
   private isAsync = false;
   private fnLength = 0; // spec の fn.length (デフォルト/rest より前のパラメータ数)
+  // class の instance field 初期化式 (ctor 本体の前に this.k = expr として emit)。
+  // 従来はリテラルのみ Construct が AST 解釈しており、`f = 1 + 2` が VM だけ
+  // undefined になっていた
+  private pendingFieldInits: any[] | null = null;
   private lexicalLocals = new Set<string>(); // let/const で宣言されたローカル変数名
   private constLocals = new Set<string>(); // const で宣言された変数名 (再代入を禁止するため)
   private blockDepth = 0; // BlockStatement のネスト深さ (ブロック内 function 宣言の判定用)
@@ -304,6 +308,7 @@ class BytecodeCompiler {
     // constructor を BytecodeFunction にコンパイル
     const ctorMethod = stmt.body.body.find((m: any) => m.type === "MethodDefinition" && m.kind === "constructor");
     const fnCompiler = new BytecodeCompiler(this);
+    if (instanceFields.length > 0) fnCompiler.pendingFieldInits = instanceFields;
     if (ctorMethod) {
       fnCompiler.compileFunctionBody(ctorMethod.value.params, ctorMethod.value.body.body);
     } else if (hasSuper) {
@@ -314,7 +319,6 @@ class BytecodeCompiler {
     }
     const ctorFunc = fnCompiler.finish(className);
     (ctorFunc as any).prototype = {};
-    if (instanceFields.length > 0) (ctorFunc as any).__instanceFields = instanceFields;
     this.emit("LdaConst", this.addConstant(ctorFunc));
 
     // メソッド/getter/setter を prototype (or class for static) に設定
@@ -402,8 +406,27 @@ class BytecodeCompiler {
     }
   }
 
+  // class instance field を this.k = expr として emit する (ctor prologue)。
+  // computed / 非 Identifier キーは Literal キーのみ対応 (それ以外は skip)
+  private emitFieldInits(): void {
+    if (!this.pendingFieldInits) return;
+    for (const field of this.pendingFieldInits) {
+      if (field.computed) continue;
+      const name = (field.key?.type === "Identifier" || field.key?.type === "PrivateIdentifier") ? field.key.name
+        : field.key?.type === "Literal" ? String(field.key.value) : null;
+      if (!name) continue;
+      this.emit("LoadThis");
+      if (field.value) this.compileExpression(field.value);
+      else this.emit("LdaUndefined");
+      this.emitWithIC("SetProperty", this.addConstant(name));
+      this.emit("Pop");
+    }
+    this.pendingFieldInits = null;
+  }
+
   // 派生クラスのデフォルト constructor: constructor(...args) { super(...args); }
-  // rest param で全引数を束ねて CallSuperArray で親 ctor へ転送する
+  // rest param で全引数を束ねて CallSuperArray で親 ctor へ転送する。
+  // field は super の後に初期化 (TW のマージ順 = 親フィールドが先、と一致させる)
   private compileDefaultDerivedCtor(): void {
     this.paramCount = 1;
     this.declareLocal("__args");
@@ -412,6 +435,7 @@ class BytecodeCompiler {
     this.emit("LdaLocal", 0);
     this.emit("CallSuperArray");
     this.emit("Pop");
+    this.emitFieldInits();
     this.emit("LdaUndefined");
     this.emit("Return");
   }
@@ -761,6 +785,8 @@ class BytecodeCompiler {
       this.lexicalSlots.add(slot);
       this.emit("StaHole", slot);
     }
+    // class instance field の初期化 (this.k = expr) を本体より前に emit
+    this.emitFieldInits();
     // 本体をコンパイル
     for (const stmt of body) {
       this.compileStatement(stmt);
@@ -1522,10 +1548,16 @@ class BytecodeCompiler {
         // super(...) — parser は super を Identifier __super__ に脱糖する。
         // frame.func.__superClass を this 付きで呼ぶ専用オペコードに落とす
         if (expr.callee.type === "Identifier" && expr.callee.name === "__super__") {
-          for (const arg of expr.arguments) {
-            this.compileExpression(arg as Expression);
+          if (expr.arguments.some((a: any) => a.type === "SpreadElement")) {
+            // super(...args): 引数を配列に集約して CallSuperArray
+            this.emitArgsArray(expr.arguments);
+            this.emit("CallSuperArray");
+          } else {
+            for (const arg of expr.arguments) {
+              this.compileExpression(arg as Expression);
+            }
+            this.emit("CallSuper", expr.arguments.length);
           }
-          this.emit("CallSuper", expr.arguments.length);
           break;
         }
         // spread 呼び出し f(...args) / obj.m(...args): 引数を配列に集約して
@@ -1902,12 +1934,14 @@ class BytecodeCompiler {
           const name = expr.argument.name;
           const local = this.resolveLocal(name);
           if (local !== null) {
-            this.emit("LdaLocal", local);
+            // lexical (let/const) は typeof でも TDZ が効く (spec: typeof x が
+            // ReferenceError になるのは「未宣言」ではなく「宣言前」のケース)
+            this.emit(this.lexicalSlots.has(local) ? "LdaLocalTDZ" : "LdaLocal", local);
             this.emit("TypeOf");
           } else {
             const upvalue = this.resolveUpvalue(name);
             if (upvalue >= 0) {
-              this.emit("LdaUpvalue", upvalue);
+              this.emit(this.upvalues[upvalue].tdz ? "LdaUpvalueTDZ" : "LdaUpvalue", upvalue);
               this.emit("TypeOf");
             } else {
               // グローバル: TypeOfGlobal で安全にアクセス

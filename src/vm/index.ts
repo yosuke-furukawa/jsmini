@@ -457,6 +457,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return obj;
   };
   ObjectWrapper.freeze = (obj: unknown) => {
+    if (isJSString(obj) || isJSSymbol(obj)) return obj; // プリミティブは no-op (ES2015+)
     if (isJSObject(obj)) {
       for (const k of jsObjOwnNames(obj)) {
         const a = getPropAttrs(obj, k);
@@ -469,6 +470,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return obj;
   };
   ObjectWrapper.seal = (obj: unknown) => {
+    if (isJSString(obj) || isJSSymbol(obj)) return obj;
     if (isJSObject(obj)) {
       for (const k of jsObjOwnNames(obj)) {
         const a = getPropAttrs(obj, k);
@@ -481,6 +483,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return obj;
   };
   ObjectWrapper.preventExtensions = (obj: unknown) => {
+    if (isJSString(obj) || isJSSymbol(obj)) return obj;
     if (isJSObject(obj)) preventObjExtensions(obj);
     else if (obj && typeof obj === "object") Object.preventExtensions(obj);
     return obj;
@@ -526,6 +529,12 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return isJSString(key) ? jsStringToString(key) : String(key);
   };
   ObjectWrapper.defineProperty = (obj: unknown, key: unknown, desc: unknown) => {
+    // プリミティブ (JSString 含む) は spec 通り TypeError。JSString は intern 共有
+    // オブジェクトなので黙って定義すると全プログラムに汚染が漏れる (Phase 36 の
+    // プロパティ代入と同じ罠の defineProperty 版 — 差分ファザが検出)
+    if (isJSString(obj) || isJSSymbol(obj) || obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
+      throw new TypeError("Object.defineProperty called on non-object");
+    }
     const k = toKey(key);
     const boolField = (name: string): boolean => !!descField(desc, name);
     const isAccessorDesc = descHas(desc, "get") || descHas(desc, "set");
