@@ -5,10 +5,10 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 
 ## 現状サマリ (2026-07-23, Phase 39 時点)
 
-- test262: **TW 59.6% / VM 59.3% / JIT 59.1%** (verifyProperty 本実装で基準が正直化 — 旧数値と直接比較不可) (12,459 件実行、noStrict 等 2,114 件スキップ)
+- test262: **TW 59.7% / VM 59.4% / JIT ~59.2%** (verifyProperty 本実装で基準が正直化 — 旧数値と直接比較不可) (12,459 件実行、noStrict 等 2,114 件スキップ)
   — Phase 39 のハーネス拡充で 3 モードとも約 +5pt (TW 53.8 / VM 54.5 / JIT 54.3 から)、
   class 継承実装でさらに +0.1pt
-- 内部テスト 1,242 全パス / 差分ファザ **0 / 100,000** で収束維持
+- 内部テスト 1,259 全パス / 差分ファザ **0 / 100,000** で収束維持
 - ただし TW↔VM には test262 で **TW だけ失敗 / VM だけ失敗**の非対称が残る
   (ファザの generator が class/label 等を生成しないため未検出だった領域)
 
@@ -72,9 +72,11 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 - class private の一部ポジション: 単純な `#x = 1` フィールドは動くが、
   `#m()` メソッド / `static #x` / `#x in obj` で "Unexpected character '#'"
 - `for ([a, b] of ...)` — 分割代入 LHS の for-of ("Expected Semicolon but got Of")
-- **strict early error 不在**: `var eval` / 仮引数 `arguments` / `catch (eval)` 等が
-  SyntaxError にならない (onlyStrict 失敗 14 件 + "Expected a SyntaxError" 55 件)。
-  未定義ラベルへの break/continue も未検出 (現在は no-op)
+- ~~strict early error 不在~~ → **Phase 39 で解決**: eval/arguments の束縛
+  (var/let/const/仮引数/rest/分割/catch/関数名/class 名) と代入・++/-- を
+  パース時に SyntaxError に。strict の重複パラメータも検査。
+  残り: class 内 eval の意味論 (`eval("super()")` の拒否等、66 件 — eval に
+  スコープ解析が必要)、未定義ラベルへの break/continue (no-op のまま)
 
 ## 4. ビルトイン不在・部分実装
 
@@ -127,7 +129,7 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 | 2 | ~~プロパティ属性モデル + accessor descriptor~~ | **Phase 39 で完了** (accessor 271 件解消、verifyProperty 本実装で基準正直化) |
 | 3 | ~~spread call / object spread の VM 実装~~ | **Phase 39 で完了** (「黙って null」根絶) |
 | 4 | ~~test262 ハーネス注入の充実~~ | **Phase 39 で完了** (3 モード +5pt) |
-| 5 | パーサ strict early error (eval/arguments) | onlyStrict 14 件 + SyntaxError 系 55 件 |
+| 5 | ~~パーサ strict early error (eval/arguments)~~ | **Phase 39 で完了** (SyntaxError 系 83→70、残は class 内 eval 意味論) |
 | 6 | fuzzer generator に class/label/spread 追加 | 1〜3 の修正を差分ファザで守れる検出網 |
 | 7 | constructor 追跡 + TW 文字列 for-of / fromCharCode (§5b) | assert.throws 第 2 判定系 + RegExp exec 系の一部 |
 

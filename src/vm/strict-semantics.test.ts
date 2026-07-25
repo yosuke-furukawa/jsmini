@@ -400,6 +400,28 @@ describe("Phase 39 — async メソッドのパースと実行", () => {
     logsAgree(`var f = async x => { return x * 2; }; f(3).then(function (v) { console.log(v); });`, "6"));
 });
 
+describe("Phase 39 — strict early error (eval/arguments の束縛・代入禁止)", () => {
+  // jsmini は strict 専用なのでパース時に常に検査する (spec 13.1.1 ほか)
+  it("var eval は SyntaxError", () => allThrow(`var eval;`, SyntaxError));
+  it("2 個目の宣言子でも検査", () => allThrow(`var a, eval;`, SyntaxError));
+  it("let/const も対象", () => allThrow(`let arguments = 1;`, SyntaxError));
+  it("関数名 eval", () => allThrow(`function eval() {}`, SyntaxError));
+  it("関数式の名前も対象", () => allThrow(`var f = function arguments() {};`, SyntaxError));
+  it("仮引数 eval", () => allThrow(`function f(eval) {}`, SyntaxError));
+  it("rest 引数も対象", () => allThrow(`function f(...arguments) {}`, SyntaxError));
+  it("分割パターン内も対象", () => allThrow(`function f({ eval }) {}`, SyntaxError));
+  it("catch パラメータ", () => allThrow(`try {} catch (eval) {}`, SyntaxError));
+  it("代入 eval = 1", () => allThrow(`eval = 1;`, SyntaxError));
+  it("複合代入 arguments += 1", () => allThrow(`arguments += 1;`, SyntaxError));
+  it("インクリメント eval++", () => allThrow(`eval++;`, SyntaxError));
+  it("class 名 eval", () => allThrow(`class eval {}`, SyntaxError));
+  it("strict の重複パラメータ", () => allThrow(`function f(a, a) {}`, SyntaxError));
+  // 合法な使用は壊さない
+  it("eval() 呼び出しは合法", () => agree(`eval("1 + 1");`, 2));
+  it("arguments の読みは合法", () => agree(`function f() { return arguments.length; } f(1, 2);`, 2));
+  it("プロパティ名 eval は合法", () => agree(`var o = { eval: 1 }; o.eval;`, 1));
+});
+
 describe("Phase 39 — プロパティ属性モデル (writable/enumerable/configurable)", () => {
   it("freeze 後の書込は TypeError", () =>
     allThrow(`var o = Object.freeze({ x: 1 }); o.x = 2;`, TypeError));

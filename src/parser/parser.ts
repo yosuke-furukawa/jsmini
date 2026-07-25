@@ -119,6 +119,7 @@ export function parse(source: string): Program {
 
     // 最初の宣言子
     const id = parseBindingPattern();
+    checkStrictPattern(id);
     let init: Expression | null = null;
     if (current().type === "Equals") {
       eat("Equals");
@@ -133,6 +134,7 @@ export function parse(source: string): Program {
     while (current().type === "Comma") {
       eat("Comma");
       const nextId = parseBindingPattern();
+      checkStrictPattern(nextId);
       let nextInit: Expression | null = null;
       if (current().type === "Equals") {
         eat("Equals");
@@ -175,6 +177,7 @@ export function parse(source: string): Program {
     const generator = current().type === "Star";
     if (generator) eat("Star");
     const id = parseIdentifier();
+    checkStrictBindingName(id.name);
     eat("LeftParen");
     resetParamState();
     const params: { type: "Identifier"; name: string }[] = [];
@@ -194,6 +197,7 @@ export function parse(source: string): Program {
   function parseClassDeclaration(): Statement {
     eat("Class");
     const id = parseIdentifier();
+    checkStrictBindingName(id.name);
 
     let superClass: Expression | null = null;
     if (current().type === "Extends") {
@@ -339,6 +343,7 @@ export function parse(source: string): Program {
       eat("Catch");
       eat("LeftParen");
       const param = parseIdentifier();
+      checkStrictBindingName(param.name);
       eat("RightParen");
       const body = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
       handler = { type: "CatchClause", param, body };
@@ -529,6 +534,45 @@ export function parse(source: string): Program {
 
   // パラメータ1つをパース（...rest 対応）
   let _lastParamWasRest = false;
+  // strict mode の early error (spec 13.1.1 等):
+  // eval / arguments は束縛名 (var/let/const/param/catch/関数名/class 名) に
+  // も代入先にもできない。jsmini は strict 専用なので常に検査する
+  function checkStrictBindingName(name: string): void {
+    if (name === "eval" || name === "arguments") {
+      throw new SyntaxError(
+        `Unexpected eval or arguments in strict mode at line ${current().line}, column ${current().column}`);
+    }
+  }
+  // 分割パターン内の全束縛名を検査
+  function checkStrictPattern(pat: any): void {
+    if (!pat) return;
+    switch (pat.type) {
+      case "Identifier": checkStrictBindingName(pat.name); break;
+      case "AssignmentPattern": checkStrictPattern(pat.left); break;
+      case "RestElement": checkStrictPattern(pat.argument); break;
+      case "ObjectPattern": for (const pr of pat.properties) checkStrictPattern(pr.value ?? pr.argument); break;
+      case "ArrayPattern": for (const el of pat.elements) checkStrictPattern(el); break;
+    }
+  }
+  // strict の重複パラメータ検査用 (関数ごとに resetParamState でリセット)
+  let _paramNames: Set<string> = new Set();
+  function collectParamNames(pat: any): void {
+    if (!pat) return;
+    switch (pat.type) {
+      case "Identifier":
+        if (_paramNames.has(pat.name)) {
+          throw new SyntaxError(
+            `Duplicate parameter name not allowed in strict mode at line ${current().line}, column ${current().column}`);
+        }
+        _paramNames.add(pat.name);
+        break;
+      case "AssignmentPattern": collectParamNames(pat.left); break;
+      case "RestElement": collectParamNames(pat.argument); break;
+      case "ObjectPattern": for (const pr of pat.properties) collectParamNames(pr.value ?? pr.argument); break;
+      case "ArrayPattern": for (const el of pat.elements) collectParamNames(el); break;
+    }
+  }
+
   function parseParam(): any {
     if (_lastParamWasRest) {
       throw new SyntaxError("Rest parameter must be last formal parameter");
@@ -536,9 +580,14 @@ export function parse(source: string): Program {
     if (current().type === "DotDotDot") {
       eat("DotDotDot");
       _lastParamWasRest = true;
-      return { type: "RestElement", argument: parseIdentifier() };
+      const restArg = parseIdentifier();
+      checkStrictBindingName(restArg.name);
+      collectParamNames(restArg);
+      return { type: "RestElement", argument: restArg };
     }
     const pattern = parseBindingPattern();
+    checkStrictPattern(pattern);
+    collectParamNames(pattern);
     // デフォルト引数: param = defaultValue
     if (current().type === "Equals") {
       eat("Equals");
@@ -549,6 +598,7 @@ export function parse(source: string): Program {
   }
   function resetParamState(): void {
     _lastParamWasRest = false;
+    _paramNames = new Set();
   }
 
   // Pattern = Identifier | ObjectPattern | ArrayPattern
@@ -725,6 +775,7 @@ export function parse(source: string): Program {
       if (left.type !== "Identifier" && left.type !== "MemberExpression") {
         throw new SyntaxError("Invalid left-hand side in assignment");
       }
+      if (left.type === "Identifier") checkStrictBindingName((left as any).name);
       return { type: "AssignmentExpression", operator, left, right };
     }
     return left;
@@ -962,6 +1013,7 @@ export function parse(source: string): Program {
       if (argument.type !== "Identifier" && argument.type !== "MemberExpression") {
         throw new SyntaxError("Invalid left-hand side expression in prefix operation");
       }
+      if ((argument as any).type === "Identifier") checkStrictBindingName((argument as any).name);
       return { type: "UpdateExpression", operator, argument: argument as any, prefix: true };
     }
     if (current().type === "Typeof" || current().type === "Delete" || current().type === "Void") {
@@ -1095,6 +1147,7 @@ export function parse(source: string): Program {
       if (expr.type !== "Identifier" && expr.type !== "MemberExpression") {
         throw new SyntaxError("Invalid left-hand side expression in postfix operation");
       }
+      if ((expr as any).type === "Identifier") checkStrictBindingName((expr as any).name);
       return { type: "UpdateExpression", operator, argument: expr as any, prefix: false };
     }
     return expr;
@@ -1237,6 +1290,7 @@ export function parse(source: string): Program {
     let id: { type: "Identifier"; name: string } | null = null;
     if (current().type === "Identifier") {
       id = parseIdentifier();
+      checkStrictBindingName(id.name);
     }
     eat("LeftParen");
     resetParamState();
