@@ -8,7 +8,7 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 - test262: **TW 59.7% / VM 59.4% / JIT ~59.2%** (verifyProperty 本実装で基準が正直化 — 旧数値と直接比較不可) (12,459 件実行、noStrict 等 2,114 件スキップ)
   — Phase 39 のハーネス拡充で 3 モードとも約 +5pt (TW 53.8 / VM 54.5 / JIT 54.3 から)、
   class 継承実装でさらに +0.1pt
-- 内部テスト 1,272 全パス / 差分ファザ **0 / 100,000** で収束維持
+- 内部テスト 1,281 全パス / 差分ファザ **0 / 100,000** で収束維持
 - ただし TW↔VM には test262 で **TW だけ失敗 / VM だけ失敗**の非対称が残る
   (ファザの generator が class/label 等を生成しないため未検出だった領域)
 
@@ -104,15 +104,17 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
   残り: `$262` (createRealm 等 20 件) は未対応。isConstructor は
   Reflect.construct 不在のため new 近似で本家と結果が異なるケースあり
 
-## 5b. Phase 39 のハーネス作業で判明した新規エンジン課題
+## 5b. §5b の課題 — Phase 39 (roadmap #7) で解決
 
-- **`e.constructor === Ctor` が両エンジンで false** — constructor プロパティの
-  追跡が無い (instanceof は動く)。test262 の `__split.constructor is expected to
-  equal Array` 系や assert.throws の第 2 判定がこれで落ちる
-- **TW: 文字列の for-of が不可** ("iterable is not iterable")。VM は動く
-- **TW: String.fromCharCode がサロゲートペアで長さ不正** (2 単位が length 4 になる)。
-  VM は正しい。TW の JSString 変換境界のバグ
-- **String.fromCodePoint が両エンジンに無い** (ハーネスは fromCharCode 手計算で回避)
+- ~~`e.constructor === Ctor` が false~~ → 解決。fn/class の prototype.constructor に
+  自身を non-enumerable で紐付け (identity 込み、継承先も自身を指す)
+- ~~TW: 文字列の for-of が不可~~ → 解決 (サロゲート対応の code point 反復を追加)
+- ~~String.fromCodePoint が無い~~ → 両エンジンに追加。fromCharCode も 16bit マスク
+- **残る既知: JSString の length/charAt がバイト単位** — createSeqString が
+  TextEncoder (UTF-8) で length を数えるため、非 ASCII で `.length` が
+  UTF-16 code unit とずれる (😀 → 4、正しくは 2)。charAt/slice/index が
+  すべて byte 前提の設計上の割り切りで、UTF-16 化は文字列処理の全面改修。
+  ASCII のみのプログラムでは顕在化しないため後回し
 
 ## 6. 品質保証の穴 (差分ファザの検出網)
 
@@ -137,7 +139,7 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 | 4 | ~~test262 ハーネス注入の充実~~ | **Phase 39 で完了** (3 モード +5pt) |
 | 5 | ~~パーサ strict early error (eval/arguments)~~ | **Phase 39 で完了** (SyntaxError 系 83→70、残は class 内 eval 意味論) |
 | 6 | ~~fuzzer generator に class/label/spread 追加~~ | **Phase 39 で完了** (拡張で VM バグ 8 種発見・修正、527→4 件収束) |
-| 7 | constructor 追跡 + TW 文字列 for-of / fromCharCode (§5b) | assert.throws 第 2 判定系 + RegExp exec 系の一部 |
+| 7 | ~~constructor 追跡 + TW 文字列 for-of / fromCharCode~~ | **Phase 39 で完了**。残: JSString の非 ASCII length (UTF-8 byte 単位) |
 
 ---
 
