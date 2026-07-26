@@ -413,7 +413,8 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     if (new.target) { this.valueOf = () => s; this.toString = () => s; return; }
     return s;
   }
-  (StringCtor as any).fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
+  (StringCtor as any).fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes.map(c => Number(c) & 0xffff)));
+  (StringCtor as any).fromCodePoint = (...cps: number[]) => internString(String.fromCodePoint(...cps.map(c => Number(c))));
   // ユーザの `String.prototype.foo = ...` 拡張を host String.prototype に当てて、
   // VM 側の dispatch (vm.stringPrototype に無ければ host にフォールバック) で見えるように
   (StringCtor as any).prototype = String.prototype;

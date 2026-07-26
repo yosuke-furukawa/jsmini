@@ -2,7 +2,7 @@ import type { BytecodeFunction, Instruction } from "./bytecode.js";
 import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
-import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots, isAccessorDescriptor, createAccessorDescriptor, setPropertyChecked, STORE_OK, STORE_NO_SETTER, STORE_NOT_EXTENSIBLE, getPropAttrs, type JSObjectInternal } from "./js-object.js";
+import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots, isAccessorDescriptor, createAccessorDescriptor, setPropertyChecked, STORE_OK, STORE_NO_SETTER, STORE_NOT_EXTENSIBLE, getPropAttrs, setPropAttrs, type JSObjectInternal } from "./js-object.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, toNumericOperand, type JSString } from "./js-string.js";
 import { isJSSymbol } from "./js-symbol.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
@@ -1263,6 +1263,8 @@ export class VM {
                   if (!fnObj.prototype) {
                     const proto = this.heap.allocate(createJSObject());
                     jsObjSet(proto, "__proto__", this.objectPrototype);
+                    jsObjSet(proto, "constructor", fnObj);
+                    setPropAttrs(proto, "constructor", { writable: true, enumerable: false, configurable: true });
                     fnObj.prototype = proto;
                   }
                   this.push(fnObj.prototype);
@@ -1707,6 +1709,8 @@ export class VM {
           if (protoSrc && protoSrc.bytecode && !protoSrc.prototype) {
             const proto = this.heap.allocate(createJSObject());
             jsObjSet(proto, "__proto__", this.objectPrototype);
+            jsObjSet(proto, "constructor", protoSrc);
+            setPropAttrs(proto, "constructor", { writable: true, enumerable: false, configurable: true });
             protoSrc.prototype = proto;
           }
           const newObj = this.heap.allocate(createJSObject());
@@ -1931,6 +1935,8 @@ export class VM {
             if (!target.prototype) {
               const proto = this.heap.allocate(createJSObject());
               jsObjSet(proto, "__proto__", this.objectPrototype);
+              jsObjSet(proto, "constructor", target);
+              setPropAttrs(proto, "constructor", { writable: true, enumerable: false, configurable: true });
               target.prototype = proto;
             }
             const newObj = this.heap.allocate(createJSObject());

@@ -318,7 +318,11 @@ class BytecodeCompiler {
       fnCompiler.compileFunctionBody([], []);
     }
     const ctorFunc = fnCompiler.finish(className);
-    (ctorFunc as any).prototype = {};
+    // prototype は host {}。constructor は自身を指す non-enumerable プロパティ
+    // (new C().constructor === C。for-in/Object.keys には出さない)
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, "constructor", { value: ctorFunc, writable: true, enumerable: false, configurable: true });
+    (ctorFunc as any).prototype = proto;
     this.emit("LdaConst", this.addConstant(ctorFunc));
 
     // メソッド/getter/setter を prototype (or class for static) に設定

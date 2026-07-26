@@ -214,7 +214,8 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     if (new.target) return new String(s);
     return internString(s);
   } as unknown as StringConstructor;
-  StringCtor.fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
+  StringCtor.fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes.map(c => Number(c) & 0xffff)));
+  (StringCtor as any).fromCodePoint = (...cps: number[]) => internString(String.fromCodePoint(...cps.map(c => Number(c))));
   (StringCtor as any).prototype = String.prototype;
   env.defineReadOnly("String", StringCtor);
   env.defineReadOnly("Array", Array);
@@ -713,6 +714,7 @@ function hoistFunctionDeclarations(stmts: Statement[], env: Environment): void {
       };
       if ((stmt as any).generator) (fn as any).isGenerator = true;
       if ((stmt as any).async) (fn as any).isAsync = true;
+      linkConstructor(fn);
       env.define(stmt.id.name, fn);
     }
   }
@@ -746,6 +748,17 @@ function classKeyName(key: any, computed?: boolean, env?: Environment): string {
   }
   if (key.type === "Literal") return String(key.value);
   return key.name;
+}
+
+// JSFunction の prototype.constructor に自身を紐付ける (non-enumerable)。
+// new f().constructor === f を identity 込みで満たす
+function linkConstructor(fn: any): any {
+  if (fn && fn.prototype && typeof fn.prototype === "object") {
+    Object.defineProperty(fn.prototype, "constructor", {
+      value: fn, writable: true, enumerable: false, configurable: true,
+    });
+  }
+  return fn;
 }
 
 function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, env: Environment): Generator<unknown, unknown, unknown> {
@@ -805,6 +818,7 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
     };
   }
 
+  linkConstructor(ctorFn);
   // インスタンスフィールドを __instanceFields に保存 (new 時に初期化)。
   // 派生クラスのデフォルト ctor (親の params/body を再利用) は super() を
   // 実行しないため、親のフィールドをマージして new 時にまとめて初期化する
@@ -1148,6 +1162,17 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
           if (!result || (result as any).done) break;
           iterable.push((result as any).value);
         }
+      } else if (isJSString(rawIterable) || typeof rawIterable === "string") {
+        // 文字列の for-of: サロゲートペア対応で 1 コードポイントずつ (spec)。
+        // 各要素は JSString (intern) で返す — VM と一致させる
+        const str = isJSString(rawIterable) ? jsStringToString(rawIterable) : rawIterable as string;
+        iterable = [];
+        for (let i = 0; i < str.length; ) {
+          const cp = str.codePointAt(i)!;
+          const ch = cp > 0xffff ? str.slice(i, i + 2) : str[i];
+          iterable.push(internString(ch));
+          i += cp > 0xffff ? 2 : 1;
+        }
       } else {
         iterable = rawIterable as unknown[];
       }
@@ -1234,6 +1259,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         fnEnv.define(expr.id.name, fn);
         fn.closure = fnEnv;
       }
+      linkConstructor(fn);
       return fn;
     }
     case "ClassExpression": {

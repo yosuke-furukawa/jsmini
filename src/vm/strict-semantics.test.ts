@@ -400,6 +400,24 @@ describe("Phase 39 — async メソッドのパースと実行", () => {
     logsAgree(`var f = async x => { return x * 2; }; f(3).then(function (v) { console.log(v); });`, "6"));
 });
 
+describe("Phase 39 — constructor 追跡 / 文字列 for-of / fromCodePoint (roadmap #7)", () => {
+  it("fn.prototype.constructor === fn", () =>
+    agree(`function T() {} (new T().constructor === T) ? 1 : 0;`, 1));
+  it("class の constructor identity", () =>
+    agree(`class C {} (new C().constructor === C) ? 1 : 0;`, 1));
+  it("継承先の constructor は自身", () =>
+    agree(`class A {} class B extends A {} (new B().constructor === B) ? 1 : 0;`, 1));
+  it("constructor は non-enumerable", () =>
+    agree(`class C { m() {} } var n = 0; for (var k in C.prototype) n++; n;`, 0));
+  it("constructor.name", () => agree(`class Foo {} new Foo().constructor.name;`, "Foo"));
+  it("TW も文字列を for-of できる", () =>
+    agree(`var s = ""; for (var c of "abc") s += c + "."; s;`, "a.b.c."));
+  it("文字列 for-of はサロゲート単位", () =>
+    agree(`var n = 0; for (var c of "a\u{1F600}b") n++; n;`, 3));
+  it("String.fromCodePoint", () => agree(`String.fromCodePoint(72, 105);`, "Hi"));
+  it("fromCharCode は下位 16bit", () => agree(`String.fromCharCode(65, 322);`, "A\u0142"));
+});
+
 describe("Phase 39 — generator 拡張で発見した VM バグ", () => {
   // getter/setter の throw が外側の catch に届く (別 VM 起動をやめ callFunction に)
   it("getter の throw を外側 catch が捕まえる", () =>
