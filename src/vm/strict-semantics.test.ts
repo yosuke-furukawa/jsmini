@@ -400,6 +400,24 @@ describe("Phase 39 — async メソッドのパースと実行", () => {
     logsAgree(`var f = async x => { return x * 2; }; f(3).then(function (v) { console.log(v); });`, "6"));
 });
 
+describe("Phase 39 — 分割代入パラメータのデフォルト値 (TW)", () => {
+  // bindParam が defaultResolver を bindPattern に渡しておらず、パターン内の
+  // デフォルト (`[x = 23]` / `{a = 1}`) が undefined 要素に適用されなかった
+  // (test262 dstr 系 241 件の主因)
+  it("配列パターン要素のデフォルト (undefined 要素)", () =>
+    agree(`var c = 0; function f([x = 23]) { c = x; } f([undefined]); c;`, 23));
+  it("オブジェクトパターンのデフォルト", () =>
+    agree(`var c = 0; function f({ a = 5 }) { c = a; } f({}); c;`, 5));
+  it("要素不足時のデフォルト", () =>
+    agree(`var c = 0; function f([a, b = 9]) { c = b; } f([1]); c;`, 9));
+  it("ネストした分割のデフォルト", () =>
+    agree(`var c = 0; function f([[a = 3]]) { c = a; } f([[]]); c;`, 3));
+  it("generator メソッドの分割デフォルト", () =>
+    agree(`var c = 0; class C { *m([x = 23]) { c = x; } } new C().m([undefined]).next(); c;`, 23));
+  it("デフォルトは実値があれば上書きされない", () =>
+    agree(`var c = 0; function f([x = 23]) { c = x; } f([7]); c;`, 7));
+});
+
 describe("Phase 39 — constructor 追跡 / 文字列 for-of / fromCodePoint (roadmap #7)", () => {
   it("fn.prototype.constructor === fn", () =>
     agree(`function T() {} (new T().constructor === T) ? 1 : 0;`, 1));

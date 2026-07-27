@@ -1650,11 +1650,15 @@ function* evalNewExpression(
 // jsmini の JSFunction をネイティブから呼べるようにするヘルパー
 // パラメータバインド: AssignmentPattern (デフォルト引数) を処理
 function* bindParam(param: any, value: unknown, env: Environment, evalEnv: Environment): Generator<unknown, void, unknown> {
+  // 分割パターン内のデフォルト (`[x = 23]` / `{a = 1}`) を解決するリゾルバ。
+  // bindPattern に渡さないと ArrayPattern/ObjectPattern の要素デフォルトが
+  // 適用されず undefined になる (test262 の dstr 系 241 件の主因)
+  const defaultResolver = (expr: any) => exhaustGen(evalExpression(expr, evalEnv));
   if (param.type === "AssignmentPattern") {
     const val = value !== undefined ? value : yield* evalExpression(param.right, evalEnv);
-    bindPattern(param.left, val, env, "let");
+    bindPattern(param.left, val, env, "let", defaultResolver);
   } else {
-    bindPattern(param, value, env, "let");
+    bindPattern(param, value, env, "let", defaultResolver);
   }
 }
 
