@@ -5,7 +5,7 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 40 で async を実行対象化した後): **TW 57.2% / VM 54.4% / JIT 54.1%**
+- test262 (Phase 41 で async generator 実装後): **TW 61.0% / VM 57.9% / JIT 57.6%**
   (14,053 件実行、noStrict/module 520 件スキップ)
   - Phase 39 時点 (async skip) は TW 63.4% / VM 60.3% / JIT 60.1%
   - Phase 40 で async 1,634 件を skip→実行に変更。約173 件が新規パスする一方、
@@ -23,7 +23,7 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 | A. class private `#` のパース | "Unexpected character '#'" | **296** | 中 | パーサ |
 | B. for-of/for-in の分割代入 LHS | "but got Of" (188) + 関連 | **~190** | 中 | パーサ |
 | C. async テストの `$DONE` ランナー対応 | ✅ **Phase 40 完了** (skip 2,114→520、+173 pass) | — | — | テストインフラ |
-| C2. async generator (`async *m`, `for await`) | async 失敗の最大クラスタ | **~877** | 大 | 言語機能 |
+| C2. async generator (`async *m`, `for await`) | ✅ **Phase 41 完了** (TW +535 / VM +487 / JIT +487) | — | — | 言語機能 |
 | D. プロパティ属性の TypeError 精緻化 | "Expected a TypeError" | **277** | 中〜大 | オブジェクトモデル |
 | E. ビルトインのメソッド歯抜け | "Not a function" | **241** | 大 (件数分散) | ビルトイン |
 | F. RegExp exec の結果プロパティ | "__executed.input is expected" | **210** | 中 | RegExp |
@@ -161,9 +161,9 @@ length/charAt/slice/index がバイト単位。非 ASCII で `.length` がずれ
    独立性が高くパーサ改修が主。**次の最優先**
 3. **B + G. 分割代入 LHS のパース拡大** (for-of/for-in/catch) — ~285 件、
    bindPattern は既存なのでパーサ改修が主
-4. **C2. async generator** (`async *m` / `for await`) — async 失敗の最大 ~877 件。
-   ただし async iterator プロトコル + generator + promise 統合の**大機能**。
-   単独フェーズ推奨
+4. ~~**C2. async generator**~~ — ✅ **Phase 41 完了**。パーサ + TW + VM に実装し
+   TW +535 / VM +487 / JIT +487。残る制約: VM は中断点への例外注入
+   (await 拒否を body の try/catch に届ける) が未対応
 5. **F. RegExp exec 結果プロパティ** — 210 件、局所的
 6. **D/E** — 属性精緻化・ビルトイン歯抜けは件数分散なので中長期
 7. **I. JSString UTF-16 化** と **H. .constructor** は大改修、優先度低

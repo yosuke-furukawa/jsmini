@@ -3,15 +3,17 @@
 jsmini の「できていないこと」の台帳。正しさの基準は **node (strict mode)**。
 前半は現状の欠落の全体地図 (2026-07-23 調査)、後半は差分ファザの収束履歴と教訓。
 
-## 現状サマリ (2026-07-27, Phase 40 時点)
+## 現状サマリ (2026-07-27, Phase 41 時点)
 
-- test262 (Phase 40 で async を skip→実行に変更): **TW 57.2% / VM 54.4% / JIT 54.1%**
-  (14,053 件実行、noStrict/module 520 件スキップ)
-  — async 1,634 件を実行対象化し、新規パスは TW +134 / VM +135 / JIT +118 (絶対数)。
-  一方 async generator (~877) / class private # (~218) 等の未実装が可視化され、
-  見かけの率は Phase 39 (TW 63.4 / VM 60.3 / JIT 60.1) から下がった。skip 2,114 → 520
-- Phase 39 参考値 (async skip 時): TW 63.4% / VM 60.3% / JIT 60.1%
-- 内部テスト 1,297 全パス / 差分ファザ **0 / 100,000** で収束維持
+- test262: **TW 61.0% / VM 57.9% / JIT 57.6%** (14,053 件実行、noStrict/module 520 件スキップ)
+  — Phase 41 で async generator (`async function*` / `async *m()` / `for await`) を
+  3 モードに実装。TW +535 / VM +487 / JIT +487 パス
+  — Phase 40 で async 1,634 件を skip→実行に変更 (skip 2,114 → 520)。
+  Phase 39 参考値 (async skip 時): TW 63.4% / VM 60.3% / JIT 60.1%
+- 残る async 失敗 (TW 926 件): private # パース (~156+65)、Promise 反復エラーで
+  $DONE 未到達 (~116)、エラー時に reject せず fulfill する系 (~168) 等
+- 内部テスト 1,315 全パス / 差分ファザ **0 / 100,000** で収束維持
+  (残 1 件は Phase 39 以前からの logs 差ノイズ)
 - ただし TW↔VM には test262 で **TW だけ失敗 / VM だけ失敗**の非対称が残る
   (ファザの generator が class/label 等を生成しないため未検出だった領域)
 
