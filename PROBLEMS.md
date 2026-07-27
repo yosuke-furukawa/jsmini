@@ -5,11 +5,11 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 
 ## 現状サマリ (2026-07-27, Phase 40 時点)
 
-- test262 (Phase 40 で async を skip→実行に変更): **TW 57.2%** (14,053 件実行、
-  noStrict/module 520 件スキップ)。VM/JIT は再計測中
-  — async 1,634 件を実行対象化し約173 件が新規パス。一方 async generator (~877) /
-  class private # (~218) 等の未実装が可視化され、見かけの率は Phase 39 の 63.4% から下がった
-  (絶対パス数は +134)。skip 2,114 → 520
+- test262 (Phase 40 で async を skip→実行に変更): **TW 57.2% / VM 54.4% / JIT 54.1%**
+  (14,053 件実行、noStrict/module 520 件スキップ)
+  — async 1,634 件を実行対象化し、新規パスは TW +134 / VM +135 / JIT +118 (絶対数)。
+  一方 async generator (~877) / class private # (~218) 等の未実装が可視化され、
+  見かけの率は Phase 39 (TW 63.4 / VM 60.3 / JIT 60.1) から下がった。skip 2,114 → 520
 - Phase 39 参考値 (async skip 時): TW 63.4% / VM 60.3% / JIT 60.1%
 - 内部テスト 1,297 全パス / 差分ファザ **0 / 100,000** で収束維持
 - ただし TW↔VM には test262 で **TW だけ失敗 / VM だけ失敗**の非対称が残る

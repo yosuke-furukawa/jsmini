@@ -5,8 +5,8 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 40 で async を実行対象化した後): **TW 57.2%** (14,053 件実行、
-  noStrict/module 520 件スキップ)。VM/JIT は再計測中
+- test262 (Phase 40 で async を実行対象化した後): **TW 57.2% / VM 54.4% / JIT 54.1%**
+  (14,053 件実行、noStrict/module 520 件スキップ)
   - Phase 39 時点 (async skip) は TW 63.4% / VM 60.3% / JIT 60.1%
   - Phase 40 で async 1,634 件を skip→実行に変更。約173 件が新規パスする一方、
     async generator 等の未実装が可視化されて見かけの率は下がった (項目 C 参照)
