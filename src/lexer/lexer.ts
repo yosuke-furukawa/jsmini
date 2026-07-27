@@ -254,14 +254,35 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // Private identifier: #name (Unicode ID_Start/ID_Continue + ZWNJ/ZWJ も許容。
-    // test262 の privatename-identifier-alt 系が #℘ / ZW 文字入りの名前を使う)
-    if (ch === "#" && (isAlpha(peek(1)) || isUnicodeIdStart(peek(1)))) {
+    // Private identifier: #name。Unicode ID_Start/ID_Continue + ZWNJ/ZWJ と
+    // \uXXXX / \u{...} エスケープを許容 (test262 の privatename-identifier 系が
+    // #℘ / #\u{6F} / #ZW_‌_NJ のような名前を使う)。
+    // エスケープは実文字にデコードするので #\u{6F} と #o は同じキーになる
+    if (ch === "#" && (isAlpha(peek(1)) || isUnicodeIdStart(peek(1)) || (peek(1) === "\\" && peek(2) === "u"))) {
       const startCol = column;
       advance(); // skip #
-      const start = pos;
-      while (pos < source.length && (isAlphaNumeric(peek()) || isUnicodeIdContinue(peek()))) advance();
-      pushToken("PrivateIdentifier", "#" + source.slice(start, pos), startCol);
+      let name = "";
+      while (pos < source.length) {
+        const c = peek();
+        if (c === "\\" && peek(1) === "u") {
+          advance(); advance(); // \u
+          let hex = "";
+          if (peek() === "{") {
+            advance();
+            while (pos < source.length && peek() !== "}") { hex += peek(); advance(); }
+            advance(); // }
+          } else {
+            for (let i = 0; i < 4 && pos < source.length; i++) { hex += peek(); advance(); }
+          }
+          name += String.fromCodePoint(parseInt(hex, 16));
+        } else if (isAlphaNumeric(c) || isUnicodeIdContinue(c)) {
+          name += c;
+          advance();
+        } else {
+          break;
+        }
+      }
+      pushToken("PrivateIdentifier", "#" + name, startCol);
       continue;
     }
 
