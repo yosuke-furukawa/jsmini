@@ -5,7 +5,7 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 41 で async generator 実装後): **TW 61.0% / VM 57.9% / JIT 57.6%**
+- test262 (Phase 42 で private # + Unicode 識別子実装後): **TW 64.1% / VM 61.0% / JIT 60.3%**
   (14,053 件実行、noStrict/module 520 件スキップ)
   - Phase 39 時点 (async skip) は TW 63.4% / VM 60.3% / JIT 60.1%
   - Phase 40 で async 1,634 件を skip→実行に変更。約173 件が新規パスする一方、
@@ -20,7 +20,7 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 
 | 施策 | 効く失敗 | 規模 | 難度 | 種別 |
 |---|---|---|---|---|
-| A. class private `#` のパース | "Unexpected character '#'" | **296** | 中 | パーサ |
+| A. class private `#` のパース | ✅ **Phase 42 完了** (TW +442 / VM +433 / JIT +383、Unicode 識別子含む) | — | — | パーサ |
 | B. for-of/for-in の分割代入 LHS | "but got Of" (188) + 関連 | **~190** | 中 | パーサ |
 | C. async テストの `$DONE` ランナー対応 | ✅ **Phase 40 完了** (skip 2,114→520、+173 pass) | — | — | テストインフラ |
 | C2. async generator (`async *m`, `for await`) | ✅ **Phase 41 完了** (TW +535 / VM +487 / JIT +487) | — | — | 言語機能 |
@@ -34,7 +34,15 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 
 ## Part 1: 高 ROI (パーサ / テストインフラ)
 
-### A. class private `#` のパース (296 件) — 最優先候補
+### A. class private `#` のパース ✅ **Phase 42 で完了**
+
+実装: VM のメソッド呼び出し 2 サイトの PrivateIdentifier 対応、`#x in obj`
+(mangled 名の文字列リテラル + 既存 in)、パーサでの不可視プレフィックス mangle
+(観測不能化)、lexer の Unicode ID_Start/Continue + \u エスケープ (public 識別子含む)。
+残る近似: per-class brand ではなく共有キーなので、別クラスの同名 private を
+区別しない / 誤アクセス時の TypeError は出ない。
+
+<details><summary>旧記述</summary>
 
 `#x = 1` の単純フィールドは動くが、`#m()` メソッド / `static #x` / `#x in obj` /
 private getter/setter で lexer が "Unexpected character '#'" を投げる。
@@ -43,6 +51,8 @@ private getter/setter で lexer が "Unexpected character '#'" を投げる。
   jsmini の HiddenClass に `#`-prefixed キーで格納 (外から見えないだけ) で近似可
 - **注意**: private は「ブランドチェック」(`#x in obj`) の意味論まで来ると重い。
   まずパース + フィールド/メソッド格納だけで大半が拾える見込み
+
+</details>
 
 ### B. for-of / for-in の分割代入 LHS (~190 件)
 
@@ -157,8 +167,8 @@ length/charAt/slice/index がバイト単位。非 ASCII で `.length` がずれ
 
 1. ~~**C. async `$DONE` ランナー**~~ — ✅ **Phase 40 完了**。async を実行対象化し
    +173 pass。以降は下記の可視化された async ギャップを潰していく
-2. **A. class private `#`** — 296 件 (うち async 218)。B/G と並ぶ最大クラスタ、
-   独立性が高くパーサ改修が主。**次の最優先**
+2. ~~**A. class private `#`**~~ — ✅ **Phase 42 完了** (Unicode 識別子含む)。
+   TW +442 / VM +433 / JIT +383
 3. **B + G. 分割代入 LHS のパース拡大** (for-of/for-in/catch) — ~285 件、
    bindPattern は既存なのでパーサ改修が主
 4. ~~**C2. async generator**~~ — ✅ **Phase 41 完了**。パーサ + TW + VM に実装し
