@@ -74,6 +74,7 @@ export type Opcode =
 
   // iterator protocol
   | "GetIterator"      // pop obj, call obj[@@iterator](), push iterator
+  | "GetAsyncIterator" // pop obj, call obj[@@asyncIterator]() (無ければ @@iterator にフォールバック), push iterator
   | "IteratorNext"     // pop iterator, call iterator.next(), push result, push iterator
   | "IteratorComplete" // pop result, push result.done
   | "IteratorValue"    // pop result, push result.value

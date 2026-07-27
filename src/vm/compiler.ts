@@ -1300,9 +1300,11 @@ class BytecodeCompiler {
         const useLocal = this.isFunction;
         const iterSlot = useLocal ? this.localCount++ : 0;
         const iterG = !useLocal ? this.addConstant(`__iter_${this.currentOffset()}`) : 0;
+        // for await (x of y): async iterator を取り、next() の戻りと値を Await で決着
+        const isAwait = (stmt as any).await === true;
 
         this.compileExpression(stmt.right);
-        this.emit("GetIterator");
+        this.emit(isAwait ? "GetAsyncIterator" : "GetIterator");
         if (useLocal) this.emit("StaLocal", iterSlot); else this.emit("StaGlobal", iterG);
         this.emit("Pop");
 
@@ -1312,6 +1314,7 @@ class BytecodeCompiler {
         // IteratorNext: pop iterator, push result
         if (useLocal) this.emit("LdaLocal", iterSlot); else this.emit("LdaGlobal", iterG);
         this.emit("IteratorNext");
+        if (isAwait) this.emit("Await"); // async iterator の next() は Promise
         // stack: [result]
 
         // IteratorComplete: peek result, push done
@@ -1323,6 +1326,7 @@ class BytecodeCompiler {
 
         // IteratorValue: pop result, push value
         this.emit("IteratorValue");
+        if (isAwait) this.emit("Await"); // sync ソースの値も await (async-from-sync 相当)
         // stack: [value]
 
         this.compileBindingTarget(stmt.left.declarations[0].id);
