@@ -158,6 +158,8 @@ export function parse(source: string): Program {
   function parseAsyncFunctionDeclaration(): Statement {
     eat("Async");
     eat("Function");
+    const generator = current().type === "Star";
+    if (generator) eat("Star");
     const id = parseIdentifier();
     eat("LeftParen");
     resetParamState();
@@ -168,7 +170,7 @@ export function parse(source: string): Program {
     }
     eat("RightParen");
     const body = parseBlockStatement() as any;
-    return { type: "FunctionDeclaration", id, params, body, async: true } as any;
+    return { type: "FunctionDeclaration", id, params, body, async: true, generator } as any;
   }
 
   // FunctionDeclaration = 'function' Identifier '(' params ')' BlockStatement
@@ -400,6 +402,9 @@ export function parse(source: string): Program {
   // ForStatement or ForOfStatement
   function parseForStatement(): Statement {
     eat("For");
+    // for await (x of y) — await は of 形式でのみ有効
+    const isAwait = current().type === "Await";
+    if (isAwait) eat("Await");
     eat("LeftParen");
 
     // for (var/let/const ...  of  expr) → ForOfStatement
@@ -434,7 +439,7 @@ export function parse(source: string): Program {
           declarations: [{ type: "VariableDeclarator", id, init: null }],
           kind,
         };
-        return { type: "ForOfStatement", left, right, body };
+        return { type: "ForOfStatement", left, right, body, await: isAwait } as any;
       }
 
       // 通常の for — init は VariableDeclaration (複数宣言子対応)
@@ -1193,6 +1198,8 @@ export function parse(source: string): Program {
           // async function expression
           eat("Async");
           eat("Function");
+          const generator = current().type === "Star";
+          if (generator) eat("Star");
           let id: any = null;
           if (current().type === "Identifier") id = parseIdentifier();
           eat("LeftParen");
@@ -1204,7 +1211,7 @@ export function parse(source: string): Program {
           }
           eat("RightParen");
           const body = parseBlockStatement() as any;
-          return { type: "FunctionExpression", id, params, body, async: true } as any;
+          return { type: "FunctionExpression", id, params, body, async: true, generator } as any;
         }
         // async arrow: async (params) => body or async ident => body
         if (peek().type === "Identifier" && tokens[pos + 2]?.type === "Arrow") {
