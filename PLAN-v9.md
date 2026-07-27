@@ -5,8 +5,11 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262: **TW 63.4% / VM 60.3% / JIT 60.1%** (12,459 件実行、noStrict/async/module 等 2,114 件スキップ)
-  - Phase 39 で開始時 54% から +6〜9pt。TW は dstr パラメータデフォルト修正で 60→63.4% に跳ねた
+- test262 (Phase 40 で async を実行対象化した後): **TW 57.2%** (14,053 件実行、
+  noStrict/module 520 件スキップ)。VM/JIT は再計測中
+  - Phase 39 時点 (async skip) は TW 63.4% / VM 60.3% / JIT 60.1%
+  - Phase 40 で async 1,634 件を skip→実行に変更。約173 件が新規パスする一方、
+    async generator 等の未実装が可視化されて見かけの率は下がった (項目 C 参照)
   - **TW > VM の逆転**が起きている (TW が dstr で先行)。VM 側にも同種の穴がないか要確認
 - 内部テスト 1,287 全パス / 差分ファザ **0/100k 収束** (残 4 件は評価順/logs 件数差のノイズ)
 - Octane JIT 回帰なし (richards ~130ms / deltablue ~195ms / navier ~145ms)
@@ -19,7 +22,8 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 |---|---|---|---|---|
 | A. class private `#` のパース | "Unexpected character '#'" | **296** | 中 | パーサ |
 | B. for-of/for-in の分割代入 LHS | "but got Of" (188) + 関連 | **~190** | 中 | パーサ |
-| C. async テストの `$DONE` ランナー対応 | 現在スキップの 1,629 件を実行可能に | **~1,629 (skip 解放)** | 中 | テストインフラ |
+| C. async テストの `$DONE` ランナー対応 | ✅ **Phase 40 完了** (skip 2,114→520、+173 pass) | — | — | テストインフラ |
+| C2. async generator (`async *m`, `for await`) | async 失敗の最大クラスタ | **~877** | 大 | 言語機能 |
 | D. プロパティ属性の TypeError 精緻化 | "Expected a TypeError" | **277** | 中〜大 | オブジェクトモデル |
 | E. ビルトインのメソッド歯抜け | "Not a function" | **241** | 大 (件数分散) | ビルトイン |
 | F. RegExp exec の結果プロパティ | "__executed.input is expected" | **210** | 中 | RegExp |
@@ -47,15 +51,25 @@ private getter/setter で lexer が "Unexpected character '#'" を投げる。
 - parseForStatement の LHS 解析を BindingPattern 対応に
 - bindPattern は既にある (dstr 修正済み) ので、パースが通れば実行は概ね動くはず
 
-### C. async テストの `$DONE` ランナー対応 (~1,629 件がスキップ中)
+### C. async テストの `$DONE` ランナー対応 ✅ **Phase 40 で実装済み**
 
-async/await + JSPI は**実装済みで動く**のに、test262 の async テストは
-`$DONE` コールバック方式のため runner がスキップしている。これを実装すると
-**現在カウント外の 1,629 件が実行対象になり、その多くが PASS する**見込み。
-- runner に doneprintHandle.js 相当 (`$DONE` を受け取り microtask drain 後に
-  成否判定) を実装
-- **単一施策での見かけ上のスコア寄与が最大**の可能性。ただし分母も増えるので
-  「実行数 12,459 → ~14,088」で率の出方は変わる。真の実力可視化として価値大
+runner に native `$DONE` 注入 + `drainMicrotasks` 後の成否判定を実装
+(ハーネスに asyncTest / assert.throwsAsync / checkSequence /
+checkSettledPromises を追加)。skip 2,114 → 520、実行数 12,459 → 14,053。
+
+結果 (TW): async 1,634 件のうち **約173 件が新規パス**。残り約1,461 件は
+下記の**本物の機能ギャップ**が可視化された (以前は skip で隠れていた):
+
+| 原因 | 件数 (async のみ) | 対応 |
+|---|---|---|
+| **async generator** (`async *m(){}` / `for await`) | ~877 | 未実装の大機能。**新フェーズ候補** |
+| **class private `#`** のパース | ~218 | 項目 A と同一 |
+| Promise.all(非イテラブル) 等が settle せず `$DONE` 未到達 | ~116 | Promise の反復エラー処理バグ (中) |
+| async arrow / その他パース | ~130 | 項目 B/G と重複 |
+
+見かけの率は「skip 除外」方式のため 63.4% → 57.2% に下がるが、これは
+2,114 の隠れ skip を正直な実行に置き換えた結果 (絶対パス数は +134)。
+プロジェクト方針「canRun 廃止・正直に Fail」に沿う。
 
 ### G. try/catch / その他パース (~95 件 + 関連)
 
@@ -141,15 +155,19 @@ length/charAt/slice/index がバイト単位。非 ASCII で `.length` がずれ
 
 ## 推奨する着手順
 
-1. **C. async `$DONE` ランナー** — 1,629 件を実行対象化。実装済み機能の
-   可視化で最大のインパクト。テストインフラなのでエンジン改変リスク無し
-2. **B + G. 分割代入 LHS のパース拡大** (for-of/for-in/catch) — ~285 件、
+1. ~~**C. async `$DONE` ランナー**~~ — ✅ **Phase 40 完了**。async を実行対象化し
+   +173 pass。以降は下記の可視化された async ギャップを潰していく
+2. **A. class private `#`** — 296 件 (うち async 218)。B/G と並ぶ最大クラスタ、
+   独立性が高くパーサ改修が主。**次の最優先**
+3. **B + G. 分割代入 LHS のパース拡大** (for-of/for-in/catch) — ~285 件、
    bindPattern は既存なのでパーサ改修が主
-3. **A. class private `#`** — 296 件、独立性が高い
-4. **F. RegExp exec 結果プロパティ** — 210 件、局所的
-5. **D/E** — 属性精緻化・ビルトイン歯抜けは件数分散なので中長期
-6. **I. JSString UTF-16 化** と **H. .constructor** は大改修、優先度低
-7. 並行して **Part 5** (oracle node / dstr 横展開) で品質の底上げ
+4. **C2. async generator** (`async *m` / `for await`) — async 失敗の最大 ~877 件。
+   ただし async iterator プロトコル + generator + promise 統合の**大機能**。
+   単独フェーズ推奨
+5. **F. RegExp exec 結果プロパティ** — 210 件、局所的
+6. **D/E** — 属性精緻化・ビルトイン歯抜けは件数分散なので中長期
+7. **I. JSString UTF-16 化** と **H. .constructor** は大改修、優先度低
+8. 並行して **Part 5** (oracle node / dstr 横展開) で品質の底上げ
 
 ## 検証方法 (共通)
 
