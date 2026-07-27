@@ -100,6 +100,20 @@ export type Opcode =
   | "Construct"       // Construct <argc> — new 演算子
   | "LoadThis"        // 現在の this を push
 
+  // class 継承 (Phase 39)
+  | "ClassLink"       // pop parent, peek child — prototype チェーンをリンクし __superClass/__homeProto をタグ付け
+  | "CallSuper"       // CallSuper <argc> — super(...) 呼び出し。frame.func.__superClass を this 付きで同期実行
+  | "CallSuperArray"  // pop 配列を引数列として super(...) (派生クラスのデフォルト ctor の引数転送用)
+  | "GetSuperProp"    // GetSuperProp <nameIdx> — super.name の解決 (frame.func.__homeProto から読む)
+
+  // spread 呼び出し (Phase 39)。引数はコンパイル時に配列へ集約し callFunction で同期実行
+  | "CallSpread"        // stack: [argsArray, callee] — f(...args)
+  | "CallMethodSpread"  // stack: [argsArray, obj, method] — obj.m(...args)
+  | "ConstructSpread"   // stack: [argsArray, ctor] — new C(...args)
+  | "CopyDataProps"     // pop source, peek target — own enumerable props を target にコピー ({...obj})
+  | "DefineMethodProp"  // DefineMethodProp <nameIdx> — pop value, peek target。class メソッド定義
+                        // (spec 準拠の non-enumerable, writable, configurable)
+
   // 制御フロー
   | "Jump"            // Jump <offset> — 無条件ジャンプ (pc = operand)
   | "JumpIfFalse"     // JumpIfFalse <offset> — falsy なら pc = operand (pop する)
@@ -142,6 +156,7 @@ export type UpvalueInfo = {
 
 export type BytecodeFunction = {
   name: string;
+  length?: number;         // spec の fn.length (デフォルト/rest より前のパラメータ数)
   paramCount: number;
   localCount: number;
   hasRestParam?: boolean;  // 最後のパラメータが ...rest

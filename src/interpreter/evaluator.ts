@@ -180,6 +180,11 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   const twStrConv = (v: unknown): string => {
     if (isJSString(v)) return jsStringToString(v);
     if (Array.isArray(v)) return arrayToPrimitiveString(v);
+    // JSFunction の host ラッパー (native 呼び出し時に自動ラップされたもの):
+    // ラッパー自身のソーステキストではなく、プロパティキー正規化
+    // (classKeyName/resolveMemberKey) と同じ "[object Object]" に揃える。
+    // これが揃わないと class computed key `[fn]` を `String(fn)` で引けない
+    if (typeof v === "function" && (v as any).__wrappedJSFunction) return "[object Object]";
     if (v !== null && typeof v === "object") {
       const p = toPrimitive(v, "string");
       if (isJSString(p)) return jsStringToString(p);
@@ -209,7 +214,8 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     if (new.target) return new String(s);
     return internString(s);
   } as unknown as StringConstructor;
-  StringCtor.fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
+  StringCtor.fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes.map(c => Number(c) & 0xffff)));
+  (StringCtor as any).fromCodePoint = (...cps: number[]) => internString(String.fromCodePoint(...cps.map(c => Number(c))));
   (StringCtor as any).prototype = String.prototype;
   env.defineReadOnly("String", StringCtor);
   env.defineReadOnly("Array", Array);
@@ -381,24 +387,70 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   };
   twObjectWrapper.assign = Object.assign;
   twObjectWrapper.create = Object.create;
-  twObjectWrapper.freeze = (obj: unknown) => obj;
+  twObjectWrapper.freeze = (obj: unknown) => {
+    // TW のオブジェクトは host object なので host freeze で属性が実効する
+    // (evaluator の代入は strict モードの TS コードなので違反は TypeError)。
+    // JSString (intern 共有) は凍結せず no-op — プリミティブ扱い (ES2015+)
+    if (obj && typeof obj === "object" && !isJSString(obj)) Object.freeze(obj);
+    return obj;
+  };
+  twObjectWrapper.seal = (obj: unknown) => {
+    if (obj && typeof obj === "object" && !isJSString(obj)) Object.seal(obj);
+    return obj;
+  };
+  twObjectWrapper.preventExtensions = (obj: unknown) => {
+    if (obj && typeof obj === "object" && !isJSString(obj)) Object.preventExtensions(obj);
+    return obj;
+  };
+  twObjectWrapper.isFrozen = (obj: unknown) => (obj && typeof obj === "object") ? Object.isFrozen(obj) : true;
+  twObjectWrapper.isSealed = (obj: unknown) => (obj && typeof obj === "object") ? Object.isSealed(obj) : true;
+  twObjectWrapper.isExtensible = (obj: unknown) => (obj && typeof obj === "object") ? Object.isExtensible(obj) : false;
   const twToKey = (key: unknown): string | symbol => {
     if (isJSString(key)) return jsStringToString(key);
     return typeof key === "symbol" ? key : String(key);
   };
   twObjectWrapper.defineProperty = (obj: unknown, key: unknown, desc: any) => {
-    if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
+    // JSString は intern 共有オブジェクトなので定義を許すと全プログラムに汚染が
+    // 漏れる。spec 通りプリミティブは TypeError (VM 側と同方針)
+    if (obj === null || isJSString(obj) || (typeof obj !== "object" && typeof obj !== "function")) {
       throw new TypeError("Object.defineProperty called on non-object");
     }
     const k = twToKey(key);
-    if (desc && typeof desc === "object" && ("get" in desc || "set" in desc)) {
-      throw new TypeError("accessor descriptors not yet supported");
+    if (!desc || typeof desc !== "object") throw new TypeError("Property description must be an object");
+    // host defineProperty に「指定されたフィールドだけ」を渡す — デフォルト
+    // (新規は false×3) と再定義検証 (configurable:false 等) は host が spec 通り
+    // 実施する。get/set が JSFunction なら host callable に包む
+    const hostDesc: PropertyDescriptor = {};
+    if ("value" in desc) hostDesc.value = desc.value;
+    if ("writable" in desc) hostDesc.writable = !!desc.writable;
+    if ("enumerable" in desc) hostDesc.enumerable = !!desc.enumerable;
+    if ("configurable" in desc) hostDesc.configurable = !!desc.configurable;
+    // 共有ビルトイン prototype への定義は省略時 writable/configurable を true に
+    // (jsmini は host prototype を全 evaluate 間で共有するため。VM 側と同方針)
+    const twSharedProtos: unknown[] = [Object.prototype, Array.prototype, String.prototype, Number.prototype, Boolean.prototype, Function.prototype, RegExp.prototype];
+    if (twSharedProtos.includes(obj)) {
+      if (!("configurable" in desc)) hostDesc.configurable = true;
+      if (!("writable" in desc) && !("get" in desc) && !("set" in desc)) hostDesc.writable = true;
     }
-    if (desc && typeof desc === "object" && "value" in desc) {
-      // enumerable は JS デフォルト (false) — 素の代入だと for-in を汚染する
-      // (Object.prototype への定義で顕在化)。writable/configurable は true
-      Object.defineProperty(obj, k, { value: desc.value, writable: true, configurable: true });
+    if ("get" in desc) {
+      const g = desc.get;
+      if (g === undefined || typeof g === "function") hostDesc.get = g;
+      else {
+        const w = function(this: unknown) { return callJSFunctionSync(g, this, []); };
+        (w as any).__wrappedJSFunction = g; // gOPD で元の JSFunction を返すためのタグ
+        hostDesc.get = w;
+      }
     }
+    if ("set" in desc) {
+      const st = desc.set;
+      if (st === undefined || typeof st === "function") hostDesc.set = st;
+      else {
+        const w = function(this: unknown, v: unknown) { callJSFunctionSync(st, this, [v]); };
+        (w as any).__wrappedJSFunction = st;
+        hostDesc.set = w;
+      }
+    }
+    Object.defineProperty(obj, k, hostDesc);
     return obj;
   };
   twObjectWrapper.defineProperties = (obj: unknown, descs: any) => {
@@ -410,15 +462,45 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     return obj;
   };
   twObjectWrapper.getOwnPropertyDescriptor = (obj: unknown, key: unknown) => {
+    // native 呼び出し時に JSFunction は host ラッパーに包まれて届く → 元へ復元
+    if (typeof obj === "function" && (obj as any).__wrappedJSFunction) {
+      obj = (obj as any).__wrappedJSFunction;
+    }
+    // host 関数 (ビルトイン) の name/length も spec 属性 + intern 文字列で合成
+    if (typeof obj === "function") {
+      const k0 = twToKey(key);
+      if (k0 === "name" || k0 === "length") {
+        return {
+          value: k0 === "name" ? internString((obj as Function).name ?? "") : (obj as Function).length,
+          writable: false, enumerable: false, configurable: true,
+        };
+      }
+      return Object.getOwnPropertyDescriptor(obj, k0);
+    }
     if (obj === null || typeof obj !== "object") return undefined;
     const k = twToKey(key);
-    if (!Object.prototype.hasOwnProperty.call(obj, k)) return undefined;
-    return {
-      value: (obj as any)[k],
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    };
+    // JSFunction の name/length は spec 属性で合成 (writable:false,
+    // enumerable:false, configurable:true)。fn.name への後書き (名前推論) が
+    // あるためオブジェクト自体は変更しない
+    if (isJSFunction(obj) && (k === "name" || k === "length")) {
+      let fnLen = 0;
+      for (const prm of ((obj as any).params ?? []) as any[]) {
+        if (prm.type === "AssignmentPattern" || prm.type === "RestElement") break;
+        fnLen++;
+      }
+      return {
+        value: k === "name" ? internString((obj as any).name ?? "") : fnLen,
+        writable: false, enumerable: false, configurable: true,
+      };
+    }
+    // host の descriptor をそのまま返す (属性は host が正しく追跡している)。
+    // accessor の get/set がラップ済み JSFunction なら元へ復元 (identity 維持)
+    const hd = Object.getOwnPropertyDescriptor(obj, k);
+    if (hd) {
+      if (hd.get && (hd.get as any).__wrappedJSFunction) (hd as any).get = (hd.get as any).__wrappedJSFunction;
+      if (hd.set && (hd.set as any).__wrappedJSFunction) (hd as any).set = (hd.set as any).__wrappedJSFunction;
+    }
+    return hd;
   };
   twObjectWrapper.getPrototypeOf = (obj: unknown) => {
     if (obj === null || typeof obj !== "object") return null;
@@ -632,6 +714,7 @@ function hoistFunctionDeclarations(stmts: Statement[], env: Environment): void {
       };
       if ((stmt as any).generator) (fn as any).isGenerator = true;
       if ((stmt as any).async) (fn as any).isAsync = true;
+      linkConstructor(fn);
       env.define(stmt.id.name, fn);
     }
   }
@@ -667,6 +750,17 @@ function classKeyName(key: any, computed?: boolean, env?: Environment): string {
   return key.name;
 }
 
+// JSFunction の prototype.constructor に自身を紐付ける (non-enumerable)。
+// new f().constructor === f を identity 込みで満たす
+function linkConstructor(fn: any): any {
+  if (fn && fn.prototype && typeof fn.prototype === "object") {
+    Object.defineProperty(fn.prototype, "constructor", {
+      value: fn, writable: true, enumerable: false, configurable: true,
+    });
+  }
+  return fn;
+}
+
 function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, env: Environment): Generator<unknown, unknown, unknown> {
   const superClass = stmt.superClass ? (yield* evalExpression(stmt.superClass, env)) as JSFunction | null : null;
 
@@ -689,7 +783,7 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
       isClass: true,
       prototype: {},
     };
-  } else if (superClass) {
+  } else if (superClass && (superClass as any).params) {
     ctorFn = {
       [JS_FUNCTION_BRAND]: true,
       name: className,
@@ -699,6 +793,19 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
       isClass: true,
       prototype: {},
     };
+  } else if (superClass) {
+    // host コンストラクタ (Error 等) の派生デフォルト ctor。
+    // 本体は空にし、NewExpression 側で host インスタンスの own props をコピーする
+    ctorFn = {
+      [JS_FUNCTION_BRAND]: true,
+      name: className,
+      params: [],
+      body: { type: "BlockStatement", body: [] } as any,
+      closure: env,
+      isClass: true,
+      prototype: {},
+    };
+    (ctorFn as any).__hostSuperDefault = superClass;
   } else {
     ctorFn = {
       [JS_FUNCTION_BRAND]: true,
@@ -711,9 +818,14 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
     };
   }
 
-  // インスタンスフィールドを __instanceFields に保存 (new 時に初期化)
-  if (instanceFields.length > 0) {
-    (ctorFn as any).__instanceFields = instanceFields;
+  linkConstructor(ctorFn);
+  // インスタンスフィールドを __instanceFields に保存 (new 時に初期化)。
+  // 派生クラスのデフォルト ctor (親の params/body を再利用) は super() を
+  // 実行しないため、親のフィールドをマージして new 時にまとめて初期化する
+  const parentFields = (!ctorMethod && superClass && (superClass as any).__instanceFields)
+    ? (superClass as any).__instanceFields as any[] : [];
+  if (instanceFields.length > 0 || parentFields.length > 0) {
+    (ctorFn as any).__instanceFields = [...parentFields, ...instanceFields];
   }
 
   // メソッド/getter/setter を prototype (or class 自体 for static) に登録
@@ -733,7 +845,9 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
         prototype: {},
       };
       if ((member.value as any).generator) (fn as any).isGenerator = true;
-      (target as any)[name] = fn;
+      if ((member.value as any).async) (fn as any).isAsync = true;
+      // class メソッドは spec 準拠で non-enumerable
+      Object.defineProperty(target as object, name, { value: fn, writable: true, enumerable: false, configurable: true });
     } else if (member.kind === "get" || member.kind === "set") {
       const fn: JSFunction = {
         [JS_FUNCTION_BRAND]: true,
@@ -780,7 +894,12 @@ function* evalClassDeclaration(stmt: Statement & { type: "ClassDeclaration" }, e
 
   // extends: プロトタイプチェーンを接続
   if (superClass) {
-    ctorFn.prototype[PROTO_KEY] = superClass.prototype;
+    if ((superClass as any).prototype) {
+      ctorFn.prototype[PROTO_KEY] = (superClass as any).prototype;
+    }
+    // 静的側: B.staticMethod() が親の static を見つけられるように
+    // (getProperty は PROTO_KEY チェーンを辿る)
+    (ctorFn as any)[PROTO_KEY] = superClass;
     const classEnv = new Environment(env);
     classEnv.define("__super__", superClass);
     ctorFn.closure = classEnv;
@@ -1043,6 +1162,17 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
           if (!result || (result as any).done) break;
           iterable.push((result as any).value);
         }
+      } else if (isJSString(rawIterable) || typeof rawIterable === "string") {
+        // 文字列の for-of: サロゲートペア対応で 1 コードポイントずつ (spec)。
+        // 各要素は JSString (intern) で返す — VM と一致させる
+        const str = isJSString(rawIterable) ? jsStringToString(rawIterable) : rawIterable as string;
+        iterable = [];
+        for (let i = 0; i < str.length; ) {
+          const cp = str.codePointAt(i)!;
+          const ch = cp > 0xffff ? str.slice(i, i + 2) : str[i];
+          iterable.push(internString(ch));
+          i += cp > 0xffff ? 2 : 1;
+        }
       } else {
         iterable = rawIterable as unknown[];
       }
@@ -1129,6 +1259,7 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
         fnEnv.define(expr.id.name, fn);
         fn.closure = fnEnv;
       }
+      linkConstructor(fn);
       return fn;
     }
     case "ClassExpression": {
@@ -1223,7 +1354,14 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       for (const prop of expr.properties) {
         if (prop.type === "SpreadElement") {
           const source = (yield* evalExpression(prop.argument, env)) as Record<string, unknown>;
-          if (source) Object.assign(obj, source);
+          if (isJSString(source)) {
+            // {..."ab"} = {0:"a", 1:"b"}。JSString は Object.assign だと内部
+            // フィールドが漏れるので 1 文字ずつインデックスキーで展開する
+            const s = jsStringToString(source);
+            for (let i = 0; i < s.length; i++) (obj as Record<string, unknown>)[String(i)] = createSeqString(s[i]);
+          } else if (source) {
+            Object.assign(obj, source);
+          }
         } else {
           const rawKey = prop.computed ? yield* evalExpression(prop.key, env) : undefined;
           const key = prop.computed ? (isJSSymbol(rawKey) ? rawKey.key : isJSString(rawKey) ? jsStringToString(rawKey) : String(rawKey)) : (prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value));
@@ -1287,6 +1425,17 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
       return result;
     }
     case "MemberExpression": {
+      // super.x の読み出し — 親 prototype チェーンから解決
+      if (expr.object.type === "Identifier" && (expr.object as any).name === "__super__") {
+        const superFn = env.get("__super__") as any;
+        const key = yield* resolveMemberKey(expr, env);
+        let proto: any = superFn?.prototype;
+        while (proto && typeof proto === "object") {
+          if (Object.prototype.hasOwnProperty.call(proto, key)) return proto[key];
+          proto = proto[PROTO_KEY];
+        }
+        return undefined;
+      }
       const obj = yield* evalExpression(expr.object, env);
       if (obj === null || obj === undefined) {
         if ((expr as any).optional) return undefined; // ?. → undefined
@@ -1407,8 +1556,11 @@ function* evalNewExpression(
   const constructor = yield* evalExpression(expr.callee, env);
   const args = yield* evalArguments(expr.arguments, env);
 
-  // 組み込みコンストラクタ (Error 等)
-  if (typeof constructor === "object" && constructor !== null && "__nativeConstructor" in constructor) {
+  // 組み込みコンストラクタ (Error 等)。own プロパティ判定にする —
+  // `class E extends Error` は PROTO_KEY 経由で __nativeConstructor が
+  // 見えてしまうが、E 自体は JSFunction なので通常経路で実行する
+  if (typeof constructor === "object" && constructor !== null
+      && Object.prototype.hasOwnProperty.call(constructor, "__nativeConstructor")) {
     const ctor = constructor as { name: string };
     if (ctor.name === "Error") {
       return { message: args[0] ?? "" };
@@ -1432,6 +1584,25 @@ function* evalNewExpression(
   // 新しいオブジェクトを作成し、prototype チェーンを接続
   const newObj: Record<string, unknown> = {};
   newObj[PROTO_KEY] = constructor.prototype;
+
+  // native/host コンストラクタ (Error 等) の派生デフォルト ctor:
+  // 親のプロパティ (message 等) を this に与える
+  if ((constructor as any).__hostSuperDefault) {
+    const hostCtor = (constructor as any).__hostSuperDefault;
+    if (hostCtor && typeof hostCtor === "object" && hostCtor.__nativeConstructor) {
+      // jsmini の native コンストラクタ (Error)
+      if (hostCtor.name === "Error") newObj.message = args[0] ?? "";
+    } else if (typeof hostCtor === "function") {
+      try {
+        const tmp = new (hostCtor as new (...a: unknown[]) => object)(...args);
+        if (tmp && typeof tmp === "object") {
+          for (const k of Object.getOwnPropertyNames(tmp)) {
+            newObj[k] = (tmp as Record<string, unknown>)[k];
+          }
+        }
+      } catch { /* host ctor が失敗しても継続 */ }
+    }
+  }
 
   // 関数スコープを作成し this を新オブジェクトにバインド
   const fnEnv = new Environment(constructor.closure, true);
@@ -1479,11 +1650,15 @@ function* evalNewExpression(
 // jsmini の JSFunction をネイティブから呼べるようにするヘルパー
 // パラメータバインド: AssignmentPattern (デフォルト引数) を処理
 function* bindParam(param: any, value: unknown, env: Environment, evalEnv: Environment): Generator<unknown, void, unknown> {
+  // 分割パターン内のデフォルト (`[x = 23]` / `{a = 1}`) を解決するリゾルバ。
+  // bindPattern に渡さないと ArrayPattern/ObjectPattern の要素デフォルトが
+  // 適用されず undefined になる (test262 の dstr 系 241 件の主因)
+  const defaultResolver = (expr: any) => exhaustGen(evalExpression(expr, evalEnv));
   if (param.type === "AssignmentPattern") {
     const val = value !== undefined ? value : yield* evalExpression(param.right, evalEnv);
-    bindPattern(param.left, val, env, "let");
+    bindPattern(param.left, val, env, "let", defaultResolver);
   } else {
-    bindPattern(param, value, env, "let");
+    bindPattern(param, value, env, "let", defaultResolver);
   }
 }
 
@@ -1666,6 +1841,27 @@ function* evalCallExpression(
   let thisValue: unknown = undefined;
   let fn: unknown;
   if (expr.callee.type === "MemberExpression") {
+    // super.m(...) — メソッドは親 prototype チェーンから解決し、
+    // this は現在の this のまま呼ぶ (従来は superClass の静的側を見る誤実装だった)
+    if (expr.callee.object.type === "Identifier" && (expr.callee.object as any).name === "__super__") {
+      const superFn = env.get("__super__") as any;
+      const key = yield* resolveMemberKey(expr.callee, env);
+      let proto: any = superFn?.prototype;
+      let method: unknown = undefined;
+      while (proto && typeof proto === "object") {
+        if (Object.prototype.hasOwnProperty.call(proto, key)) { method = proto[key]; break; }
+        proto = proto[PROTO_KEY];
+      }
+      const superArgs = yield* evalArguments(expr.arguments, env);
+      const selfThis = env.getThis();
+      if (isJSFunction(method)) {
+        return yield* evalCallWithJSFunction(method, superArgs, env, selfThis);
+      }
+      if (typeof method === "function") {
+        return (method as Function).apply(selfThis, superArgs);
+      }
+      throw new TypeError(`super.${String(key)} is not a function`);
+    }
     thisValue = yield* evalExpression(expr.callee.object, env);
     const key = yield* resolveMemberKey(expr.callee, env);
     fn = getProperty(thisValue as JSObject, key);
@@ -1768,11 +1964,42 @@ function* evalCallExpression(
     return result;
   }
 
+  // super() で親が native (jsmini の Error オブジェクト) / host コンストラクタ:
+  // 親の与えるプロパティ (message 等) を this に反映する
+  if (expr.callee.type === "Identifier" && expr.callee.name === "__super__" && !isJSFunction(fn)) {
+    const self = env.getThis() as Record<string, unknown> | undefined;
+    if (fn && typeof fn === "object" && (fn as any).__nativeConstructor) {
+      if ((fn as any).name === "Error" && self && typeof self === "object") {
+        self.message = args[0] ?? "";
+      }
+      return undefined;
+    }
+    if (typeof fn === "function") {
+      try {
+        const tmp = new (fn as new (...a: unknown[]) => object)(...args);
+        if (tmp && typeof tmp === "object" && self && typeof self === "object") {
+          for (const k of Object.getOwnPropertyNames(tmp)) {
+            self[k] = (tmp as Record<string, unknown>)[k];
+          }
+        }
+      } catch { /* host ctor 失敗は無視 */ }
+      return undefined;
+    }
+  }
+
   // super() 呼び出し: 親コンストラクタを現在の this で実行
   if (expr.callee.type === "Identifier" && expr.callee.name === "__super__" && isJSFunction(fn)) {
     const superFn = fn;
     const superEnv = new Environment(superFn.closure, true);
     superEnv.setThis(env.getThis());
+    // 親の instance fields を初期化 (親の ctor 本体より先)
+    if ((superFn as any).__instanceFields) {
+      const selfObj = env.getThis() as Record<string, unknown>;
+      for (const field of (superFn as any).__instanceFields) {
+        const fname = classKeyName(field.key, field.computed, superEnv);
+        selfObj[fname] = field.value ? yield* evalExpression(field.value, superEnv) : undefined;
+      }
+    }
     for (let i = 0; i < superFn.params.length; i++) {
       const param = superFn.params[i];
       if (param.type === "RestElement") {
@@ -1796,11 +2023,16 @@ function* evalCallExpression(
 
   // ネイティブ関数 (console.log 等)
   if (typeof fn === "function") {
-    // コールバック系メソッド: jsmini 関数を呼べるようにラップ
+    // コールバック系メソッド: jsmini 関数を呼べるようにラップ。
+    // ラッパーには元の JSFunction をタグ付けする — String(fn) 等の文字列化が
+    // ラッパー自身のソーステキストを漏らさないように (twStrConv が参照)
     const wrappedArgs = args.some(a => isJSFunction(a))
-      ? args.map(a =>
-          isJSFunction(a) ? (...nativeArgs: unknown[]) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env)) : a
-        )
+      ? args.map(a => {
+          if (!isJSFunction(a)) return a;
+          const w = (...nativeArgs: unknown[]) => exhaustGen(evalCallWithJSFunction(a, nativeArgs, env));
+          (w as any).__wrappedJSFunction = a;
+          return w;
+        })
       : args;
     if (thisValue !== undefined) {
       return (fn as Function).apply(thisValue, wrappedArgs);

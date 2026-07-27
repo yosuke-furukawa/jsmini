@@ -30,6 +30,11 @@ class BytecodeCompiler {
   private hasRestParam = false;
   private isGenerator = false;
   private isAsync = false;
+  private fnLength = 0; // spec の fn.length (デフォルト/rest より前のパラメータ数)
+  // class の instance field 初期化式 (ctor 本体の前に this.k = expr として emit)。
+  // 従来はリテラルのみ Construct が AST 解釈しており、`f = 1 + 2` が VM だけ
+  // undefined になっていた
+  private pendingFieldInits: any[] | null = null;
   private lexicalLocals = new Set<string>(); // let/const で宣言されたローカル変数名
   private constLocals = new Set<string>(); // const で宣言された変数名 (再代入を禁止するため)
   private blockDepth = 0; // BlockStatement のネスト深さ (ブロック内 function 宣言の判定用)
@@ -291,9 +296,158 @@ class BytecodeCompiler {
     this.emit("StaGlobalStrict", nameIdx);
   }
 
+  // class をコンパイルしてスタックに残す (ClassDeclaration / ClassExpression 共通)。
+  // extends がある場合はメソッド設定後に superClass を評価して ClassLink を emit する
+  // (ClassLink が prototype チェーンのリンクとメソッドへの __homeProto タグ付けを行う)
+  compileClassToStack(stmt: any): void {
+    const className = stmt.id?.name ?? "";
+    const hasSuper = !!stmt.superClass;
+    // インスタンスフィールドを収集
+    const instanceFields = stmt.body.body.filter((m: any) => m.type === "PropertyDefinition" && !m.static);
+
+    // constructor を BytecodeFunction にコンパイル
+    const ctorMethod = stmt.body.body.find((m: any) => m.type === "MethodDefinition" && m.kind === "constructor");
+    const fnCompiler = new BytecodeCompiler(this);
+    if (instanceFields.length > 0) fnCompiler.pendingFieldInits = instanceFields;
+    if (ctorMethod) {
+      fnCompiler.compileFunctionBody(ctorMethod.value.params, ctorMethod.value.body.body);
+    } else if (hasSuper) {
+      // 派生クラスのデフォルト ctor: constructor(...args) { super(...args); }
+      fnCompiler.compileDefaultDerivedCtor();
+    } else {
+      fnCompiler.compileFunctionBody([], []);
+    }
+    const ctorFunc = fnCompiler.finish(className);
+    // prototype は host {}。constructor は自身を指す non-enumerable プロパティ
+    // (new C().constructor === C。for-in/Object.keys には出さない)
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, "constructor", { value: ctorFunc, writable: true, enumerable: false, configurable: true });
+    (ctorFunc as any).prototype = proto;
+    this.emit("LdaConst", this.addConstant(ctorFunc));
+
+    // メソッド/getter/setter を prototype (or class for static) に設定
+    for (const member of stmt.body.body) {
+      if (member.type === "PropertyDefinition") continue;
+      if (member.kind === "constructor") continue;
+      const name = member.computed ? null : (member.key.type === "Literal" ? String(member.key.value) : member.key.name);
+
+      if (member.kind === "method") {
+        this.emit("Dup");
+        if (!member.static) this.emitWithIC("GetProperty", this.addConstant("prototype"));
+        if (member.computed) {
+          // computed: target, key, value → SetPropertyComputed
+          this.compileExpression(member.key);
+          const mc = new BytecodeCompiler(this);
+          if ((member.value as any).generator) mc.isGenerator = true;
+          if ((member.value as any).async) mc.isAsync = true;
+          mc.compileFunctionBody(member.value.params, member.value.body.body);
+          this.emit("LdaConst", this.addConstant(mc.finish("<computed>")));
+          this.emit("SetPropertyComputed");
+        } else {
+          const mc = new BytecodeCompiler(this);
+          if ((member.value as any).generator) mc.isGenerator = true;
+          if ((member.value as any).async) mc.isAsync = true;
+          mc.compileFunctionBody(member.value.params, member.value.body.body);
+          this.emit("LdaConst", this.addConstant(mc.finish(name!)));
+          // class メソッドは spec 準拠で non-enumerable (Object.keys/for-in に出ない)
+          this.emit("DefineMethodProp", this.addConstant(name!));
+        }
+        this.emit("Pop");
+      } else if (member.kind === "get" || member.kind === "set") {
+        this.emit("Dup");
+        if (!member.static) this.emitWithIC("GetProperty", this.addConstant("prototype"));
+        const mc = new BytecodeCompiler(this);
+        mc.compileFunctionBody(member.value.params, member.value.body.body);
+        this.emit("LdaConst", this.addConstant(mc.finish((member.kind) + " " + (name ?? "<computed>"))));
+        if (member.computed) {
+          // computed getter/setter は未対応 → 通常のメソッドとして設定
+          this.compileExpression(member.key);
+          this.emit("SetPropertyComputed");
+        } else {
+          const nameIdx = this.addConstant(name!);
+          this.emit(member.kind === "get" ? "DefineGetter" : "DefineSetter", nameIdx);
+        }
+        this.emit("Pop");
+      }
+    }
+    // static フィールドを初期化
+    for (const member of stmt.body.body) {
+      if (member.type === "PropertyDefinition" && member.static) {
+        const name = member.computed ? null : (member.key.type === "Literal" ? String(member.key.value) : member.key.name);
+        this.emit("Dup");
+        if (member.computed) {
+          this.compileExpression(member.key);
+          if (member.value) this.compileExpression(member.value);
+          else this.emit("LdaUndefined");
+          this.emit("SetPropertyComputed");
+        } else {
+          if (member.value) this.compileExpression(member.value);
+          else this.emit("LdaUndefined");
+          this.emitWithIC("SetProperty", this.addConstant(name!));
+        }
+        this.emit("Pop");
+      }
+    }
+    // 継承リンク (メソッド設定の後 — ClassLink がメソッドへタグ付けするため)
+    if (hasSuper) {
+      this.compileExpression(stmt.superClass);
+      this.emit("ClassLink");
+    }
+  }
+
+  // spread を含む引数リストを実行時配列としてスタックに積む
+  // (配列リテラルの SpreadElement と同じ CreateArray/ArrayPush/ArraySpread を再利用)
+  private emitArgsArray(args: any[]): void {
+    this.emit("CreateArray", 0);
+    for (const arg of args) {
+      if (arg.type === "SpreadElement") {
+        this.compileExpression(arg.argument);
+        this.emit("ArraySpread");
+      } else {
+        this.compileExpression(arg);
+        this.emit("ArrayPush");
+      }
+    }
+  }
+
+  // class instance field を this.k = expr として emit する (ctor prologue)。
+  // computed / 非 Identifier キーは Literal キーのみ対応 (それ以外は skip)
+  private emitFieldInits(): void {
+    if (!this.pendingFieldInits) return;
+    for (const field of this.pendingFieldInits) {
+      if (field.computed) continue;
+      const name = (field.key?.type === "Identifier" || field.key?.type === "PrivateIdentifier") ? field.key.name
+        : field.key?.type === "Literal" ? String(field.key.value) : null;
+      if (!name) continue;
+      this.emit("LoadThis");
+      if (field.value) this.compileExpression(field.value);
+      else this.emit("LdaUndefined");
+      this.emitWithIC("SetProperty", this.addConstant(name));
+      this.emit("Pop");
+    }
+    this.pendingFieldInits = null;
+  }
+
+  // 派生クラスのデフォルト constructor: constructor(...args) { super(...args); }
+  // rest param で全引数を束ねて CallSuperArray で親 ctor へ転送する。
+  // field は super の後に初期化 (TW のマージ順 = 親フィールドが先、と一致させる)
+  private compileDefaultDerivedCtor(): void {
+    this.paramCount = 1;
+    this.declareLocal("__args");
+    this.hasRestParam = true;
+    this.declareLocal("arguments");
+    this.emit("LdaLocal", 0);
+    this.emit("CallSuperArray");
+    this.emit("Pop");
+    this.emitFieldInits();
+    this.emit("LdaUndefined");
+    this.emit("Return");
+  }
+
   finish(name: string): BytecodeFunction {
     return {
       name,
+      length: this.fnLength,
       paramCount: this.paramCount,
       localCount: this.localCount,
       hasRestParam: this.hasRestParam,
@@ -564,6 +718,13 @@ class BytecodeCompiler {
   compileFunctionBody(params: any[], body: Statement[], isArrow?: boolean): void {
     // パラメータをローカルスロットに登録
     this.paramCount = params.length;
+    // fn.length = 最初のデフォルト値/rest より前のパラメータ数 (spec)
+    let fnLen = 0;
+    for (const p of params) {
+      if (p.type === "AssignmentPattern" || p.type === "RestElement") break;
+      fnLen++;
+    }
+    this.fnLength = fnLen;
     const destructureParams: { slot: number; pattern: any }[] = [];
     const defaultParams: { slot: number; defaultExpr: any }[] = [];
     for (const param of params) {
@@ -628,6 +789,8 @@ class BytecodeCompiler {
       this.lexicalSlots.add(slot);
       this.emit("StaHole", slot);
     }
+    // class instance field の初期化 (this.k = expr) を本体より前に emit
+    this.emitFieldInits();
     // 本体をコンパイル
     for (const stmt of body) {
       this.compileStatement(stmt);
@@ -1023,104 +1186,7 @@ class BytecodeCompiler {
       }
 
       case "ClassDeclaration": {
-        // インスタンスフィールドを収集
-        const instanceFields = stmt.body.body.filter((m: any) => m.type === "PropertyDefinition" && !m.static);
-
-        // constructor を BytecodeFunction にコンパイル
-        const ctorMethod = stmt.body.body.find((m: any) => m.type === "MethodDefinition" && m.kind === "constructor");
-        if (ctorMethod) {
-          const fnCompiler = new BytecodeCompiler(this);
-          fnCompiler.compileFunctionBody(ctorMethod.value.params, ctorMethod.value.body.body);
-          const ctorFunc = fnCompiler.finish(stmt.id.name);
-          (ctorFunc as any).prototype = {};
-          if (instanceFields.length > 0) (ctorFunc as any).__instanceFields = instanceFields;
-          const ctorIdx = this.addConstant(ctorFunc);
-          this.emit("LdaConst", ctorIdx);
-        } else {
-          const fnCompiler = new BytecodeCompiler(this);
-          fnCompiler.compileFunctionBody([], []);
-          const ctorFunc = fnCompiler.finish(stmt.id.name);
-          (ctorFunc as any).prototype = {};
-          if (instanceFields.length > 0) (ctorFunc as any).__instanceFields = instanceFields;
-          const ctorIdx = this.addConstant(ctorFunc);
-          this.emit("LdaConst", ctorIdx);
-        }
-        // メソッド/getter/setter を prototype (or class for static) に設定
-        for (const member of stmt.body.body) {
-          if (member.type === "PropertyDefinition") continue;
-          if (member.kind === "constructor") continue;
-          const name = member.computed ? null : (member.key.type === "Literal" ? String(member.key.value) : member.key.name);
-
-          if (member.kind === "method") {
-            if (member.static) {
-              this.emit("Dup");
-            } else {
-              this.emit("Dup");
-              this.emitWithIC("GetProperty", this.addConstant("prototype"));
-            }
-            if (member.computed) {
-              // computed: target, key, value → SetPropertyComputed
-              this.compileExpression(member.key);
-              const fnCompiler = new BytecodeCompiler(this);
-              if ((member.value as any).generator) fnCompiler.isGenerator = true;
-              fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
-              this.emit("LdaConst", this.addConstant(fnCompiler.finish("<computed>")));
-              this.emit("SetPropertyComputed");
-            } else {
-              const fnCompiler = new BytecodeCompiler(this);
-              if ((member.value as any).generator) fnCompiler.isGenerator = true;
-              fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
-              this.emit("LdaConst", this.addConstant(fnCompiler.finish(name!)));
-              this.emitWithIC("SetProperty", this.addConstant(name!));
-            }
-            this.emit("Pop");
-          } else if (member.kind === "get" || member.kind === "set") {
-            if (member.static) {
-              this.emit("Dup");
-            } else {
-              this.emit("Dup");
-              this.emitWithIC("GetProperty", this.addConstant("prototype"));
-            }
-            const fnCompiler = new BytecodeCompiler(this);
-            fnCompiler.compileFunctionBody(member.value.params, member.value.body.body);
-            this.emit("LdaConst", this.addConstant(fnCompiler.finish((member.kind) + " " + (name ?? "<computed>"))));
-            if (member.computed) {
-              // computed getter/setter は未対応 → 通常のメソッドとして設定
-              this.compileExpression(member.key);
-              // swap key and func on stack... 複雑なので一旦 SetPropertyComputed
-              // TODO: computed getter/setter
-              this.emit("SetPropertyComputed");
-            } else {
-              const nameIdx = this.addConstant(name!);
-              this.emit(member.kind === "get" ? "DefineGetter" : "DefineSetter", nameIdx);
-            }
-            this.emit("Pop");
-          }
-        }
-        // static フィールドを初期化
-        for (const member of stmt.body.body) {
-          if (member.type === "PropertyDefinition" && member.static) {
-            const name = member.computed ? null : (member.key.type === "Literal" ? String(member.key.value) : member.key.name);
-            this.emit("Dup");
-            if (member.computed) {
-              this.compileExpression(member.key);
-              if (member.value) {
-                this.compileExpression(member.value);
-              } else {
-                this.emit("LdaUndefined");
-              }
-              this.emit("SetPropertyComputed");
-            } else {
-              if (member.value) {
-                this.compileExpression(member.value);
-              } else {
-                this.emit("LdaUndefined");
-              }
-              this.emitWithIC("SetProperty", this.addConstant(name!));
-            }
-            this.emit("Pop");
-          }
-        }
+        this.compileClassToStack(stmt);
         // クラス名を登録
         if (this.isFunction) {
           const slot = this.resolveLocal(stmt.id.name) ?? this.declareLocal(stmt.id.name);
@@ -1132,6 +1198,7 @@ class BytecodeCompiler {
         this.emit("Pop");
         break;
       }
+
 
       case "BreakStatement": {
         // 先にターゲットを解決してから Jump を emit する。逆順だとターゲット
@@ -1321,6 +1388,13 @@ class BytecodeCompiler {
         break;
 
       case "NewExpression": {
+        if (expr.arguments.some((a: any) => a.type === "SpreadElement")) {
+          // new C(...args): 引数を配列に集約して ConstructSpread
+          this.emitArgsArray(expr.arguments);
+          this.compileExpression(expr.callee);
+          this.emit("ConstructSpread");
+          break;
+        }
         for (const arg of expr.arguments) {
           this.compileExpression(arg as Expression);
         }
@@ -1342,46 +1416,8 @@ class BytecodeCompiler {
 
       case "ClassExpression": {
         // ClassDeclaration と同じコンパイルだが、変数登録せずスタックに残す
-        const fakeStmt = { ...expr, type: "ClassDeclaration", id: expr.id ?? { type: "Identifier", name: inferredName ?? "" } } as any;
-        // ClassDeclaration のコンパイルは StaGlobal+Pop で終わるので、
-        // ここでは ClassDeclaration の中身を再実装して Pop しない
-        const instanceFields = fakeStmt.body.body.filter((m: any) => m.type === "PropertyDefinition" && !m.static);
-        const ctorMethod = fakeStmt.body.body.find((m: any) => m.type === "MethodDefinition" && m.kind === "constructor");
-        const fnCompiler = new BytecodeCompiler(this);
-        if (ctorMethod) {
-          fnCompiler.compileFunctionBody(ctorMethod.value.params, ctorMethod.value.body.body);
-        } else {
-          fnCompiler.compileFunctionBody([], []);
-        }
-        const ctorFunc = fnCompiler.finish(fakeStmt.id.name);
-        (ctorFunc as any).prototype = {};
-        if (instanceFields.length > 0) (ctorFunc as any).__instanceFields = instanceFields;
-        this.emit("LdaConst", this.addConstant(ctorFunc));
-        // methods
-        for (const member of fakeStmt.body.body) {
-          if (member.type === "PropertyDefinition") continue;
-          if (member.kind === "constructor") continue;
-          const name = member.computed ? null : (member.key.type === "Literal" ? String(member.key.value) : member.key.name);
-          if (member.kind === "method") {
-            this.emit("Dup");
-            if (!member.static) this.emitWithIC("GetProperty", this.addConstant("prototype"));
-            if (member.computed) {
-              this.compileExpression(member.key);
-              const mc = new BytecodeCompiler(this);
-              if ((member.value as any).generator) mc.isGenerator = true;
-              mc.compileFunctionBody(member.value.params, member.value.body.body);
-              this.emit("LdaConst", this.addConstant(mc.finish("<computed>")));
-              this.emit("SetPropertyComputed");
-            } else {
-              const mc = new BytecodeCompiler(this);
-              if ((member.value as any).generator) mc.isGenerator = true;
-              mc.compileFunctionBody(member.value.params, member.value.body.body);
-              this.emit("LdaConst", this.addConstant(mc.finish(name!)));
-              this.emitWithIC("SetProperty", this.addConstant(name!));
-            }
-            this.emit("Pop");
-          }
-        }
+        const fakeStmt = { ...expr, id: expr.id ?? { type: "Identifier", name: inferredName ?? "" } } as any;
+        this.compileClassToStack(fakeStmt);
         break;
       }
 
@@ -1416,6 +1452,12 @@ class BytecodeCompiler {
       }
 
       case "MemberExpression": {
+        // super.x の読み出し — 親 prototype (__homeProto) から解決
+        if (expr.object.type === "Identifier" && (expr.object as any).name === "__super__"
+            && !expr.computed && expr.property.type === "Identifier") {
+          this.emit("GetSuperProp", this.addConstant(expr.property.name));
+          break;
+        }
         this.compileExpression(expr.object);
         // optional chaining: obj?.prop → null/undefined なら undefined を返す
         let optionalJump = -1;
@@ -1445,7 +1487,12 @@ class BytecodeCompiler {
         this.emit("CreateObject");
         for (const prop of expr.properties) {
           if (prop.type === "SpreadElement") {
-            // TODO: spread
+            // {...src}: src の own enumerable props をコピー
+            // (従来は TODO で黙って捨てており {...a} が空オブジェクトになっていた)
+            this.emit("Dup");
+            this.compileExpression((prop as any).argument);
+            this.emit("CopyDataProps");
+            this.emit("Pop");
             continue;
           }
           // stack: [obj] → Dup → [obj, obj] → value → [obj, obj, value]
@@ -1502,6 +1549,66 @@ class BytecodeCompiler {
       }
 
       case "CallExpression": {
+        // super(...) — parser は super を Identifier __super__ に脱糖する。
+        // frame.func.__superClass を this 付きで呼ぶ専用オペコードに落とす
+        if (expr.callee.type === "Identifier" && expr.callee.name === "__super__") {
+          if (expr.arguments.some((a: any) => a.type === "SpreadElement")) {
+            // super(...args): 引数を配列に集約して CallSuperArray
+            this.emitArgsArray(expr.arguments);
+            this.emit("CallSuperArray");
+          } else {
+            for (const arg of expr.arguments) {
+              this.compileExpression(arg as Expression);
+            }
+            this.emit("CallSuper", expr.arguments.length);
+          }
+          break;
+        }
+        // spread 呼び出し f(...args) / obj.m(...args): 引数を配列に集約して
+        // CallSpread / CallMethodSpread (callFunction による同期実行) に落とす
+        if (expr.arguments.some((a: any) => a.type === "SpreadElement")) {
+          if (expr.callee.type === "MemberExpression") {
+            // 評価順 (obj → 引数) を守るため obj とメソッドを temp に確定してから
+            // 引数配列を作る (Phase 36-6 の複雑 obj パスと同じ方式)
+            const tmpObj = this.localCount++;
+            const tmpMethod = this.localCount++;
+            this.compileExpression(expr.callee.object);
+            this.emit("StaLocal", tmpObj); this.emit("Pop");
+            this.emit("LdaLocal", tmpObj);
+            if (expr.callee.computed) {
+              this.compileExpression(expr.callee.property);
+              this.emit("GetPropertyComputed");
+            } else {
+              this.emitWithIC("GetProperty", this.addConstant(expr.callee.property.name));
+            }
+            this.emit("StaLocal", tmpMethod); this.emit("Pop");
+            this.emitArgsArray(expr.arguments);
+            this.emit("LdaLocal", tmpObj);
+            this.emit("LdaLocal", tmpMethod);
+            this.emit("CallMethodSpread");
+          } else {
+            if (expr.callee.type === "Identifier" && this.resolvesToGlobal(expr.callee.name)) {
+              this.emit("CheckGlobal", this.addConstant(expr.callee.name));
+            }
+            this.emitArgsArray(expr.arguments);
+            this.compileExpression(expr.callee);
+            this.emit("CallSpread");
+          }
+          break;
+        }
+        // super.m(...) — メソッドは親 prototype (__homeProto) から解決し、
+        // this は現在の this のまま呼ぶ
+        if (expr.callee.type === "MemberExpression" && !expr.callee.computed
+            && expr.callee.object.type === "Identifier" && (expr.callee.object as any).name === "__super__"
+            && expr.callee.property.type === "Identifier") {
+          for (const arg of expr.arguments) {
+            this.compileExpression(arg as Expression);
+          }
+          this.emit("LoadThis");
+          this.emit("GetSuperProp", this.addConstant(expr.callee.property.name));
+          this.emit("CallMethod", expr.arguments.length);
+          break;
+        }
         if (expr.callee.type === "MemberExpression") {
           // メソッド呼び出し: obj.method(args)。CallMethod のスタック順は
           // [args..., obj, method]。
@@ -1831,12 +1938,14 @@ class BytecodeCompiler {
           const name = expr.argument.name;
           const local = this.resolveLocal(name);
           if (local !== null) {
-            this.emit("LdaLocal", local);
+            // lexical (let/const) は typeof でも TDZ が効く (spec: typeof x が
+            // ReferenceError になるのは「未宣言」ではなく「宣言前」のケース)
+            this.emit(this.lexicalSlots.has(local) ? "LdaLocalTDZ" : "LdaLocal", local);
             this.emit("TypeOf");
           } else {
             const upvalue = this.resolveUpvalue(name);
             if (upvalue >= 0) {
-              this.emit("LdaUpvalue", upvalue);
+              this.emit(this.upvalues[upvalue].tdz ? "LdaUpvalueTDZ" : "LdaUpvalue", upvalue);
               this.emit("TypeOf");
             } else {
               // グローバル: TypeOfGlobal で安全にアクセス

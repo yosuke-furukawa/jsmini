@@ -3,6 +3,7 @@ import path from "node:path";
 import { evaluate } from "../interpreter/evaluator.js";
 import { vmEvaluate } from "../vm/index.js";
 import { isJSString, jsStringToString } from "../vm/js-string.js";
+import { isJSObject, getProperty as jsObjGet } from "../vm/js-object.js";
 import { ThrowSignal } from "../interpreter/values.js";
 
 const useVM = process.argv.includes("--vm");
@@ -60,14 +61,25 @@ function parseFrontmatter(source: string) {
 // ハーネスに含まれるため、ハーネスを jsmini で実行するのではなく、
 // テストコードのみを jsmini で実行し、ハーネス関数はネイティブ実装を注入する
 function createHarnessSource(): string {
-  // Test262Error, assert (オブジェクト形式), verifyProperty, compareArray
-  // を jsmini が理解できる構文だけで定義する
+  // Test262Error, assert (オブジェクト形式), regExpUtils, isConstructor,
+  // tcoHelper, propertyHelper (一部) を jsmini が確実に理解できる構文だけで
+  // 定義する (var のみ / 文字列 for-of なし / 分割代入なし / テンプレートなし)。
   // assert をオブジェクト形式にすることで、テストコードの assert.sameValue 等を
-  // 前処理で変換する必要がなくなる
+  // 前処理で変換する必要がなくなる。
+  //
+  // 制約メモ:
+  // - Test262Error は本物の constructor 関数にする (assert 群がこれを throw
+  //   することで assert.throws(Test262Error, ...) が instanceof で通る。
+  //   e.constructor === T は両エンジンとも未対応なので instanceof が頼り)
+  // - String.fromCodePoint が無いためサロゲートペアを手計算 (__cpToString)
+  // - isConstructor は Reflect.construct が無いため new f() の try で近似
+  //   (副作用や throw する constructor では本家と結果が異なりうる)
   return `
 function Test262Error(message) {
-  return message;
+  this.message = message === undefined ? "" : message;
+  this.name = "Test262Error";
 }
+Test262Error.thrower = function(message) { throw new Test262Error(message); };
 
 var assert = function(mustBeTrue, message) {
   if (mustBeTrue === true) {
@@ -76,27 +88,35 @@ var assert = function(mustBeTrue, message) {
   if (message === undefined) {
     message = "assertion failed";
   }
-  throw new Error(message);
+  throw new Test262Error(message);
+};
+
+// SameValue (NaN 同士は等しい / +0 と -0 は区別する)
+assert._isSameValue = function(a, b) {
+  if (a === b) {
+    return a !== 0 || 1 / a === 1 / b;
+  }
+  return a !== a && b !== b;
 };
 
 assert.sameValue = function(actual, expected, message) {
-  if (actual === expected) {
+  if (assert._isSameValue(actual, expected)) {
     return;
   }
   if (message === undefined) {
     message = "assert.sameValue failed: " + actual + " !== " + expected;
   }
-  throw new Error(message);
+  throw new Test262Error(message);
 };
 
 assert.notSameValue = function(actual, unexpected, message) {
-  if (actual !== unexpected) {
+  if (!assert._isSameValue(actual, unexpected)) {
     return;
   }
   if (message === undefined) {
     message = "assert.notSameValue failed";
   }
-  throw new Error(message);
+  throw new Test262Error(message);
 };
 
 assert.throws = function(expectedErrorConstructor, fn, message) {
@@ -105,26 +125,208 @@ assert.throws = function(expectedErrorConstructor, fn, message) {
   try { fn(); } catch (e) { thrown = true; caughtError = e; }
   if (!thrown) {
     var ctorName = expectedErrorConstructor.name || "unknown";
-    throw new Error(message || "Expected a " + ctorName + " to be thrown");
+    throw new Test262Error(message || "Expected a " + ctorName + " to be thrown");
   }
   if (caughtError instanceof expectedErrorConstructor) return;
   if (typeof caughtError === "object" && caughtError !== null && caughtError.constructor === expectedErrorConstructor) return;
   var ctorName = expectedErrorConstructor.name || "unknown";
-  throw new Error(message || "Expected a " + ctorName + " but got " + caughtError);
+  throw new Test262Error(message || "Expected a " + ctorName + " but got " + caughtError);
 };
-
-function verifyProperty(obj, name, desc) {
-}
 
 function compareArray(a, b) {
   if (a.length !== b.length) return false;
   for (var i = 0; i < a.length; i = i + 1) {
-    if (a[i] !== b[i]) return false;
+    if (!assert._isSameValue(a[i], b[i])) return false;
   }
   return true;
 }
+
+assert.compareArray = function(actual, expected, message) {
+  if (compareArray(actual, expected)) {
+    return;
+  }
+  if (message === undefined) {
+    message = "assert.compareArray failed";
+  }
+  throw new Test262Error(message + " ([" + actual + "] vs [" + expected + "])");
+};
+
+// --- propertyHelper ---
+// Phase 39 の属性モデル実装に伴い descriptor 比較の本実装
+// (本家 propertyHelper.js の descriptor 検証部分。restore オプションと
+//  挙動ベースの二重検証は省略)
+function verifyProperty(obj, name, desc, options) {
+  var d = Object.getOwnPropertyDescriptor(obj, name);
+  if (desc === undefined) {
+    if (d !== undefined) {
+      throw new Test262Error("verifyProperty: expected " + name + " to be absent");
+    }
+    return true;
+  }
+  if (d === undefined) {
+    throw new Test262Error("verifyProperty: property " + name + " not found");
+  }
+  var checks = ["value", "get", "set", "writable", "enumerable", "configurable"];
+  for (var i = 0; i < checks.length; i++) {
+    var field = checks[i];
+    if (Object.prototype.hasOwnProperty.call(desc, field)) {
+      if (!assert._isSameValue(d[field], desc[field])) {
+        throw new Test262Error("verifyProperty: " + name + "." + field + " should be " + desc[field] + " but got " + d[field]);
+      }
+    }
+  }
+  return true;
+}
+
+function verifyWritable(obj, name, verifyProp, value) {
+  var newValue = value === undefined ? "verifyWritable_test" : value;
+  obj[name] = newValue;
+  if (!assert._isSameValue(obj[name], newValue)) {
+    throw new Test262Error("Expected obj[" + name + "] to be writable");
+  }
+}
+
+function verifyNotWritable(obj, name, verifyProp, value) {
+  var original = obj[name];
+  try {
+    obj[name] = value === undefined ? "verifyNotWritable_test" : value;
+  } catch (e) {
+    // strict では TypeError が正しい
+  }
+  if (!assert._isSameValue(obj[name], original)) {
+    throw new Test262Error("Expected obj[" + name + "] to be non-writable");
+  }
+}
+
+// --- tcoHelper ---
+var $MAX_ITERATIONS = 100000;
+
+// --- isConstructor (Reflect.construct 不在のため new での近似) ---
+function isConstructor(f) {
+  if (typeof f !== "function") {
+    throw new Test262Error("isConstructor invoked with a non-function value");
+  }
+  try {
+    new f();
+  } catch (e) {
+    return false;
+  }
+  return true;
+}
+
+// --- regExpUtils ---
+// buildString は native 実装をランナーが globals として注入する
+// (補集合テストは全 Unicode 範囲 ~111 万 CP の文字列を構築するため、
+//  jsmini のステップ実行ではステップ上限に収まらない)
+
+function printCodePoint(codePoint) {
+  var hex = codePoint.toString(16).toUpperCase();
+  while (hex.length < 6) { hex = "0" + hex; }
+  return "U+" + hex;
+}
+
+// 文字列をサロゲート対応で 1 コードポイントずつ進める (文字列 for-of は TW 未対応)
+function __eachSymbol(string, fn) {
+  var i = 0;
+  while (i < string.length) {
+    var cp = string.codePointAt(i);
+    var sym = cp > 65535 ? string.substring(i, i + 2) : string.charAt(i);
+    fn(sym, cp);
+    i = i + (cp > 65535 ? 2 : 1);
+  }
+}
+
+function testPropertyEscapes(regExp, string, expression) {
+  if (!regExp.test(string)) {
+    __eachSymbol(string, function(symbol, cp) {
+      assert(
+        regExp.test(symbol),
+        expression + " should match " + printCodePoint(cp) + " (" + symbol + ")"
+      );
+    });
+  }
+}
+
+function testPropertyOfStrings(args) {
+  var regExp = args.regExp;
+  var expression = args.expression;
+  var matchStrings = args.matchStrings;
+  var nonMatchStrings = args.nonMatchStrings;
+  var i;
+  var allStrings = matchStrings.join("");
+  if (!regExp.test(allStrings)) {
+    for (i = 0; i < matchStrings.length; i = i + 1) {
+      assert(
+        regExp.test(matchStrings[i]),
+        expression + " should match " + matchStrings[i]
+      );
+    }
+  }
+  if (!nonMatchStrings) return;
+  var allNonMatchStrings = nonMatchStrings.join("");
+  if (regExp.test(allNonMatchStrings)) {
+    for (i = 0; i < nonMatchStrings.length; i = i + 1) {
+      assert(
+        !regExp.test(nonMatchStrings[i]),
+        expression + " should not match " + nonMatchStrings[i]
+      );
+    }
+  }
+}
+
+// v-flag の拡張文字クラスも同じロジックでテストできる (本家と同じ別名)
+var testExtendedCharacterClass = testPropertyOfStrings;
+
+function matchValidator(expectedEntries, expectedIndex, expectedInput) {
+  return function(match) {
+    assert.compareArray(match, expectedEntries, "Match entries");
+    assert.sameValue(match.index, expectedIndex, "Match index");
+    assert.sameValue(match.input, expectedInput, "Match input");
+  };
+}
 `;
 }
+
+// --- native ハーネス (globals 注入) ---
+// jsmini のオブジェクトは JSObject (hidden class) / TW は host object の
+// どちらもありうるので両対応で読む
+function harnessProp(obj: unknown, key: string): unknown {
+  if (isJSObject(obj)) return jsObjGet(obj, key);
+  return (obj as Record<string, unknown>)?.[key];
+}
+
+// buildString: regExpUtils.js の native 実装。補集合テストが全 Unicode 範囲
+// (~111 万 CP) の文字列を作るため、jsmini 側で実行するとステップ上限に
+// 収まらない。host で構築して host string を返す (regExp.test にそのまま渡る)
+function nativeBuildString(args: unknown): string {
+  const lone = (harnessProp(args, "loneCodePoints") ?? []) as number[];
+  const ranges = (harnessProp(args, "ranges") ?? []) as [number, number][];
+  const parts: string[] = [];
+  let units: number[] = [];
+  const push = (cp: number) => {
+    if (cp <= 0xffff) units.push(cp);
+    else {
+      const c = cp - 0x10000;
+      units.push(0xd800 + (c >> 10), 0xdc00 + (c & 0x3ff));
+    }
+    if (units.length >= 10000) {
+      parts.push(String.fromCharCode(...units));
+      units = [];
+    }
+  };
+  for (const cp of lone) push(Number(cp));
+  for (const r of ranges) {
+    const start = Number(r[0]);
+    const end = Number(r[1]);
+    for (let cp = start; cp <= end; cp++) push(cp);
+  }
+  if (units.length > 0) parts.push(String.fromCharCode(...units));
+  return parts.join("");
+}
+
+const NATIVE_HARNESS_GLOBALS: Record<string, unknown> = {
+  buildString: nativeBuildString,
+};
 
 // テストコードを前処理
 function preprocessTestSource(source: string): string {
@@ -236,10 +438,14 @@ function runTest(filePath: string): TestResult {
   let steps = 0;
   // VM/JIT は maxSteps、TW は onStep カウンタで無限ループを止める。
   // 以前は --jit が TW 用の onStep (vmEvaluate は無視する) を受け取っており、
-  // ステップ上限なし → 無限ループするテストでランナー全体がハングしていた
+  // ステップ上限なし → 無限ループするテストでランナー全体がハングしていた。
+  // 上限 2M: regExpUtils の buildString が大きな範囲 (\\p{L} は ~13 万 CP) を
+  // 構築するのに 100k では足りない。無限ループ系は数件しかないので
+  // 上限を上げても全体の実行時間への影響は小さい
+  const STEP_LIMIT = 2_000_000;
   const opts = useVM || useJIT
-    ? { maxSteps: 100_000 }
-    : { onStep: () => { if (++steps > 100_000) throw new Error("timeout: exceeded 100k steps"); } };
+    ? { maxSteps: STEP_LIMIT, globals: NATIVE_HARNESS_GLOBALS }
+    : { onStep: () => { if (++steps > STEP_LIMIT) throw new Error("timeout: exceeded step limit"); }, globals: NATIVE_HARNESS_GLOBALS };
 
   try {
     if (meta.negative) {

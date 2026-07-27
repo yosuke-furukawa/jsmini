@@ -299,6 +299,236 @@ describe("Phase 36-6 — TDZ とエラー優先順位 (spec 7.x SetMutableBindin
       ReferenceError));
 });
 
+describe("Phase 39 — class 継承 (extends / super)", () => {
+  it("メソッド継承", () => agree(`class A { m(){ return 1; } } class B extends A {} new B().m();`, 1));
+  it("super() が親 ctor を this 付きで実行", () =>
+    agree(`class A { constructor(x){ this.v = x; } } class B extends A { constructor(){ super(7); } } new B().v;`, 7));
+  it("デフォルト派生 ctor は引数を転送", () =>
+    agree(`class A { constructor(x, y){ this.v = x + y; } } class B extends A {} new B(3, 4).v;`, 7));
+  it("super.m() は親メソッドを現在の this で呼ぶ", () =>
+    agree(`class A { m(){ return this.x; } } class B extends A { constructor(){ super(); this.x = 42; } m(){ return super.m(); } } new B().m();`, 42));
+  it("2 段継承チェーンのメソッド解決", () =>
+    agree(`class A { m(){ return 1; } } class B extends A {} class C extends B {} new C().m();`, 1));
+  it("中間クラスの super.m() 連鎖", () =>
+    agree(`class A { m(){ return 1; } } class B extends A { m(){ return super.m() * 10; } } class C extends B { m(){ return super.m() + 5; } } new C().m();`, 15));
+  it("static メソッドの継承", () =>
+    agree(`class A { static s(){ return 5; } } class B extends A {} B.s();`, 5));
+  it("instanceof が継承チェーンを辿る", () =>
+    agree(`class A {} class B extends A {} (new B() instanceof A) ? 1 : 0;`, 1));
+  it("メソッドのオーバーライド", () =>
+    agree(`class A { m(){ return 1; } } class B extends A { m(){ return 2; } } new B().m();`, 2));
+  it("フィールドは親→子の順で初期化", () =>
+    agree(`class A { pa = 1; } class B extends A { cb = 2; } var b = new B(); b.pa + b.cb;`, 3));
+  it("明示的 super() でも親フィールドが初期化される", () =>
+    agree(`class A { pa = 1; } class B extends A { cb = 2; constructor(){ super(); } } var b = new B(); b.pa + b.cb;`, 3));
+  it("Error 継承 (デフォルト ctor) で message が付く", () =>
+    agree(`class E extends Error {} var e; try { throw new E("boom"); } catch (x) { e = x; } e.message;`, "boom"));
+  it("Error 継承 (明示的 super(m))", () =>
+    agree(`class E extends Error { constructor(m){ super(m); this.code = 9; } } var e = new E("bad"); e.message + e.code;`, "bad9"));
+});
+
+describe("Phase 39 — spread 呼び出しと object spread", () => {
+  it("spread 呼び出し f(...args)", () => agree(`function f(a, b) { return a + b; } f(...[1, 2]);`, 3));
+  it("固定引数と spread の混在", () => agree(`function f(a, b, c) { return a + b + c; } f(1, ...[2, 3]);`, 6));
+  it("spread → rest param", () => agree(`function f(...xs) { return xs.length; } f(...[1, 2, 3], 4);`, 4));
+  it("メソッドの spread 呼び出し (this 維持)", () =>
+    agree(`var o = { v: 10, m(a) { return this.v + a; } }; o.m(...[5]);`, 15));
+  it("host メソッドへの spread (Math.max)", () => agree(`Math.max(...[3, 9, 4]);`, 9));
+  it("new C(...args)", () =>
+    agree(`class P { constructor(x, y) { this.s = x + y; } } new P(...[5, 6]).s;`, 11));
+  it("object spread (従来 VM は黙って空にしていた)", () =>
+    agree(`var a = { x: 1 }; var b = { ...a, y: 2 }; b.x + b.y;`, 3));
+  it("後書きが上書き / 前書きは上書きされる", () =>
+    agree(`var a = { y: 9 }; var b = { y: 2, ...a }; var c = { ...a, y: 2 }; "" + b.y + c.y;`, "92"));
+  it("配列の object spread ({...[7,8]})", () => agree(`var b = { ...[7, 8] }; b[0] + b[1];`, 15));
+  it("文字列の object spread ({...'ab'})", () => agree(`var b = { ..."ab" }; b[0] + b[1];`, "ab"));
+  it("null/undefined の spread は no-op", () => agree(`var b = { ...null, k: 1 }; b.k;`, 1));
+  it("評価順: メソッド obj が引数より先", () =>
+    agree(`var log = ""; function o() { log += "o"; return { m() { return log; } }; } function a() { log += "a"; return 1; } o().m(...[a()]);`, "oa"));
+});
+
+describe("Phase 39 — class computed key の文字列化一貫性", () => {
+  // jsmini は関数のソーステキストを保持しないため String(fn) は仕様の
+  // ソーステキストではなく "[object Object]" 近似。重要なのは
+  // 「キー定義時とアクセス時の正規化が一致する」こと (TW は host ラッパーの
+  // ソースを漏らして不一致だった)
+  it("class computed key を String(fn) で引ける", () =>
+    agree(`class C { [() => {}]() { return 1; } } new C()[String(() => {})]();`, 1));
+  it("static computed key も同様", () =>
+    agree(`class C { static [() => {}]() { return 2; } } C[String(() => {})]();`, 2));
+  it("object リテラルの computed fn key", () =>
+    agree(`var o = { [() => {}]: 7 }; o[String(() => {})];`, 7));
+  it("fn 値キーの直接アクセス (回帰)", () =>
+    agree(`class C { [() => {}]() { return 1; } } new C()[() => {}]();`, 1));
+  it("コールバック系 host メソッドは壊れない (回帰)", () =>
+    agree(`[3, 1, 2].map(function (x) { return x * 2; }).join(",");`, "6,2,4"));
+});
+
+describe("Phase 39 — async メソッドのパースと実行", () => {
+  // async の結果は microtask drain 後にしか見えないので console.log 捕捉で検証
+  function logsAgree(src: string, expected: string) {
+    const capture = (f: (log: (...a: unknown[]) => void) => unknown): string => {
+      const logs: unknown[] = [];
+      f((...a) => logs.push(...a));
+      return logs.join(",");
+    };
+    const tw = capture((log) => evaluate(src, { log } as any));
+    const vm = capture((log) => vmEvaluate(src, { console: { log } } as any));
+    assert.equal(tw, expected, "TW");
+    assert.equal(vm, expected, "VM");
+  }
+  it("class の async メソッド", () =>
+    logsAgree(`class C { async m() { return 7; } } new C().m().then(function (v) { console.log(v); });`, "7"));
+  it("static async メソッド", () =>
+    logsAgree(`class C { static async m() { return 8; } } C.m().then(function (v) { console.log(v); });`, "8"));
+  it("async メソッド内の await", () =>
+    logsAgree(`class C { async m() { var v = await Promise.resolve(5); return v + 1; } } new C().m().then(function (v) { console.log(v); });`, "6"));
+  it("object リテラルの async メソッド", () =>
+    logsAgree(`var o = { async m() { return 9; } }; o.m().then(function (v) { console.log(v); });`, "9"));
+  it("async メソッド内の this (VM は runAsyncFunction が this を落としていた)", () =>
+    logsAgree(`class C { constructor() { this.x = 40; } async m() { return this.x + 2; } } new C().m().then(function (v) { console.log(v); });`, "42"));
+  it("継承した async メソッド", () =>
+    logsAgree(`class A { async m() { return 5; } } class B extends A {} new B().m().then(function (v) { console.log(v); });`, "5"));
+  // async をキー/名前として使う (回帰)
+  it("async という名のメソッド・フィールド", () =>
+    agree(`class C { async() { return 1; } async2 = 0; } var o = { async: 2 }; new C().async() + o.async;`, 3));
+  it("async *g() のパース", () =>
+    agree(`class C { async *g() {} } typeof new C().g;`, "function"));
+  it("async arrow の式本体 (expression フラグ欠落で壊れていた)", () =>
+    logsAgree(`var f = async (x) => x + 1; f(2).then(function (v) { console.log(v); });`, "3"));
+  it("async arrow 単一引数 + block 本体", () =>
+    logsAgree(`var f = async x => { return x * 2; }; f(3).then(function (v) { console.log(v); });`, "6"));
+});
+
+describe("Phase 39 — 分割代入パラメータのデフォルト値 (TW)", () => {
+  // bindParam が defaultResolver を bindPattern に渡しておらず、パターン内の
+  // デフォルト (`[x = 23]` / `{a = 1}`) が undefined 要素に適用されなかった
+  // (test262 dstr 系 241 件の主因)
+  it("配列パターン要素のデフォルト (undefined 要素)", () =>
+    agree(`var c = 0; function f([x = 23]) { c = x; } f([undefined]); c;`, 23));
+  it("オブジェクトパターンのデフォルト", () =>
+    agree(`var c = 0; function f({ a = 5 }) { c = a; } f({}); c;`, 5));
+  it("要素不足時のデフォルト", () =>
+    agree(`var c = 0; function f([a, b = 9]) { c = b; } f([1]); c;`, 9));
+  it("ネストした分割のデフォルト", () =>
+    agree(`var c = 0; function f([[a = 3]]) { c = a; } f([[]]); c;`, 3));
+  it("generator メソッドの分割デフォルト", () =>
+    agree(`var c = 0; class C { *m([x = 23]) { c = x; } } new C().m([undefined]).next(); c;`, 23));
+  it("デフォルトは実値があれば上書きされない", () =>
+    agree(`var c = 0; function f([x = 23]) { c = x; } f([7]); c;`, 7));
+});
+
+describe("Phase 39 — constructor 追跡 / 文字列 for-of / fromCodePoint (roadmap #7)", () => {
+  it("fn.prototype.constructor === fn", () =>
+    agree(`function T() {} (new T().constructor === T) ? 1 : 0;`, 1));
+  it("class の constructor identity", () =>
+    agree(`class C {} (new C().constructor === C) ? 1 : 0;`, 1));
+  it("継承先の constructor は自身", () =>
+    agree(`class A {} class B extends A {} (new B().constructor === B) ? 1 : 0;`, 1));
+  it("constructor は non-enumerable", () =>
+    agree(`class C { m() {} } var n = 0; for (var k in C.prototype) n++; n;`, 0));
+  it("constructor.name", () => agree(`class Foo {} new Foo().constructor.name;`, "Foo"));
+  it("TW も文字列を for-of できる", () =>
+    agree(`var s = ""; for (var c of "abc") s += c + "."; s;`, "a.b.c."));
+  it("文字列 for-of はサロゲート単位", () =>
+    agree(`var n = 0; for (var c of "a\u{1F600}b") n++; n;`, 3));
+  it("String.fromCodePoint", () => agree(`String.fromCodePoint(72, 105);`, "Hi"));
+  it("fromCharCode は下位 16bit", () => agree(`String.fromCharCode(65, 322);`, "A\u0142"));
+});
+
+describe("Phase 39 — generator 拡張で発見した VM バグ", () => {
+  // getter/setter の throw が外側の catch に届く (別 VM 起動をやめ callFunction に)
+  it("getter の throw を外側 catch が捕まえる", () =>
+    agree(`var o = { get g() { throw 1; } }; var r = 0; try { o.g; } catch (e) { r = e; } r;`, 1));
+  it("setter の throw を捕まえる", () =>
+    agree(`var o = { set s(v) { throw 2; } }; var r = 0; try { o.s = 1; } catch (e) { r = e; } r;`, 2));
+  it("spread 中の getter throw", () =>
+    agree(`var o = { get g() { throw 3; } }; var r = 0; try { ({ ...o }); } catch (e) { r = e; } r;`, 3));
+  // 非リテラル class field は ctor prologue で初期化 (VM は undefined だった)
+  it("非リテラル instance field", () => agree(`class C { f = 1 + 2; } new C().f;`, 3));
+  it("field が外側変数を参照", () => agree(`var base = 10; class C { f = base * 2; } new C().f;`, 20));
+  it("field が this を参照", () => agree(`class C { a = 5; b = this.a + 1; } new C().b;`, 6));
+  it("継承 + 親子 field 初期化", () => agree(`class A { pa = 1; } class B extends A { cb = 2; } var b = new B(); b.pa + b.cb;`, 3));
+  // 外側変数をキャプチャした class (closure 化) の prototype/instanceof/super
+  it("キャプチャ class のメソッド", () => agree(`let a = 5; class C { f = a; m() { return this.f * 2; } } new C().m();`, 10));
+  it("キャプチャ class の instanceof", () => agree(`let a = 1; class C { f = a; m() {} } (new C() instanceof C) ? 1 : 0;`, 1));
+  it("キャプチャ派生 class + super + getter (tagFns が getter を発火させていた)", () =>
+    agree(`let v = 1; class A { m() { return 1; } } class B extends A { m2() { return super.m() + v; } get g() { return 5; } } new B().m2();`, 2));
+  // class インスタンス < 文字列 (toPrimitive が host string を返し数値経路に落ちていた)
+  it("class インスタンス < 文字列", () => agree(`class C {} var v = new C(); (v < "hello") ? 1 : 0;`, 1));
+  // typeof の TDZ
+  it("typeof は lexical の TDZ を尊重", () =>
+    allThrow(`{ if (typeof v0) {} let v0 = ""; }`, ReferenceError));
+  // super(...args) spread (ExecExpr フォールバックになっていた)
+  it("super(...args) spread", () =>
+    agree(`class A { constructor(x, y) { this.v = x + y; } } class B extends A { constructor() { super(...[3, 4]); } } new B().v;`, 7));
+});
+
+describe("Phase 39 — strict early error (eval/arguments の束縛・代入禁止)", () => {
+  // jsmini は strict 専用なのでパース時に常に検査する (spec 13.1.1 ほか)
+  it("var eval は SyntaxError", () => allThrow(`var eval;`, SyntaxError));
+  it("2 個目の宣言子でも検査", () => allThrow(`var a, eval;`, SyntaxError));
+  it("let/const も対象", () => allThrow(`let arguments = 1;`, SyntaxError));
+  it("関数名 eval", () => allThrow(`function eval() {}`, SyntaxError));
+  it("関数式の名前も対象", () => allThrow(`var f = function arguments() {};`, SyntaxError));
+  it("仮引数 eval", () => allThrow(`function f(eval) {}`, SyntaxError));
+  it("rest 引数も対象", () => allThrow(`function f(...arguments) {}`, SyntaxError));
+  it("分割パターン内も対象", () => allThrow(`function f({ eval }) {}`, SyntaxError));
+  it("catch パラメータ", () => allThrow(`try {} catch (eval) {}`, SyntaxError));
+  it("代入 eval = 1", () => allThrow(`eval = 1;`, SyntaxError));
+  it("複合代入 arguments += 1", () => allThrow(`arguments += 1;`, SyntaxError));
+  it("インクリメント eval++", () => allThrow(`eval++;`, SyntaxError));
+  it("class 名 eval", () => allThrow(`class eval {}`, SyntaxError));
+  it("strict の重複パラメータ", () => allThrow(`function f(a, a) {}`, SyntaxError));
+  // 合法な使用は壊さない
+  it("eval() 呼び出しは合法", () => agree(`eval("1 + 1");`, 2));
+  it("arguments の読みは合法", () => agree(`function f() { return arguments.length; } f(1, 2);`, 2));
+  it("プロパティ名 eval は合法", () => agree(`var o = { eval: 1 }; o.eval;`, 1));
+});
+
+describe("Phase 39 — プロパティ属性モデル (writable/enumerable/configurable)", () => {
+  it("freeze 後の書込は TypeError", () =>
+    allThrow(`var o = Object.freeze({ x: 1 }); o.x = 2;`, TypeError));
+  it("freeze 後の新規プロパティも TypeError", () =>
+    allThrow(`var o = Object.freeze({}); o.y = 1;`, TypeError));
+  it("writable:false への書込は TypeError", () =>
+    allThrow(`var o = {}; Object.defineProperty(o, "x", { value: 1, writable: false }); o.x = 2;`, TypeError));
+  it("configurable:false の削除は TypeError", () =>
+    allThrow(`var o = {}; Object.defineProperty(o, "x", { value: 1, configurable: false }); delete o.x;`, TypeError));
+  it("configurable:false の再定義は TypeError", () =>
+    allThrow(`var o = {}; Object.defineProperty(o, "x", { value: 1 }); Object.defineProperty(o, "x", { value: 2 });`, TypeError));
+  it("defineProperty のデフォルト属性は false", () =>
+    agree(`var o = {}; Object.defineProperty(o, "x", { value: 1 }); var d = Object.getOwnPropertyDescriptor(o, "x"); "" + d.writable + d.enumerable + d.configurable;`, "falsefalsefalse"));
+  it("enumerable:false は keys/for-in/spread に出ない", () =>
+    agree(`var o = { a: 1 }; Object.defineProperty(o, "h", { value: 2, enumerable: false }); var s = Object.keys(o).join(","); for (var k in o) s += "|" + k; s += "!" + Object.keys({ ...o }).join(","); s;`, "a|a!a"));
+  it("seal は書込可・追加不可", () =>
+    agree(`var o = Object.seal({ x: 1 }); o.x = 5; var r = ""; try { o.y = 1; } catch (e) { r = "TE"; } r + o.x;`, "TE5"));
+  it("isFrozen / isExtensible", () =>
+    agree(`var o = Object.freeze({ x: 1 }); (Object.isFrozen(o) ? 1 : 0) + (Object.isExtensible(o) ? 0 : 2);`, 3));
+});
+
+describe("Phase 39 — accessor descriptor (defineProperty get/set)", () => {
+  it("getter を defineProperty で定義", () =>
+    agree(`var o = {}; Object.defineProperty(o, "x", { get: function () { return 9; } }); o.x;`, 9));
+  it("setter を defineProperty で定義", () =>
+    agree(`var o = {}; var got = 0; Object.defineProperty(o, "x", { set: function (v) { got = v * 2; } }); o.x = 21; got;`, 42));
+  it("getter のみへの代入は TypeError", () =>
+    allThrow(`var o = {}; Object.defineProperty(o, "x", { get: function () { return 1; } }); o.x = 5;`, TypeError));
+  it("gOPD が get/set を返す", () =>
+    agree(`var g = function () { return 1; }; var o = {}; Object.defineProperty(o, "x", { get: g }); Object.getOwnPropertyDescriptor(o, "x").get === g ? 1 : 0;`, 1));
+});
+
+describe("Phase 39 — class メソッドと関数の属性", () => {
+  it("class メソッドは non-enumerable", () =>
+    agree(`class C { m() {} n() {} } Object.keys(C.prototype).length;`, 0));
+  it("class static メソッドも non-enumerable (記述子検査)", () =>
+    agree(`class C { static s() {} } Object.getOwnPropertyDescriptor(C, "s").enumerable ? 1 : 0;`, 0));
+  it("fn.length はデフォルト/rest 前まで", () =>
+    agree(`function f(a, b, c) {} function g(a, b = 1, c) {} function h(a, ...r) {} "" + f.length + g.length + h.length;`, "311"));
+  it("fn.name/length の記述子属性は spec 準拠", () =>
+    agree(`function foo(a) {} var dn = Object.getOwnPropertyDescriptor(foo, "name"); var dl = Object.getOwnPropertyDescriptor(foo, "length"); "" + dn.value + dn.writable + dn.enumerable + dn.configurable + "/" + dl.value;`, "foofalsefalsetrue/1"));
+});
+
 describe("Phase 38 — ラベル付き break/continue と for-in の loop エントリ", () => {
   // VM はラベル付き非ループ文への break を解決できず、未パッチ Jump 0 が
   // プログラム先頭へ飛んで無限ループしていた (test262 JIT ランがハングした原因)

@@ -210,6 +210,19 @@ export class JitManager {
       return null;
     }
 
+    // class 継承 / spread 呼び出しオペコードは JIT 未対応。IR builder の未知
+    // opcode は silent skip なので、誤コンパイルする前にここで VM 行きを確定する
+    if (func.bytecode.some(i => i.op === "CallSuper" || i.op === "CallSuperArray"
+        || i.op === "GetSuperProp" || i.op === "ClassLink"
+        || i.op === "CallSpread" || i.op === "CallMethodSpread"
+        || i.op === "ConstructSpread" || i.op === "CopyDataProps"
+        || i.op === "DefineMethodProp")) {
+      this.wasmCache.set(func, null);
+      (func as { __jitCached?: CachedWasm | null }).__jitCached = null;
+      this.logTier(func, "Bytecode VM (super/spread)", callCount);
+      return null;
+    }
+
     const wasmArgTypes = this.feedback.getWasmArgTypes(func);
     if (!wasmArgTypes) {
       this.wasmCache.set(func, null);

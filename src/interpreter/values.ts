@@ -65,6 +65,15 @@ export function createJSFunction(
 
 // プロトタイプチェーンを辿ってプロパティを取得
 export function getProperty(obj: JSObject, key: string): unknown {
+  // JSFunction の length は params から合成 (spec: デフォルト/rest より前の数)
+  if (key === "length" && obj && typeof obj === "object" && (obj as any)[JS_FUNCTION_BRAND]) {
+    let fnLen = 0;
+    for (const prm of ((obj as any).params ?? []) as any[]) {
+      if (prm.type === "AssignmentPattern" || prm.type === "RestElement") break;
+      fnLen++;
+    }
+    return fnLen;
+  }
   let current: JSObject | null = obj;
   while (current !== null && current !== undefined) {
     if (Object.prototype.hasOwnProperty.call(current, key)) {

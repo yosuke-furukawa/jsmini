@@ -3,7 +3,7 @@ import { VM } from "./vm.js";
 import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
 import { isJSString, jsStringToString, internString, createSeqString, arrayToPrimitiveString, joinElementToString, jsStringEquals } from "./js-string.js";
-import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass } from "./js-object.js";
+import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getPropAttrs, setPropAttrs, preventObjExtensions, isObjExtensible, isAccessorDescriptor, createAccessorDescriptor, type PropAttrs } from "./js-object.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
 import { Heap } from "./heap.js";
 import { evaluate } from "../interpreter/evaluator.js";
@@ -413,7 +413,8 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     if (new.target) { this.valueOf = () => s; this.toString = () => s; return; }
     return s;
   }
-  (StringCtor as any).fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes));
+  (StringCtor as any).fromCharCode = (...codes: number[]) => internString(String.fromCharCode(...codes.map(c => Number(c) & 0xffff)));
+  (StringCtor as any).fromCodePoint = (...cps: number[]) => internString(String.fromCodePoint(...cps.map(c => Number(c))));
   // ユーザの `String.prototype.foo = ...` 拡張を host String.prototype に当てて、
   // VM 側の dispatch (vm.stringPrototype に無ければ host にフォールバック) で見えるように
   (StringCtor as any).prototype = String.prototype;
@@ -429,12 +430,20 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   vm.setGlobal("parseFloat", (s: unknown) => parseFloat(strConv(s)));
 
   // JSObject のキーを取得するヘルパー (内部プロパティを除外)
-  const jsObjKeys = (obj: unknown): string[] => {
+  const jsObjOwnNames = (obj: unknown): string[] => {
     if (isJSObject(obj)) {
       const props = getHiddenClass(obj).properties;
       return [...props.keys()].filter(k => k !== "__proto__");
     }
     return Object.keys(obj as Record<string, unknown>);
+  };
+  // enumerable:false を除いた own キー (Object.keys / for-in / spread 用)
+  const jsObjKeys = (obj: unknown): string[] => {
+    const names = jsObjOwnNames(obj);
+    if (isJSObject(obj) && obj.__attrs__) {
+      return names.filter(k => getPropAttrs(obj, k)?.enumerable !== false);
+    }
+    return names;
   };
 
   // Object: ネイティブ Object をラップ (new Object() + 静的メソッド)
@@ -448,7 +457,62 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     if (proto !== null) jsObjSet(obj, "__proto__", proto);
     return obj;
   };
-  ObjectWrapper.freeze = (obj: unknown) => obj;
+  ObjectWrapper.freeze = (obj: unknown) => {
+    if (isJSString(obj) || isJSSymbol(obj)) return obj; // プリミティブは no-op (ES2015+)
+    if (isJSObject(obj)) {
+      for (const k of jsObjOwnNames(obj)) {
+        const a = getPropAttrs(obj, k);
+        setPropAttrs(obj, k, { writable: false, enumerable: a?.enumerable !== false, configurable: false });
+      }
+      preventObjExtensions(obj);
+    } else if (obj && typeof obj === "object") {
+      Object.freeze(obj); // host 配列等は host freeze (strict 代入は host が throw)
+    }
+    return obj;
+  };
+  ObjectWrapper.seal = (obj: unknown) => {
+    if (isJSString(obj) || isJSSymbol(obj)) return obj;
+    if (isJSObject(obj)) {
+      for (const k of jsObjOwnNames(obj)) {
+        const a = getPropAttrs(obj, k);
+        setPropAttrs(obj, k, { writable: a?.writable !== false, enumerable: a?.enumerable !== false, configurable: false });
+      }
+      preventObjExtensions(obj);
+    } else if (obj && typeof obj === "object") {
+      Object.seal(obj);
+    }
+    return obj;
+  };
+  ObjectWrapper.preventExtensions = (obj: unknown) => {
+    if (isJSString(obj) || isJSSymbol(obj)) return obj;
+    if (isJSObject(obj)) preventObjExtensions(obj);
+    else if (obj && typeof obj === "object") Object.preventExtensions(obj);
+    return obj;
+  };
+  ObjectWrapper.isExtensible = (obj: unknown) => {
+    if (isJSObject(obj)) return isObjExtensible(obj);
+    if (obj && typeof obj === "object") return Object.isExtensible(obj);
+    return false;
+  };
+  ObjectWrapper.isFrozen = (obj: unknown) => {
+    if (isJSObject(obj)) {
+      if (isObjExtensible(obj)) return false;
+      return jsObjOwnNames(obj).every(k => {
+        const a = getPropAttrs(obj, k);
+        return a !== undefined && !a.configurable && (!a.writable || isAccessorDescriptor(jsObjGet(obj, k)));
+      });
+    }
+    if (obj && typeof obj === "object") return Object.isFrozen(obj);
+    return true;
+  };
+  ObjectWrapper.isSealed = (obj: unknown) => {
+    if (isJSObject(obj)) {
+      if (isObjExtensible(obj)) return false;
+      return jsObjOwnNames(obj).every(k => getPropAttrs(obj, k)?.configurable === false);
+    }
+    if (obj && typeof obj === "object") return Object.isSealed(obj);
+    return true;
+  };
   ObjectWrapper.prototype = vm.objectPrototype;
 
   const descField = (desc: unknown, name: string): unknown => {
@@ -466,23 +530,98 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return isJSString(key) ? jsStringToString(key) : String(key);
   };
   ObjectWrapper.defineProperty = (obj: unknown, key: unknown, desc: unknown) => {
-    const k = toKey(key);
-    if (descHas(desc, "get") || descHas(desc, "set")) {
-      throw new TypeError("accessor descriptors not yet supported");
+    // プリミティブ (JSString 含む) は spec 通り TypeError。JSString は intern 共有
+    // オブジェクトなので黙って定義すると全プログラムに汚染が漏れる (Phase 36 の
+    // プロパティ代入と同じ罠の defineProperty 版 — 差分ファザが検出)
+    if (isJSString(obj) || isJSSymbol(obj) || obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
+      throw new TypeError("Object.defineProperty called on non-object");
     }
-    if (descHas(desc, "value")) {
-      if (isJSObject(obj)) {
-        jsObjSet(obj as any, k, descField(desc, "value"));
-      } else if (obj !== null && (typeof obj === "object" || typeof obj === "function")) {
-        // host オブジェクト (Object.prototype / BytecodeFunction 等)。
-        // jsObjSet だと getHiddenClass で内部エラーになるので host の
-        // defineProperty を使う。enumerable は JS デフォルト (false) のまま
-        // にして for-in を汚染しない。configurable/writable は restore や
-        // 再定義を許すため true (jsmini は属性を強制しない方針)
-        Object.defineProperty(obj, k, { value: descField(desc, "value"), writable: true, configurable: true });
-      } else {
-        throw new TypeError("Object.defineProperty called on non-object");
+    const k = toKey(key);
+    const boolField = (name: string): boolean => !!descField(desc, name);
+    const isAccessorDesc = descHas(desc, "get") || descHas(desc, "set");
+    if (isJSObject(obj)) {
+      const exists = getHiddenClass(obj).properties.has(k);
+      const curVal = exists ? jsObjGet(obj, k) : undefined;
+      const curIsAccessor = exists && isAccessorDescriptor(curVal);
+      // 既存プロパティのデフォルト属性は true×3、新規は spec 通り false×3
+      const cur: PropAttrs = getPropAttrs(obj, k)
+        ?? (exists ? { writable: true, enumerable: true, configurable: true }
+                   : { writable: false, enumerable: false, configurable: false });
+      if (!exists && !isObjExtensible(obj)) {
+        throw new TypeError(`Cannot define property ${k}, object is not extensible`);
       }
+      // 再定義の制限 (spec 10.1.6.3 ValidateAndApplyPropertyDescriptor の近似)
+      if (exists && !cur.configurable) {
+        if (descHas(desc, "configurable") && boolField("configurable")) {
+          throw new TypeError(`Cannot redefine property: ${k}`);
+        }
+        if (descHas(desc, "enumerable") && boolField("enumerable") !== cur.enumerable) {
+          throw new TypeError(`Cannot redefine property: ${k}`);
+        }
+        if (isAccessorDesc !== curIsAccessor) {
+          throw new TypeError(`Cannot redefine property: ${k}`);
+        }
+        if (isAccessorDesc && curIsAccessor) {
+          const ad = curVal as { get?: unknown; set?: unknown };
+          if ((descHas(desc, "get") && descField(desc, "get") !== ad.get)
+            || (descHas(desc, "set") && descField(desc, "set") !== ad.set)) {
+            throw new TypeError(`Cannot redefine property: ${k}`);
+          }
+        }
+        if (!isAccessorDesc && !cur.writable) {
+          if (descHas(desc, "writable") && boolField("writable")) {
+            throw new TypeError(`Cannot redefine property: ${k}`);
+          }
+          if (descHas(desc, "value") && descField(desc, "value") !== curVal) {
+            throw new TypeError(`Cannot redefine property: ${k}`);
+          }
+        }
+      }
+      const next: PropAttrs = {
+        writable: isAccessorDesc ? false : (descHas(desc, "writable") ? boolField("writable") : cur.writable),
+        enumerable: descHas(desc, "enumerable") ? boolField("enumerable") : cur.enumerable,
+        configurable: descHas(desc, "configurable") ? boolField("configurable") : cur.configurable,
+      };
+      if (isAccessorDesc) {
+        const ad = curIsAccessor ? (curVal as ReturnType<typeof createAccessorDescriptor>) : createAccessorDescriptor();
+        if (descHas(desc, "get")) ad.get = descField(desc, "get");
+        if (descHas(desc, "set")) ad.set = descField(desc, "set");
+        jsObjSet(obj as any, k, ad);
+      } else if (descHas(desc, "value")) {
+        jsObjSet(obj as any, k, descField(desc, "value"));
+      } else if (!exists) {
+        jsObjSet(obj as any, k, undefined);
+      }
+      setPropAttrs(obj, k, next);
+    } else if (obj !== null && (typeof obj === "object" || typeof obj === "function")) {
+      // host オブジェクト (Object.prototype / BytecodeFunction / 配列等):
+      // host defineProperty に「指定されたフィールドだけ」を渡し、デフォルトや
+      // 再定義検証は host に任せる。get/set (jsmini 関数) は host callable に包む
+      const hostDesc: PropertyDescriptor = {};
+      if (descHas(desc, "value")) hostDesc.value = descField(desc, "value");
+      if (descHas(desc, "writable")) hostDesc.writable = boolField("writable");
+      if (descHas(desc, "enumerable")) hostDesc.enumerable = boolField("enumerable");
+      if (descHas(desc, "configurable")) hostDesc.configurable = boolField("configurable");
+      // 共有ビルトイン prototype (host) への定義は、省略時の writable/configurable
+      // を true に倒す。jsmini は host prototype を全 evaluate 間で共有するため、
+      // spec デフォルト (false) だと再実行やテストのクリーンアップ (delete/再定義)
+      // が壊れる (deltablue の Object.prototype.inheritsFrom で顕在化)
+      const sharedProtos: unknown[] = [Object.prototype, Array.prototype, String.prototype, Number.prototype, Boolean.prototype, Function.prototype, RegExp.prototype];
+      if (sharedProtos.includes(obj)) {
+        if (!descHas(desc, "configurable")) hostDesc.configurable = true;
+        if (!descHas(desc, "writable") && !descHas(desc, "get") && !descHas(desc, "set")) hostDesc.writable = true;
+      }
+      if (descHas(desc, "get")) {
+        const g = descField(desc, "get");
+        hostDesc.get = typeof g === "function" ? g as () => unknown : function(this: unknown) { return vm.callFunction(g, this, []); };
+      }
+      if (descHas(desc, "set")) {
+        const st = descField(desc, "set");
+        hostDesc.set = typeof st === "function" ? st as (v: unknown) => void : function(this: unknown, v: unknown) { vm.callFunction(st, this, [v]); };
+      }
+      Object.defineProperty(obj, k, hostDesc);
+    } else {
+      throw new TypeError("Object.defineProperty called on non-object");
     }
     return obj;
   };
@@ -497,17 +636,38 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   };
   ObjectWrapper.getOwnPropertyDescriptor = (obj: unknown, key: unknown): unknown => {
     const k = toKey(key);
-    if (isJSObject(obj)) {
-      const props = getHiddenClass(obj).properties;
-      if (!props.has(k)) return undefined;
+    // 関数 (BytecodeFunction / closure) の name/length は spec 属性で合成
+    // (writable:false, enumerable:false, configurable:true)。オブジェクト自体は
+    // 変更しない — engine 内部の name 読み書きを壊さないため
+    if ((k === "name" || k === "length") && obj
+        && ((typeof obj === "object" && ("bytecode" in (obj as any) || "__closure" in (obj as any)))
+          || typeof obj === "function")) {
+      const fnObj = (typeof obj === "object" && "__closure" in (obj as any)) ? (obj as any).func : obj;
       const d = vm.heap.allocate(createJSObject());
-      jsObjSet(d, "value", jsObjGet(obj, k));
-      jsObjSet(d, "writable", true);
-      jsObjSet(d, "enumerable", true);
+      jsObjSet(d, "value", k === "name" ? internString((fnObj as any)?.name ?? "") : ((fnObj as any)?.length ?? 0));
+      jsObjSet(d, "writable", false);
+      jsObjSet(d, "enumerable", false);
       jsObjSet(d, "configurable", true);
       return d;
     }
-    if (obj && typeof obj === "object") {
+    if (isJSObject(obj)) {
+      const props = getHiddenClass(obj).properties;
+      if (!props.has(k) || k === "__proto__") return undefined;
+      const cur = jsObjGet(obj, k); // accessor slot は raw のまま返る (getter は呼ばれない)
+      const a = getPropAttrs(obj, k) ?? { writable: true, enumerable: true, configurable: true };
+      const d = vm.heap.allocate(createJSObject());
+      if (isAccessorDescriptor(cur)) {
+        jsObjSet(d, "get", cur.get);
+        jsObjSet(d, "set", cur.set);
+      } else {
+        jsObjSet(d, "value", cur);
+        jsObjSet(d, "writable", a.writable);
+      }
+      jsObjSet(d, "enumerable", a.enumerable);
+      jsObjSet(d, "configurable", a.configurable);
+      return d;
+    }
+    if (obj && (typeof obj === "object" || typeof obj === "function")) {
       return Object.getOwnPropertyDescriptor(obj, k);
     }
     return undefined;
@@ -527,7 +687,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return obj;
   };
   ObjectWrapper.getOwnPropertyNames = (obj: unknown) => {
-    const keys = jsObjKeys(obj);
+    const keys = jsObjOwnNames(obj);
     return keys.filter(k => !k.startsWith("@@")).map(k => internString(k));
   };
   ObjectWrapper.getOwnPropertySymbols = (_obj: unknown) => {
@@ -912,6 +1072,15 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
 
   // ステップ数上限
   if (options.maxSteps) vm.maxSteps = options.maxSteps;
+
+  // 外部から渡されたグローバル変数を注入 (test262 の native ハーネス等)。
+  // 既存のビルトインは上書きしない
+  if (options.globals) {
+    const g = (vm as any).globals as Map<string, unknown>;
+    for (const [k, v] of Object.entries(options.globals)) {
+      if (!g.has(k)) vm.setGlobal(k, v);
+    }
+  }
 
   const rawValue = vm.execute(func);
   // スクリプト実行完了後に microtask を drain

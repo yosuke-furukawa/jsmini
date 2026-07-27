@@ -2,7 +2,7 @@ import type { BytecodeFunction, Instruction } from "./bytecode.js";
 import type { FeedbackCollector } from "../jit/feedback.js";
 import type { JitManager } from "../jit/jit.js";
 import { createJSArray, setElement, pushElement } from "./js-array.js";
-import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots, isAccessorDescriptor, createAccessorDescriptor } from "./js-object.js";
+import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getSlots, isAccessorDescriptor, createAccessorDescriptor, setPropertyChecked, STORE_OK, STORE_NO_SETTER, STORE_NOT_EXTENSIBLE, getPropAttrs, setPropAttrs, type JSObjectInternal } from "./js-object.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, toNumericOperand, type JSString } from "./js-string.js";
 import { isJSSymbol } from "./js-symbol.js";
 import { type ICSlot, createICSlot, icLookup, icUpdate } from "./inline-cache.js";
@@ -44,6 +44,14 @@ function toPropertyKeyString(key: unknown): string {
 
 // toPrimitive/callInternal 内で例外が unwindToHandler で処理された場合の sentinel
 const THROWN_SENTINEL = Symbol("thrown");
+
+// クロージャ包み (upvalue キャプチャした関数/class) から中の BytecodeFunction を
+// 取り出す。class が外側変数をキャプチャすると LdaConst でクロージャ化されるが、
+// prototype はあくまで中の関数に属する — closure オブジェクト自身の prototype を
+// 読むと undefined になり、メソッド定義や instanceof が壊れる
+function ctorFuncOf(v: unknown): any {
+  return v && typeof v === "object" && "__closure" in (v as any) ? (v as any).func : v;
+}
 
 // TDZ (Temporal Dead Zone): lexical (let/const) が宣言スロットを確保済みだが
 // 初期化子がまだ実行されていない状態を表す穴。この値を読むと ReferenceError。
@@ -269,7 +277,7 @@ export class VM {
   }
 
   // Async function → JSPromise を返し、内部 VM で body を駆動
-  private runAsyncFunction(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[]): JSPromise {
+  private runAsyncFunction(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[], thisValue?: unknown): JSPromise {
     const vm = new VM();
     vm.globals = this.globals;
     vm.heap = this.heap;
@@ -290,7 +298,7 @@ export class VM {
 
         vm.frames.push({
           func, pc, locals: savedLocals,
-          thisValue: undefined,
+          thisValue, // async メソッドの this (従来は undefined 固定で this が消えていた)
           icSlots: vm.createICSlots(func),
           upvalueBoxes,
         });
@@ -456,20 +464,31 @@ export class VM {
   }
 
   // getter/setter 関数を呼び出すヘルパー
+  // JSObject への属性チェック付き store (spec 9.1.9 OrdinarySet の近似)。
+  // writable:false / non-extensible / setter 無し accessor → strict の TypeError。
+  // 戻り値: true = 完了 (データ書込 or setter 呼び出し) / false = unwind 済み
+  storeJSObjectChecked(obj: JSObjectInternal, name: string, value: unknown): boolean {
+    const r = setPropertyChecked(obj, name, value);
+    if (r === STORE_OK) return true;
+    if (typeof r === "object") {
+      // setter 内で throw され外側ハンドラに unwind 済みなら false (caller は break)
+      if (this.callGetterSetter(r.set, obj, value) === THROWN_SENTINEL) return false;
+      return true;
+    }
+    const err = new TypeError(
+      r === STORE_NOT_EXTENSIBLE ? `Cannot add property ${name}, object is not extensible`
+      : r === STORE_NO_SETTER ? `Cannot set property ${name} of object which has only a getter`
+      : `Cannot assign to read only property '${name}' of object`);
+    if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+    return false;
+  }
+
+  // getter/setter を同一 VM で同期実行する。以前は別 VM を起動していたため、
+  // getter 内の throw が外側フレームの catch ハンドラに一切到達できなかった
+  // (フレームスタックが分断される)。callFunction は外側ハンドラへ unwind し、
+  // 処理された場合は THROWN_SENTINEL を返す — caller は伝播チェックすること
   callGetterSetter(fn: unknown, thisValue: unknown, arg: unknown): unknown {
-    const isClosure = typeof fn === "object" && fn !== null && (fn as any).__closure;
-    const func = isClosure ? (fn as any).func as BytecodeFunction : fn as BytecodeFunction;
-    const boxes: UpvalueBox[] = isClosure ? (fn as any).capturedBoxes : [];
-    const vm = new VM();
-    vm.globals = this.globals;
-    vm.heap = this.heap;
-    vm.objectPrototype = this.objectPrototype;
-    vm.arrayPrototype = this.arrayPrototype;
-    vm.stringPrototype = this.stringPrototype;
-    const locals = new Array(func.localCount).fill(undefined);
-    if (arg !== undefined) locals[0] = arg; // setter の引数
-    vm.frames.push({ func, pc: 0, locals, thisValue, icSlots: vm.createICSlots(func), upvalueBoxes: boxes });
-    return vm.run();
+    return this.callFunction(fn, thisValue, arg === undefined ? [] : [arg]);
   }
 
   // 例外をフレームスタックをアンワインドしてハンドラを探す
@@ -522,8 +541,14 @@ export class VM {
   // BytecodeFunction を直接呼び出す (ToPrimitive, Promise handler 等の内部用)
   private callInternal(func: BytecodeFunction, thisValue: unknown, args: unknown[]): unknown {
     const locals = new Array(func.localCount).fill(undefined);
-    for (let i = 0; i < args.length && i < func.paramCount; i++) {
-      locals[i] = args[i];
+    if (func.hasRestParam) {
+      const restIdx = func.paramCount - 1;
+      for (let i = 0; i < restIdx; i++) locals[i] = i < args.length ? args[i] : undefined;
+      locals[restIdx] = args.slice(restIdx);
+    } else {
+      for (let i = 0; i < args.length && i < func.paramCount; i++) {
+        locals[i] = args[i];
+      }
     }
     const savedSp = this.sp;
     const baseFrameCount = this.frames.length;
@@ -566,9 +591,13 @@ export class VM {
       // JSObject (Hidden Class) の場合は jsObjGet、それ以外は普通のプロパティアクセス
       const method = isJSObject(value) ? jsObjGet(value, name) : obj[name];
       if (typeof method === "function") {
-        // ネイティブ関数 (e.g. new String() の valueOf/toString)
+        // ネイティブ関数 (e.g. new String() の valueOf/toString)。
+        // C.prototype は素の host {} なので host の Object.prototype.toString が
+        // 見え、それは host string "[object Object]" を返す → JSString に intern
+        // しないと LessThan 等が「片方だけ JSString」で数値比較経路に落ちる
         methodFound = true;
         const result = (method as Function).call(value);
+        if (typeof result === "string") return internString(result);
         if (result === null || result === undefined || typeof result !== "object" || isJSString(result)) {
           return result;
         }
@@ -1076,8 +1105,8 @@ export class VM {
           const obj = this.peek();
           const name = constants[instr.operand!] as string;
           if (isJSObject(obj)) {
-            jsObjSet(obj, name, value);
-            // IC 更新
+            // 属性チェック付き store (writable:false/frozen → TypeError, setter → 呼び出し)
+            if (!this.storeJSObjectChecked(obj, name, value)) break;
             const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
             if (ic) icUpdate(ic, getHiddenClass(obj), name);
           } else if (isJSString(obj) || isJSSymbol(obj)) {
@@ -1088,6 +1117,24 @@ export class VM {
             break;
           } else {
             (obj as Record<string, unknown>)[name] = value;
+          }
+          break;
+        }
+        case "DefineMethodProp": {
+          // class メソッド定義: non-enumerable / writable / configurable (spec 準拠)。
+          // object リテラルのメソッドは enumerable なので SetProperty のまま
+          const value = this.pop();
+          const target = this.peek();
+          const name = constants[instr.operand!] as string;
+          if (isJSObject(target)) {
+            jsObjSet(target, name, value);
+            const a = getPropAttrs(target, name);
+            if (!a || a.enumerable) {
+              // enumerable:false を記録 (writable/configurable は true)
+              (target.__attrs__ ?? (target.__attrs__ = new Map())).set(name, { writable: true, enumerable: false, configurable: true });
+            }
+          } else if (target && (typeof target === "object" || typeof target === "function")) {
+            Object.defineProperty(target, name, { value, writable: true, enumerable: false, configurable: true });
           }
           break;
         }
@@ -1136,14 +1183,9 @@ export class VM {
           const value = this.pop();
           const name = constants[instr.operand!] as string;
           if (isJSObject(obj)) {
-            const existing = jsObjGet(obj, name);
-            if (isAccessorDescriptor(existing) && existing.set) {
-              this.callGetterSetter(existing.set, obj, value);
-            } else {
-              jsObjSet(obj, name, value);
-              const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
-              if (ic) icUpdate(ic, getHiddenClass(obj), name);
-            }
+            if (!this.storeJSObjectChecked(obj, name, value)) break;
+            const ic = instr.icSlot !== undefined ? frame.icSlots[instr.icSlot] : null;
+            if (ic) icUpdate(ic, getHiddenClass(obj), name);
           } else if (isJSString(obj) || isJSSymbol(obj)) {
             const err = new TypeError(`Cannot create property '${name}' on ${isJSString(obj) ? "string" : "symbol"}`);
             if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
@@ -1168,7 +1210,11 @@ export class VM {
             if (ic.cachedHC === hc && ic.cachedOffset >= 0) {
               const val = getSlots(obj)[ic.cachedOffset];
               if (isAccessorDescriptor(val)) {
-                this.push(val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined);
+                {
+                  const gv = val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined;
+                  if (gv === THROWN_SENTINEL) continue;
+                  this.push(gv);
+                }
               } else {
                 this.push(val);
               }
@@ -1178,7 +1224,11 @@ export class VM {
             if (ic.state !== "polymorphic") icUpdate(ic, hc, name);
             const val = jsObjGet(obj, name);
             if (isAccessorDescriptor(val)) {
-              this.push(val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined);
+              {
+                const gv = val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined;
+                if (gv === THROWN_SENTINEL) continue;
+                this.push(gv);
+              }
             } else {
               this.push(val);
             }
@@ -1187,16 +1237,39 @@ export class VM {
             if (isJSObject(obj)) {
               const val = jsObjGet(obj, name);
               if (isAccessorDescriptor(val)) {
-                this.push(val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined);
+                {
+                  const gv = val.get ? this.callGetterSetter(val.get, obj, undefined) : undefined;
+                  if (gv === THROWN_SENTINEL) continue;
+                  this.push(gv);
+                }
               } else {
                 this.push(val);
               }
             } else {
-              // BytecodeFunction の prototype を遅延作成
-              if (name === "prototype" && typeof obj === "object" && obj !== null && "bytecode" in obj && !(obj as any).prototype) {
-                const proto = this.heap.allocate(createJSObject());
-                jsObjSet(proto, "__proto__", this.objectPrototype);
-                (obj as any).prototype = proto;
+              // closure オブジェクトの name/length は中の BytecodeFunction へ転送
+              if ((name === "name" || name === "length") && typeof obj === "object" && obj !== null && "__closure" in obj) {
+                const cf = (obj as any).func;
+                this.push(name === "name" ? internString(cf?.name ?? "") : (cf?.length ?? 0));
+                break;
+              }
+              if (name === "name" && typeof obj === "object" && obj !== null && "bytecode" in obj) {
+                this.push(internString((obj as any).name ?? ""));
+                break;
+              }
+              // BytecodeFunction の prototype を遅延作成 (closure は中の func に委譲)
+              {
+                const fnObj = ctorFuncOf(obj);
+                if (name === "prototype" && fnObj && typeof fnObj === "object" && "bytecode" in fnObj) {
+                  if (!fnObj.prototype) {
+                    const proto = this.heap.allocate(createJSObject());
+                    jsObjSet(proto, "__proto__", this.objectPrototype);
+                    jsObjSet(proto, "constructor", fnObj);
+                    setPropAttrs(proto, "constructor", { writable: true, enumerable: false, configurable: true });
+                    fnObj.prototype = proto;
+                  }
+                  this.push(fnObj.prototype);
+                  break;
+                }
               }
               // 配列/文字列のメソッド: prototype を優先
               if (Array.isArray(obj) && name in this.arrayPrototype) {
@@ -1265,7 +1338,7 @@ export class VM {
           } else {
             const keyStr = toPropertyKeyString(key);
             if (isJSObject(obj)) {
-              jsObjSet(obj, keyStr, value);
+              if (!this.storeJSObjectChecked(obj, keyStr, value)) break;
             } else if (isJSString(obj) || isJSSymbol(obj)) {
               const err = new TypeError(`Cannot create property '${keyStr}' on ${isJSString(obj) ? "string" : "symbol"}`);
               if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
@@ -1354,8 +1427,15 @@ export class VM {
           const obj = this.pop();
           const name = constants[instr.operand!] as string;
           if (isJSObject(obj)) {
+            // configurable:false の削除は strict の TypeError
+            if (getPropAttrs(obj, name)?.configurable === false) {
+              const err = new TypeError(`Cannot delete property '${name}' of object`);
+              if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+              break;
+            }
             jsObjSet(obj, name, undefined);
             delete obj[name];
+            obj.__attrs__?.delete(name);
           } else if (obj && typeof obj === "object") {
             delete (obj as Record<string, unknown>)[name];
           }
@@ -1367,8 +1447,14 @@ export class VM {
           const obj = this.pop();
           const keyStr = isJSString(key) ? jsStringToString(key) : String(key);
           if (isJSObject(obj)) {
+            if (getPropAttrs(obj, keyStr)?.configurable === false) {
+              const err = new TypeError(`Cannot delete property '${keyStr}' of object`);
+              if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+              break;
+            }
             jsObjSet(obj, keyStr, undefined);
             delete (obj as any)[keyStr];
+            obj.__attrs__?.delete(keyStr);
           } else if (obj && typeof obj === "object") {
             delete (obj as Record<string, unknown>)[keyStr];
           }
@@ -1389,8 +1475,8 @@ export class VM {
           if (typeof right === "function") {
             this.push(left instanceof right);
           } else {
-            // jsmini 関数: prototype チェーンを辿る
-            const proto = right?.prototype;
+            // jsmini 関数: prototype チェーンを辿る (closure は中の func から)
+            const proto = ctorFuncOf(right)?.prototype;
             let current = left?.__proto__;
             let found = false;
             while (current) {
@@ -1554,7 +1640,7 @@ export class VM {
                 const jitResult = this.jit.tryCall(fn, args, closure.capturedBoxes.map(b => b.value), thisObj, closure.capturedBoxes);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
-              const asyncPromise = this.runAsyncFunction(fn, locals, closure.capturedBoxes);
+              const asyncPromise = this.runAsyncFunction(fn, locals, closure.capturedBoxes, thisObj);
               this.push(asyncPromise);
             } else if (fn.isGenerator) {
               const genObj = this.createGeneratorObject(fn, locals, closure.capturedBoxes);
@@ -1584,7 +1670,7 @@ export class VM {
                 const jitResult = this.jit.tryCall(fn, args, [], thisObj);
                 if (jitResult !== null) { this.push(jitResult.result); break; }
               }
-              const asyncPromise = this.runAsyncFunction(fn, locals, []);
+              const asyncPromise = this.runAsyncFunction(fn, locals, [], thisObj);
               this.push(asyncPromise);
             } else if (fn.isGenerator) {
               const genObj = this.createGeneratorObject(fn, locals, []);
@@ -1618,53 +1704,44 @@ export class VM {
           for (let i = 0; i < argc; i++) {
             args.unshift(this.pop());
           }
-          // prototype が未設定なら作成
-          if (ctor.bytecode && !ctor.prototype) {
+          // prototype が未設定なら作成 (closure は中の func が prototype を持つ)
+          const protoSrc = ctorFuncOf(ctor);
+          if (protoSrc && protoSrc.bytecode && !protoSrc.prototype) {
             const proto = this.heap.allocate(createJSObject());
             jsObjSet(proto, "__proto__", this.objectPrototype);
-            ctor.prototype = proto;
+            jsObjSet(proto, "constructor", protoSrc);
+            setPropAttrs(proto, "constructor", { writable: true, enumerable: false, configurable: true });
+            protoSrc.prototype = proto;
           }
           const newObj = this.heap.allocate(createJSObject());
           this.maybeGC();
-          if (ctor.prototype) {
-            jsObjSet(newObj, "__proto__", ctor.prototype);
+          if (protoSrc && protoSrc.prototype) {
+            jsObjSet(newObj, "__proto__", protoSrc.prototype);
           }
-          if (ctor.__nativeConstructor) {
-            // ネイティブコンストラクタ (Error 等)
+          if (ctor.__nativeConstructor && !ctor.bytecode) {
+            // ネイティブコンストラクタ (Error 等)。bytecode を持つ場合は
+            // native の派生クラス (class E extends Error) なので bytecode 側で
+            // 実行する (__nativeConstructor は setPrototypeOf の静的継承で
+            // 親から見えてしまうため own の bytecode を優先)
             if (ctor.name === "Error") {
               this.push({ message: args[0] ?? "" });
             } else {
               throw new Error(`Unknown native constructor: ${ctor.name}`);
             }
           } else if (ctor.bytecode) {
-            // インスタンスフィールドの初期化
-            if (ctor.__instanceFields) {
-              for (const field of ctor.__instanceFields as any[]) {
-                const name = field.key.name as string;
-                let value: unknown = undefined;
-                if (field.value) {
-                  if (field.value.type === "Literal") {
-                    value = field.value.value;
-                  } else {
-                    // 複雑な式は ExecExpr で評価
-                    const idx = ctor.constants?.indexOf(field.value) ?? -1;
-                    if (idx < 0) {
-                      // constants に追加して ExecExpr で評価
-                      // 簡易実装: undefined のまま
-                    }
-                  }
-                }
-                if (isJSObject(newObj)) {
-                  jsObjSet(newObj, name, value);
-                } else {
-                  (newObj as Record<string, unknown>)[name] = value;
-                }
-              }
-            }
+            // インスタンスフィールドは ctor バイトコードの prologue が
+            // this.k = expr として初期化する (リテラル限定だった AST 解釈を廃止)
             // BytecodeFunction
             const locals = new Array(ctor.localCount).fill(undefined);
-            for (let i = 0; i < ctor.paramCount; i++) {
-              locals[i] = i < args.length ? args[i] : undefined;
+            if (ctor.hasRestParam) {
+              // rest param (派生クラスのデフォルト ctor の引数転送等)
+              const restIdx = ctor.paramCount - 1;
+              for (let i = 0; i < restIdx; i++) locals[i] = i < args.length ? args[i] : undefined;
+              locals[restIdx] = args.slice(restIdx);
+            } else {
+              for (let i = 0; i < ctor.paramCount; i++) {
+                locals[i] = i < args.length ? args[i] : undefined;
+              }
             }
             this.frames.push({ func: ctor, pc: 0, locals, thisValue: newObj, icSlots: this.createICSlots(ctor), upvalueBoxes: [] });
             (frame as any).__pendingNewObj = newObj;
@@ -1684,6 +1761,224 @@ export class VM {
             this.push(result);
           } else {
             throw new TypeError("Not a constructor");
+          }
+          break;
+        }
+
+        // class 継承 (Phase 39)
+        case "ClassLink": {
+          // stack: [child, parent] → pop parent, peek child (child は残す)
+          const parentValue = this.pop() as any;
+          const childValue = this.peek() as any;
+          if (parentValue === null || parentValue === undefined) break; // class C extends null
+          // closure 包み (外側変数をキャプチャした class) は中の func が
+          // prototype/タグの実体
+          const parent = ctorFuncOf(parentValue);
+          const child = ctorFuncOf(childValue);
+          // prototype チェーン: child.prototype (host object) → parent.prototype。
+          // GetProperty の host フォールバックが host proto チェーンを辿るので
+          // メソッド継承はこのリンクだけで効く (parent が host Error 等でも同様)
+          const parentProto = parent.prototype;
+          if (child.prototype && parentProto && typeof parentProto === "object") {
+            Object.setPrototypeOf(child.prototype, parentProto);
+          }
+          // 静的側: child (BytecodeFunction = host object) の proto を parent に。
+          // finish() が全内部フィールドを own prop で持つのでシャドウは安全
+          if (typeof parent === "object" || typeof parent === "function") {
+            try { Object.setPrototypeOf(child, parent); } catch { /* host 制約 */ }
+          }
+          // __superClass は super() の呼び出し対象なので closure 値のまま保持
+          // (closure の capturedBoxes を失うと親 ctor の upvalue 読みが壊れる)。
+          // prototype 解決 (__homeProto) は func 側から
+          child.__superClass = parentValue;
+          child.__homeProto = parentProto; // ctor 内の super.m 用
+          // メソッドに super 解決情報をタグ付け (super()/super.m 用)。
+          // instance メソッド → parent.prototype、static メソッド → parent
+          const INTERNAL_KEYS = new Set(["name", "length", "paramCount", "localCount", "hasRestParam", "isGenerator", "isAsync",
+            "bytecode", "constants", "handlers", "icSlotCount", "upvalues", "__jitCached",
+            "prototype", "__instanceFields", "__superClass", "__homeProto"]);
+          const tagFns = (holder: unknown, home: unknown) => {
+            if (!holder || typeof holder !== "object") return;
+            for (const key of Object.getOwnPropertyNames(holder)) {
+              if (INTERNAL_KEYS.has(key)) continue;
+              // descriptor 経由で読む — getter を発火させない。host object に
+              // accessor descriptor で定義された getter を `holder[key]` で読むと
+              // this=prototype で getter 本体が走り、未初期化フィールド参照で throw
+              const desc = Object.getOwnPropertyDescriptor(holder, key);
+              const raw = desc && "value" in desc ? desc.value : undefined;
+              // 外側変数を参照するメソッドは closure 化される → 中の func にタグ付け。
+              // closure オブジェクト自身にも付けておく (呼び出し経路で両方見られる)
+              const v = ctorFuncOf(raw);
+              if (v && typeof v === "object" && "bytecode" in v) {
+                v.__superClass = parentValue;
+                v.__homeProto = home;
+                if (raw !== v) { (raw as any).__superClass = parentValue; (raw as any).__homeProto = home; }
+              }
+            }
+          };
+          tagFns(child.prototype, parentProto);
+          tagFns(child, parent);
+          break;
+        }
+        case "CallSuper":
+        case "CallSuperArray": {
+          let superArgs: unknown[];
+          if (instr.op === "CallSuperArray") {
+            const arr = this.pop();
+            superArgs = Array.isArray(arr) ? arr : [];
+          } else {
+            const argc = instr.operand!;
+            superArgs = new Array(argc);
+            for (let i = argc - 1; i >= 0; i--) superArgs[i] = this.pop();
+          }
+          const parentCtor = (frame.func as any).__superClass;
+          if (!parentCtor) {
+            const err = new SyntaxError("'super' keyword unexpected here");
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
+          const self = frame.thisValue;
+          if (parentCtor.__nativeConstructor && !parentCtor.bytecode) {
+            // jsmini の native コンストラクタ (Error): Construct の native 分岐と
+            // 同じプロパティを this に与える
+            if (parentCtor.name === "Error" && isJSObject(self)) {
+              jsObjSet(self, "message", superArgs[0] ?? "");
+            }
+            this.push(undefined);
+            break;
+          }
+          if (typeof parentCtor === "function") {
+            // host コンストラクタ: 一時インスタンスを作って own props を this にコピー
+            try {
+              const tmp = new (parentCtor as new (...a: unknown[]) => object)(...superArgs);
+              if (tmp && typeof tmp === "object" && isJSObject(self)) {
+                for (const k of Object.getOwnPropertyNames(tmp)) {
+                  jsObjSet(self, k, (tmp as Record<string, unknown>)[k]);
+                }
+              }
+            } catch (e) {
+              if (!this.unwindToHandler(e, this._runBaseFrameCount)) throw e;
+              break;
+            }
+            this.push(undefined);
+            break;
+          }
+          // 親の instance fields は親 ctor の prologue が初期化する
+          const superResult = this.callFunction(parentCtor, self, superArgs);
+          if (superResult === THROWN_SENTINEL) continue;
+          this.push(undefined);
+          break;
+        }
+        case "GetSuperProp": {
+          const name = constants[instr.operand!] as string;
+          const fn = frame.func as any;
+          const home = fn.__homeProto ?? fn.__superClass?.prototype;
+          if (!home) {
+            const err = new SyntaxError("'super' keyword unexpected here");
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+            break;
+          }
+          const val = isJSObject(home) ? jsObjGet(home, name) : (home as Record<string, unknown>)[name];
+          this.push(val);
+          break;
+        }
+
+        // spread 呼び出し (Phase 39): 引数配列 + callFunction による同期実行。
+        // Call/CallMethod のホットパス (JIT profiling 等) は通らないが、
+        // spread 呼び出しは頻度が低いので許容
+        case "CallSpread": {
+          const callee = this.pop();
+          const arr = this.pop();
+          const args = Array.isArray(arr) ? arr : [];
+          try {
+            const result = this.callFunction(callee, undefined, args);
+            if (result === THROWN_SENTINEL) continue;
+            this.push(result);
+          } catch (e) {
+            if (!this.unwindToHandler(e, this._runBaseFrameCount)) throw e;
+          }
+          break;
+        }
+        case "CallMethodSpread": {
+          const method = this.pop();
+          const obj = this.pop();
+          const arr = this.pop();
+          const args = Array.isArray(arr) ? arr : [];
+          try {
+            const result = this.callFunction(method, obj, args);
+            if (result === THROWN_SENTINEL) continue;
+            this.push(result);
+          } catch (e) {
+            if (!this.unwindToHandler(e, this._runBaseFrameCount)) throw e;
+          }
+          break;
+        }
+        case "ConstructSpread": {
+          const ctor = this.pop() as any;
+          const arr = this.pop();
+          const args = Array.isArray(arr) ? arr : [];
+          try {
+            if (ctor && typeof ctor === "object" && ctor.__nativeConstructor && !ctor.bytecode) {
+              // native コンストラクタ (Error)
+              this.push(ctor.name === "Error" ? { message: args[0] ?? "" } : (() => { throw new Error(`Unknown native constructor: ${ctor.name}`); })());
+              break;
+            }
+            if (typeof ctor === "function") {
+              this.push(new (ctor as new (...a: unknown[]) => object)(...args));
+              break;
+            }
+            // BytecodeFunction / closure: Construct と同じ流儀で newObj を作り同期実行
+            const target = (ctor && typeof ctor === "object" && "__closure" in ctor) ? (ctor as any).func : ctor;
+            if (!target || typeof target !== "object" || !("bytecode" in target)) {
+              throw new TypeError("Not a constructor");
+            }
+            if (!target.prototype) {
+              const proto = this.heap.allocate(createJSObject());
+              jsObjSet(proto, "__proto__", this.objectPrototype);
+              jsObjSet(proto, "constructor", target);
+              setPropAttrs(proto, "constructor", { writable: true, enumerable: false, configurable: true });
+              target.prototype = proto;
+            }
+            const newObj = this.heap.allocate(createJSObject());
+            this.maybeGC();
+            jsObjSet(newObj, "__proto__", target.prototype);
+            // instance fields は ctor prologue が初期化する
+            const result = this.callFunction(ctor, newObj, args);
+            if (result === THROWN_SENTINEL) continue;
+            this.push(typeof result === "object" && result !== null ? result : newObj);
+          } catch (e) {
+            if (!this.unwindToHandler(e, this._runBaseFrameCount)) throw e;
+          }
+          break;
+        }
+        case "CopyDataProps": {
+          // {...src}: src の own enumerable props を target (peek) にコピー。
+          // null/undefined/プリミティブは no-op (spec 準拠)
+          const src = this.pop();
+          const target = this.peek();
+          if (src === null || src === undefined || !isJSObject(target)) break;
+          if (isJSString(src)) {
+            const s = jsStringToString(src);
+            for (let i = 0; i < s.length; i++) jsObjSet(target, String(i), internString(s[i]));
+          } else if (Array.isArray(src)) {
+            for (let i = 0; i < src.length; i++) jsObjSet(target, String(i), src[i]);
+          } else if (isJSObject(src)) {
+            let unwound = false;
+            for (const [k] of getHiddenClass(src).properties) {
+              if (k === "__proto__") continue;
+              if (getPropAttrs(src, k)?.enumerable === false) continue; // non-enumerable は spread 対象外
+              const v = jsObjGet(src, k);
+              if (isAccessorDescriptor(v)) {
+                const gv = v.get ? this.callGetterSetter(v.get, src, undefined) : undefined;
+                if (gv === THROWN_SENTINEL) { unwound = true; break; }
+                jsObjSet(target, k, gv);
+              } else {
+                jsObjSet(target, k, v);
+              }
+            }
+            if (unwound) break;
+          } else if (typeof src === "object") {
+            for (const k of Object.keys(src)) jsObjSet(target, k, (src as Record<string, unknown>)[k]);
           }
           break;
         }

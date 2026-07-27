@@ -9,7 +9,7 @@
 
 import { isJSString, jsStringToString } from "../vm/js-string.js";
 
-const INTERNAL_KEYS = new Set(["__hc__", "__slots__", "__proto__", "@@iterator"]);
+const INTERNAL_KEYS = new Set(["__hc__", "__slots__", "__proto__", "@@iterator", "__attrs__", "__ext__"]);
 const MAX_DEPTH = 8;
 
 function isFunctionLike(v: any): boolean {
@@ -81,10 +81,22 @@ export function canonValue(v: unknown, depth = 0, seen = new WeakSet<object>()):
     const obj = v as Record<string, unknown>;
     if (seen.has(obj)) return "[circular]";
     seen.add(obj);
+    const attrs = (obj as any).__attrs__ as Map<string, { enumerable: boolean }> | undefined;
     const keys = Object.keys(obj)
       .filter((k) => !INTERNAL_KEYS.has(k))
+      // VM の属性モデル: enumerable:false は列挙に出さない (TW は host 属性で自然に消える)
+      .filter((k) => attrs?.get(k)?.enumerable !== false)
       .sort();
-    const parts = keys.map((k) => `${JSON.stringify(k)}:${canonValue(obj[k], depth + 1, seen)}`);
+    const parts = keys.map((k) => {
+      // getter は node の console.log と同じく [Getter] マーカーで表現する
+      // (TW は host descriptor、VM は AccessorDescriptor slot — 読み方が違うと
+      //  「getter を呼んだ値 vs 生の descriptor」で偽発散になる)
+      const hostDesc = Object.getOwnPropertyDescriptor(obj, k);
+      if (hostDesc && (hostDesc.get || hostDesc.set)) return `${JSON.stringify(k)}:[Getter]`;
+      const raw = obj[k];
+      if (raw && typeof raw === "object" && (raw as any).__accessor__ === true) return `${JSON.stringify(k)}:[Getter]`;
+      return `${JSON.stringify(k)}:${canonValue(raw, depth + 1, seen)}`;
+    });
     seen.delete(obj);
     return `{${parts.join(",")}}`;
   }
