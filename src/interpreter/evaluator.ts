@@ -1139,6 +1139,68 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
     case "ForOfStatement": {
       const lbl = (stmt as any).__label__ as string | undefined;
       const rawIterable = yield* evalExpression(stmt.right, env);
+
+      // for await (x of y): async iterator を lazy に回す (async 関数内でのみ出現)。
+      // next() の戻りと (sync ソースの場合) 値を __await__ マーカーで await する
+      if ((stmt as any).await) {
+        const kind = stmt.left.kind;
+        const isBlockScoped = kind !== "var";
+        const pattern = stmt.left.declarations[0].id;
+
+        const aIterFn = typeof rawIterable === "object" && rawIterable !== null
+          ? getProperty(rawIterable as JSObject, "@@asyncIterator") ?? (rawIterable as any)["@@asyncIterator"]
+          : undefined;
+        let iterator: unknown;
+        let isAsyncIter = false;
+        if (aIterFn && (isJSFunction(aIterFn) || typeof aIterFn === "function")) {
+          iterator = isJSFunction(aIterFn)
+            ? yield* evalCallWithJSFunction(aIterFn, [], env, rawIterable)
+            : (aIterFn as Function).call(rawIterable);
+          isAsyncIter = true;
+        } else {
+          // sync iterable フォールバック (async-from-sync 相当): @@iterator / 配列
+          const sIterFn = typeof rawIterable === "object" && rawIterable !== null
+            ? getProperty(rawIterable as JSObject, "@@iterator") ?? (rawIterable as any)["@@iterator"]
+            : undefined;
+          if (sIterFn && (isJSFunction(sIterFn) || typeof sIterFn === "function")) {
+            iterator = isJSFunction(sIterFn)
+              ? yield* evalCallWithJSFunction(sIterFn, [], env, rawIterable)
+              : (sIterFn as Function).call(rawIterable);
+          } else if (Array.isArray(rawIterable)) {
+            let idx = 0;
+            const arr = rawIterable as unknown[];
+            iterator = { next: () => idx < arr.length ? { value: arr[idx++], done: false } : { value: undefined, done: true } };
+          } else {
+            throw new TypeError("for await requires an (async) iterable");
+          }
+        }
+
+        for (let guard = 0; guard < 100000; guard++) {
+          const nextFn = getProperty(iterator as JSObject, "next") ?? (iterator as any)?.next;
+          let result: unknown = isJSFunction(nextFn)
+            ? yield* evalCallWithJSFunction(nextFn, [], env, iterator)
+            : typeof nextFn === "function" ? nextFn.call(iterator) : undefined;
+          // async iterator の next() は Promise を返す → await で決着させる
+          if (isJSPromise(result) || isAsyncIter) {
+            result = yield { __await__: true, value: result };
+          }
+          if (!result || (result as any).done) break;
+          let item = (result as any).value;
+          // sync ソースの値は spec (async-from-sync) 通り await する
+          if (!isAsyncIter) item = yield { __await__: true, value: item };
+
+          const iterEnv = isBlockScoped ? new Environment(env) : env;
+          bindPattern(pattern, item, iterEnv, kind, (expr: any) => exhaustGen(evalExpression(expr, iterEnv)));
+          try {
+            yield* evalStatement(stmt.body, iterEnv);
+          } catch (e) {
+            if (e instanceof BreakSignal && (!e.label || e.label === lbl)) return undefined;
+            if (e instanceof ContinueSignal && (!e.label || e.label === lbl)) continue;
+            throw e;
+          }
+        }
+        return undefined;
+      }
       // iterator プロトコル: "@@iterator" or Symbol.iterator キーがあれば使う、なければ配列として扱う
       let iterable: unknown[];
       const iterKey = "@@iterator";
@@ -1662,6 +1724,98 @@ function* bindParam(param: any, value: unknown, env: Environment, evalEnv: Envir
   }
 }
 
+// async generator オブジェクト (spec 27.6 AsyncGenerator の近似)。
+// next/return/throw は JSPromise を返す。リクエストはキューに積んで直列実行
+// (spec の AsyncGeneratorRequest キュー)。body 内の await は __await__ マーカー、
+// yield は生の値として host generator から上がってくるのでここで振り分ける。
+type AsyncGenRequest = {
+  type: "next" | "return" | "throw";
+  arg: unknown;
+  resolve: (v: unknown) => void;
+  reject: (e: unknown) => void;
+};
+
+function createAsyncGeneratorObject(bodyGen: Generator<unknown, unknown, unknown>): Record<string, unknown> {
+  const queue: AsyncGenRequest[] = [];
+  let running = false;
+  let finished = false;
+
+  const iterResult = (value: unknown, done: boolean) => ({ value, done });
+
+  // 現在のリクエスト (queue 先頭) を決着させて次を処理
+  const settle = (fn: (req: AsyncGenRequest) => void): void => {
+    const req = queue.shift()!;
+    running = false;
+    fn(req);
+    pump();
+  };
+
+  function step(op: "next" | "throw" | "return", input: unknown): void {
+    let r: IteratorResult<unknown>;
+    try {
+      if (op === "next") r = bodyGen.next(input);
+      else if (op === "throw") r = bodyGen.throw(new ThrowSignal(input));
+      else r = bodyGen.return(input) as IteratorResult<unknown>;
+    } catch (e) {
+      finished = true;
+      if (e instanceof ReturnSignal) {
+        settle((req) => req.resolve(iterResult(e.value, true)));
+      } else {
+        settle((req) => req.reject(e instanceof ThrowSignal ? e.value : e));
+      }
+      return;
+    }
+    if (r.done) {
+      finished = true;
+      const v = r.value instanceof ReturnSignal ? (r.value as ReturnSignal).value : r.value;
+      settle((req) => req.resolve(iterResult(v, true)));
+      return;
+    }
+    const y = r.value as any;
+    if (y && typeof y === "object" && y.__await__) {
+      // await: 解決値で再開 / 拒否は body に throw して catch させる
+      JSPromise.resolve(y.value).then(
+        (v: unknown) => step("next", v),
+        (e: unknown) => step("throw", e),
+      );
+    } else {
+      // yield: spec は yield 値自体も await してから {value, done:false} で決着
+      JSPromise.resolve(y).then(
+        (v: unknown) => settle((req) => req.resolve(iterResult(v, false))),
+        (e: unknown) => step("throw", e),
+      );
+    }
+  }
+
+  function pump(): void {
+    if (running || queue.length === 0) return;
+    const req = queue[0];
+    if (finished) {
+      queue.shift();
+      if (req.type === "throw") req.reject(req.arg);
+      else req.resolve(iterResult(req.type === "return" ? req.arg : undefined, true));
+      pump();
+      return;
+    }
+    running = true;
+    step(req.type, req.arg);
+  }
+
+  const enqueue = (type: AsyncGenRequest["type"], arg: unknown): JSPromise =>
+    new JSPromise((resolve, reject) => {
+      queue.push({ type, arg, resolve: resolve!, reject: reject! });
+      pump();
+    });
+
+  const genObj: Record<string, unknown> = {
+    next: (value?: unknown) => enqueue("next", value),
+    return: (value?: unknown) => enqueue("return", value),
+    throw: (value?: unknown) => enqueue("throw", value),
+    "@@asyncIterator": () => genObj,
+  };
+  return genObj;
+}
+
 function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment, overrideThis?: unknown): Generator<unknown, unknown, unknown> {
   if (!isJSFunction(fn)) return undefined;
   const jsFn = fn;
@@ -1688,6 +1842,8 @@ function* evalCallWithJSFunction(fn: unknown, args: unknown[], env: Environment,
     hoistFunctionDeclarations(jsFn.body.body, fnEnv);
 
     const bodyGen = evalBlock(jsFn.body.body, fnEnv);
+    // async generator: next が Promise を返すキュー駆動オブジェクト
+    if ((jsFn as any).isAsync) return createAsyncGeneratorObject(bodyGen);
     const genObj: Record<string, unknown> = {
       next(value: unknown) {
         const r = bodyGen.next(value);
@@ -2051,7 +2207,8 @@ function* evalCallExpression(
   const jsFn = fn;
 
   // Async function: return Promise, drive body with generator + microtask
-  if ((jsFn as any).isAsync) {
+  // (async generator は isGenerator 側で処理するため除外)
+  if ((jsFn as any).isAsync && !(jsFn as any).isGenerator) {
     const fnEnv = new Environment(jsFn.closure, !jsFn.isArrow);
     if (!jsFn.isArrow) {
       fnEnv.setThis(thisValue);
@@ -2117,6 +2274,8 @@ function* evalCallExpression(
     hoistFunctionDeclarations(jsFn.body.body, fnEnv);
 
     const bodyGen = evalBlock(jsFn.body.body, fnEnv);
+    // async generator: next が Promise を返すキュー駆動オブジェクト
+    if ((jsFn as any).isAsync) return createAsyncGeneratorObject(bodyGen);
     const genObj: Record<string, unknown> = {
       next(value: unknown) {
         try {
