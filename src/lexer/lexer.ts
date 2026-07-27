@@ -224,8 +224,8 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // 識別子・キーワード (unicode escape 対応)
-    if (isAlpha(ch) || (ch === "\\" && peek(1) === "u")) {
+    // 識別子・キーワード (unicode escape + Unicode ID_Start/Continue 対応)
+    if (isAlpha(ch) || isUnicodeIdStart(ch) || (ch === "\\" && peek(1) === "u")) {
       const startCol = column;
       let word = "";
       while (pos < source.length) {
@@ -244,7 +244,7 @@ export function tokenize(source: string): Token[] {
             for (let j = 0; j < 4 && pos < source.length; j++) hex += advance();
             word += String.fromCharCode(parseInt(hex, 16));
           }
-        } else if (isAlphaNumeric(peek())) {
+        } else if (isAlphaNumeric(peek()) || isUnicodeIdContinue(peek())) {
           word += advance();
         } else {
           break;
