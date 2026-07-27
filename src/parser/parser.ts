@@ -2,6 +2,13 @@ import type { Token, TokenType } from "../lexer/token.js";
 import { tokenize } from "../lexer/lexer.js";
 import type { Program, Expression, Statement } from "./ast.js";
 
+// private name (#x) のプロパティキー用プレフィックス。
+// パーサ段階で "#x" → "⁣#x" (不可視セパレータ付き) に mangle することで、
+// テストコードの hasOwnProperty("#x") / "#x" in obj からは見えなくなる
+// (spec の per-class brand ではなく「観測不能な共有キー」による近似)。
+// 両エンジンは name をそのままプロパティキーに使うため、エンジン側の変更は不要
+export const PRIVATE_KEY_PREFIX = "⁣";
+
 export function parse(source: string): Program {
   const tokens = tokenize(source);
   let pos = 0;
@@ -249,7 +256,7 @@ export function parse(source: string): Program {
       if (current().type === "LeftBracket") {
         eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
       } else if (current().type === "PrivateIdentifier") {
-        key = { type: "PrivateIdentifier", name: eat("PrivateIdentifier").value };
+        key = { type: "PrivateIdentifier", name: PRIVATE_KEY_PREFIX + eat("PrivateIdentifier").value };
       } else if (current().type === "String") {
         key = { type: "Literal", value: eat("String").value };
       } else if (current().type === "Number") {
@@ -269,7 +276,7 @@ export function parse(source: string): Program {
         if (current().type === "LeftBracket") {
           eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
         } else if (current().type === "PrivateIdentifier") {
-          key = { type: "PrivateIdentifier", name: eat("PrivateIdentifier").value };
+          key = { type: "PrivateIdentifier", name: PRIVATE_KEY_PREFIX + eat("PrivateIdentifier").value };
         } else if (current().type === "String") {
           key = { type: "Literal", value: eat("String").value };
         } else if (current().type === "Number") {
@@ -930,6 +937,14 @@ export function parse(source: string): Program {
 
   // Comparison = Shift (('<' | '>' | '<=' | '>=') Shift)*
   function parseComparison(): Expression {
+    // private brand check: `#x in obj`。LHS を mangled 名の文字列リテラルに
+    // することで、両エンジンの既存の `in` 実装がそのまま brand check になる
+    if (current().type === "PrivateIdentifier" && peek().type === "In") {
+      const tok = eat("PrivateIdentifier");
+      eat("In");
+      const right = parseShift();
+      return { type: "BinaryExpression", operator: "in", left: { type: "Literal", value: PRIVATE_KEY_PREFIX + tok.value } as any, right };
+    }
     let left = parseShift();
     while (
       current().type === "Less" ||
@@ -1122,7 +1137,7 @@ export function parse(source: string): Program {
         let property: any;
         if (current().type === "PrivateIdentifier") {
           const tok = eat("PrivateIdentifier");
-          property = { type: "PrivateIdentifier", name: tok.value };
+          property = { type: "PrivateIdentifier", name: PRIVATE_KEY_PREFIX + tok.value };
         } else {
           property = parsePropertyKey();
         }

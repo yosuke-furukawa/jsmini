@@ -1631,7 +1631,7 @@ class BytecodeCompiler {
             if (expr.callee.computed) {
               this.compileExpression(expr.callee.property);
               this.emit("GetPropertyComputed");
-            } else if (expr.callee.property.type === "Identifier") {
+            } else if (expr.callee.property.type === "Identifier" || expr.callee.property.type === "PrivateIdentifier") {
               const nameIdx = this.addConstant(expr.callee.property.name);
               this.emitWithIC("GetProperty", nameIdx);
             }
@@ -1645,7 +1645,7 @@ class BytecodeCompiler {
             if (expr.callee.computed) {
               this.compileExpression(expr.callee.property);
               this.emit("GetPropertyComputed");
-            } else if (expr.callee.property.type === "Identifier") {
+            } else if (expr.callee.property.type === "Identifier" || expr.callee.property.type === "PrivateIdentifier") {
               const nameIdx = this.addConstant(expr.callee.property.name);
               this.emitWithIC("GetProperty", nameIdx);
             }

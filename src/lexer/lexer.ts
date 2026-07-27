@@ -254,12 +254,13 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // Private identifier: #name
-    if (ch === "#" && isAlpha(peek(1))) {
+    // Private identifier: #name (Unicode ID_Start/ID_Continue + ZWNJ/ZWJ も許容。
+    // test262 の privatename-identifier-alt 系が #℘ / ZW 文字入りの名前を使う)
+    if (ch === "#" && (isAlpha(peek(1)) || isUnicodeIdStart(peek(1)))) {
       const startCol = column;
       advance(); // skip #
       const start = pos;
-      while (pos < source.length && isAlphaNumeric(peek())) advance();
+      while (pos < source.length && (isAlphaNumeric(peek()) || isUnicodeIdContinue(peek()))) advance();
       pushToken("PrivateIdentifier", "#" + source.slice(start, pos), startCol);
       continue;
     }
@@ -493,4 +494,17 @@ function isAlpha(ch: string): boolean {
 
 function isAlphaNumeric(ch: string): boolean {
   return isAlpha(ch) || isDigit(ch);
+}
+
+// Unicode 識別子 (private name 用)。ASCII は isAlpha が先に拾うので
+// ここは非 ASCII のみ評価される
+const UNICODE_ID_START = /[\p{ID_Start}]/u;
+const UNICODE_ID_CONTINUE = /[\p{ID_Continue}‌‍]/u; // + ZWNJ/ZWJ
+
+function isUnicodeIdStart(ch: string): boolean {
+  return ch !== undefined && ch.charCodeAt(0) > 127 && UNICODE_ID_START.test(ch);
+}
+
+function isUnicodeIdContinue(ch: string): boolean {
+  return ch !== undefined && ch.charCodeAt(0) > 127 && UNICODE_ID_CONTINUE.test(ch);
 }
