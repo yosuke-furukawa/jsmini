@@ -3,9 +3,11 @@
 jsmini の「できていないこと」の台帳。正しさの基準は **node (strict mode)**。
 前半は現状の欠落の全体地図 (2026-07-23 調査)、後半は差分ファザの収束履歴と教訓。
 
-## 現状サマリ (2026-07-28, Phase 42 時点)
+## 現状サマリ (2026-07-28, Phase 43 時点)
 
-- test262: **TW 64.1% / VM 61.0% / JIT 60.3%** (14,053 件実行、noStrict/module 520 件スキップ)
+- test262: **TW 66.4% / VM 63.0% / JIT 62.3%** (14,053 件実行、noStrict/module 520 件スキップ)
+  — Phase 43 で yield* 委譲 (sync/async、GetMethod 意味論) + Symbol.asyncIterator +
+  TW の Symbol キー defineProperty 修正。TW +320 / VM +282 / JIT +278
   — Phase 42 で class private # の全ポジション (メソッド/static/getter/setter/
   generator/async/brand check/Unicode 名) + Unicode 識別子。TW +442 / VM +433 / JIT +383
   — Phase 41 で async generator (`async function*` / `async *m()` / `for await`) を
@@ -15,9 +17,10 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
   分母が 1,594 件増えた上で Phase 39 の率を超えた
 - private # の意味論: パーサで名前を不可視プレフィックス (U+2063) 付きに mangle する
   近似 (per-class brand ではない)。hasOwnProperty("#x") / "#x" in obj から観測不能
-- 残る失敗の主クラスタ: エラー時に reject せず fulfill (~168、yield* 委譲未実装が主因)、
-  Promise 反復エラーで $DONE 未到達 (~116)、iterator close (~100)、fn name 推論 (~80)
-- 内部テスト 1,331 全パス / 差分ファザ **0 / 100,000** で収束維持
+- 残る失敗の主クラスタ: Promise 反復エラーで $DONE 未到達 (~116)、
+  iterator close (~100)、fn name 推論 (~80)。yield* 委譲は Phase 43 で解決
+  (残る簡易化: sent 値の内側転送 / throw・return の内側イテレータ転送)
+- 内部テスト 1,343 全パス / 差分ファザ **0 / 100,000** で収束維持
   (残 1 件は Phase 39 以前からの logs 差ノイズ)
 - ただし TW↔VM には test262 で **TW だけ失敗 / VM だけ失敗**の非対称が残る
   (ファザの generator が class/label 等を生成しないため未検出だった領域)

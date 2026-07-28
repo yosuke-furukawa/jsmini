@@ -5,7 +5,7 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 42 で private # + Unicode 識別子実装後): **TW 64.1% / VM 61.0% / JIT 60.3%**
+- test262 (Phase 43 で yield* 委譲実装後): **TW 66.4% / VM 63.0% / JIT 62.3%**
   (14,053 件実行、noStrict/module 520 件スキップ)
   - Phase 39 時点 (async skip) は TW 63.4% / VM 60.3% / JIT 60.1%
   - Phase 40 で async 1,634 件を skip→実行に変更。約173 件が新規パスする一方、
