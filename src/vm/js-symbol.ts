@@ -23,6 +23,7 @@ export function isJSSymbol(val: unknown): val is JSSymbol {
 
 // Well-known symbols (固定ID)
 export const SYMBOL_ITERATOR: JSSymbol = { __symbol__: true, id: -1, description: "Symbol.iterator", key: "@@iterator" };
+export const SYMBOL_ASYNC_ITERATOR: JSSymbol = { __symbol__: true, id: -5, description: "Symbol.asyncIterator", key: "@@asyncIterator" };
 export const SYMBOL_TO_PRIMITIVE: JSSymbol = { __symbol__: true, id: -2, description: "Symbol.toPrimitive", key: "@@toPrimitive" };
 export const SYMBOL_HAS_INSTANCE: JSSymbol = { __symbol__: true, id: -3, description: "Symbol.hasInstance", key: "@@hasInstance" };
 export const SYMBOL_TO_STRING_TAG: JSSymbol = { __symbol__: true, id: -4, description: "Symbol.toStringTag", key: "@@toStringTag" };
