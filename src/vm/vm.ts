@@ -1489,11 +1489,23 @@ export class VM {
         // Iterator protocol
         case "GetAsyncIterator": {
           // @@asyncIterator があれば呼ぶ。無ければ GetIterator と同じ扱い
-          // (sync iterable / 配列 / 文字列は for await 側の Await が値を決着させる)
+          // (sync iterable / 配列 / 文字列は for await / yield* 側の Await が決着させる)
           const aObj = this.peek();
-          const aIterFn = isJSObject(aObj) ? jsObjGet(aObj, "@@asyncIterator") : (aObj as any)?.["@@asyncIterator"];
-          if (aIterFn) {
+          let aIterFn = isJSObject(aObj) ? jsObjGet(aObj, "@@asyncIterator") : (aObj as any)?.["@@asyncIterator"];
+          if (isAccessorDescriptor(aIterFn)) {
+            // getter 経由 (get [Symbol.asyncIterator]() {...}) — 呼んで値を得る
             this.pop();
+            aIterFn = aIterFn.get !== undefined ? this.callGetterSetter(aIterFn.get, aObj, undefined) : undefined;
+            if (aIterFn === THROWN_SENTINEL) break;
+            this.push(aObj); // 下の共通処理のため戻す
+          }
+          if (aIterFn !== undefined && aIterFn !== null) {
+            this.pop();
+            // GetMethod: null/undefined 以外の非 callable は TypeError
+            // (@@iterator へはフォールバックしない)
+            if (typeof aIterFn !== "function" && !this.isBytecodeCallable(aIterFn)) {
+              throw new TypeError("Symbol.asyncIterator is not callable");
+            }
             const iterator = this.callAny(aIterFn, aObj, []);
             if (iterator === THROWN_SENTINEL) break;
             this.push(iterator);

@@ -1760,6 +1760,35 @@ class BytecodeCompiler {
       }
 
       case "YieldExpression": {
+        // yield* の委譲: iterator を取得して 1 要素ずつ yield し、
+        // done の value が式の値になる。async generator では @@asyncIterator を
+        // 優先し next() の戻りを Await で決着させる。
+        // 簡易化: 再開値の内側 next(v) への転送と throw/return の転送は省略
+        if ((expr as any).delegate) {
+          const iterSlot = this.localCount++;
+          this.compileExpression((expr as any).argument);
+          this.emit(this.isAsync ? "GetAsyncIterator" : "GetIterator");
+          this.emit("StaLocal", iterSlot);
+          this.emit("Pop");
+
+          const loopStart = this.currentOffset();
+          this.emit("LdaLocal", iterSlot);
+          this.emit("IteratorNext");
+          if (this.isAsync) this.emit("Await"); // async iterator の next() は Promise
+          this.emit("Dup");
+          this.emit("IteratorComplete");
+          const exitJump = this.emit("JumpIfTrue", 0);
+          // stack: [result]
+          this.emit("IteratorValue");
+          this.emit("Yield");
+          this.emit("Pop"); // 再開時に push される sent 値は捨てる
+          this.emit("Jump", loopStart);
+
+          this.patch(exitJump, this.currentOffset());
+          // stack: [result (done)] → 最終 value が yield* 式の値
+          this.emit("IteratorValue");
+          break;
+        }
         if ((expr as any).argument) {
           this.compileExpression((expr as any).argument);
         } else {
