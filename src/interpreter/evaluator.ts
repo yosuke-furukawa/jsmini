@@ -407,6 +407,7 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   twObjectWrapper.isExtensible = (obj: unknown) => (obj && typeof obj === "object") ? Object.isExtensible(obj) : false;
   const twToKey = (key: unknown): string | symbol => {
     if (isJSString(key)) return jsStringToString(key);
+    if (isJSSymbol(key)) return key.key; // jsmini Symbol は "@@..." 文字列キー
     return typeof key === "symbol" ? key : String(key);
   };
   twObjectWrapper.defineProperty = (obj: unknown, key: unknown, desc: any) => {
