@@ -5,8 +5,9 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 43 で yield* 委譲実装後): **TW 66.4% / VM 63.0% / JIT 62.3%**
+- test262 (Phase 44 で for-of/for-in の宣言なし LHS 実装後): **TW 67.6% / VM 64.3% / JIT 63.6%**
   (14,053 件実行、noStrict/module 520 件スキップ)
+  - Phase 43 時点は TW 66.4% / VM 63.0% / JIT 62.3% (TW +171 / VM +178 / JIT +180)
   - Phase 39 時点 (async skip) は TW 63.4% / VM 60.3% / JIT 60.1%
   - Phase 40 で async 1,634 件を skip→実行に変更。約173 件が新規パスする一方、
     async generator 等の未実装が可視化されて見かけの率は下がった (項目 C 参照)
@@ -21,7 +22,7 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 | 施策 | 効く失敗 | 規模 | 難度 | 種別 |
 |---|---|---|---|---|
 | A. class private `#` のパース | ✅ **Phase 42 完了** (TW +442 / VM +433 / JIT +383、Unicode 識別子含む) | — | — | パーサ |
-| B. for-of/for-in の分割代入 LHS | "but got Of" (188) + 関連 | **~190** | 中 | パーサ |
+| B. for-of/for-in の分割代入 LHS | ✅ **Phase 44 完了** (TW +171 / VM +178 / JIT +180) | — | — | パーサ |
 | C. async テストの `$DONE` ランナー対応 | ✅ **Phase 40 完了** (skip 2,114→520、+173 pass) | — | — | テストインフラ |
 | C2. async generator (`async *m`, `for await`) | ✅ **Phase 41 完了** (TW +535 / VM +487 / JIT +487) | — | — | 言語機能 |
 | D. プロパティ属性の TypeError 精緻化 | "Expected a TypeError" | **277** | 中〜大 | オブジェクトモデル |
@@ -54,12 +55,23 @@ private getter/setter で lexer が "Unexpected character '#'" を投げる。
 
 </details>
 
-### B. for-of / for-in の分割代入 LHS (~190 件)
+### B. for-of / for-in の分割代入 LHS ✅ **Phase 44 で完了**
+
+実装: parseForStatement の非宣言パスで式をパースし、`of` が続けば exprToPattern
+(カバー文法変換) で ForOf に、式全体がトップレベル In 二項式で `)` が続けば分解
+して ForIn に。TW は assignTarget ジェネレータ (Member/デフォルト値対応)、VM は
+compileBindingTarget の assign モードで実行。CoverInitializedName (`{x = 1}`)、
+文字列の配列分割、TW の `[a=1] = arr` デフォルト値無視、VM の関数内パターン代入が
+新規ローカルを作る問題も同時に修正。
+
+<details><summary>旧記述</summary>
 
 `for ([a, b] of pairs)` / `for ({x} of objs)` が "Expected Semicolon but got Of"。
 パーサが for ヘッドの LHS に分割パターンを許していない。
 - parseForStatement の LHS 解析を BindingPattern 対応に
 - bindPattern は既にある (dstr 修正済み) ので、パースが通れば実行は概ね動くはず
+
+</details>
 
 ### C. async テストの `$DONE` ランナー対応 ✅ **Phase 40 で実装済み**
 

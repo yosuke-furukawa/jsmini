@@ -5,7 +5,7 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 
 ## 現状サマリ (2026-07-28, Phase 43 時点)
 
-- test262: **TW 66.4% / VM 63.0% / JIT 62.3%** (14,053 件実行、noStrict/module 520 件スキップ)
+- test262: **TW 67.6% / VM 64.3% / JIT 63.6%** (14,053 件実行、noStrict/module 520 件スキップ)
   — Phase 43 で yield* 委譲 (sync/async、GetMethod 意味論) + Symbol.asyncIterator +
   TW の Symbol キー defineProperty 修正。TW +320 / VM +282 / JIT +278
   — Phase 42 で class private # の全ポジション (メソッド/static/getter/setter/
@@ -84,7 +84,8 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 - `new.target` (パース不可)
 - class private の一部ポジション: 単純な `#x = 1` フィールドは動くが、
   `#m()` メソッド / `static #x` / `#x in obj` で "Unexpected character '#'"
-- `for ([a, b] of ...)` — 分割代入 LHS の for-of ("Expected Semicolon but got Of")
+- ~~`for ([a, b] of ...)` — 分割代入 LHS の for-of~~ → **Phase 44 で解決**:
+  宣言なし LHS (分割パターン/メンバ/識別子) と CoverInitializedName を実装
 - ~~strict early error 不在~~ → **Phase 39 で解決**: eval/arguments の束縛
   (var/let/const/仮引数/rest/分割/catch/関数名/class 名) と代入・++/-- を
   パース時に SyntaxError に。strict の重複パラメータも検査。
