@@ -589,8 +589,16 @@ class BytecodeCompiler {
     }
   }
 
-  compileBindingTarget(id: any): void {
+  // assign=true は宣言なしの代入形 (for (x of y) / [a,b] = arr):
+  // Identifier は新規宣言せず既存束縛へ emitStore し、MemberExpression を許す。
+  // スタック契約はどちらも [value] → []
+  compileBindingTarget(id: any, assign = false): void {
     if (id.type === "Identifier") {
+      if (assign) {
+        this.emitStore(id.name);
+        this.emit("Pop");
+        return;
+      }
       if (this.isFunction || this.resolveLocal(id.name) !== null) {
         const slot = this.resolveLocal(id.name) ?? this.declareLocal(id.name);
         this.emit("StaLocal", slot);
@@ -600,6 +608,24 @@ class BytecodeCompiler {
         this.emit("StaGlobal", nameIdx);
       }
       this.emit("Pop");
+    } else if (id.type === "MemberExpression") {
+      // 代入形のみ到達する (バインディングパターンに member は現れない)
+      if (!id.computed) {
+        // SetPropertyAssign のスタック契約: [value, obj] → [value]
+        this.compileExpression(id.object);
+        this.emitWithIC("SetPropertyAssign", this.addConstant(id.property.name));
+        this.emit("Pop");
+      } else {
+        // SetPropertyComputed のスタック契約: [obj, key, value] → [value]
+        const tmpVal = this.declareLocal(`__at_val_${this.currentOffset()}`);
+        this.emit("StaLocal", tmpVal);
+        this.emit("Pop");
+        this.compileExpression(id.object);
+        this.compileExpression(id.property);
+        this.emit("LdaLocal", tmpVal);
+        this.emit("SetPropertyComputed");
+        this.emit("Pop");
+      }
     } else if (id.type === "ObjectPattern") {
       // stack: obj → 各プロパティを取り出す
       const boundKeys: string[] = [];
@@ -611,14 +637,14 @@ class BytecodeCompiler {
           // → VM で直接サポートが難しいので、一旦 obj をそのままバインド
           // TODO: proper object rest
           this.emit("Dup");
-          this.compileBindingTarget(prop.argument);
+          this.compileBindingTarget(prop.argument, assign);
           break;
         }
         boundKeys.push(prop.key.name);
         this.emit("Dup"); // obj を残す
         const nameIdx = this.addConstant(prop.key.name);
         this.emitWithIC("GetProperty", nameIdx);
-        this.compileBindingTarget(prop.value);
+        this.compileBindingTarget(prop.value, assign);
       }
       this.emit("Pop"); // obj を捨てる
     } else if (id.type === "ArrayPattern") {
@@ -653,13 +679,13 @@ class BytecodeCompiler {
           this.patch(exitJump, this.currentOffset());
           this.emit("Pop");                 // pop result (done=true)
           // stack: restArr
-          this.compileBindingTarget(el.argument);
+          this.compileBindingTarget(el.argument, assign);
           return;
         }
         this.emit("LdaGlobal", iterIdx);   // stack: iterator
         this.emit("IteratorNext");         // stack: result
         this.emit("IteratorValue");        // stack: value
-        this.compileBindingTarget(el);     // stack: (empty)
+        this.compileBindingTarget(el, assign);     // stack: (empty)
       }
     } else if (id.type === "AssignmentPattern") {
       // stack: value → value が undefined ならデフォルト値を使う
@@ -670,7 +696,7 @@ class BytecodeCompiler {
       this.emit("Pop"); // undefined を捨てる
       this.compileExpression(id.right); // デフォルト値
       this.patch(skipDefault, this.currentOffset());
-      this.compileBindingTarget(id.left);
+      this.compileBindingTarget(id.left, assign);
     }
   }
 
@@ -1274,7 +1300,12 @@ class BytecodeCompiler {
         ldaTmp(keysSlot, keysG);
         ldaTmp(counterSlot, counterG);
         this.emit("GetPropertyComputed");
-        this.compileBindingTarget(stmt.left.declarations[0].id);
+        if (stmt.left.type === "VariableDeclaration") {
+          this.compileBindingTarget(stmt.left.declarations[0].id);
+        } else {
+          // 宣言なし代入形: for (x in obj) / for ([a] in obj) / for (o.p in obj)
+          this.compileBindingTarget(stmt.left, true);
+        }
         // body。break/continue 用のエントリ (従来は積んでおらず、break が外の
         // ループに捕まる or 未パッチ Jump 0 で先頭に飛ぶバグだった)
         this.loopStack.push({ label: (stmt as any).__label__, kind: "loop", breakPatches: [], continuePatches: [], continueTarget: -1 });
@@ -1329,7 +1360,12 @@ class BytecodeCompiler {
         if (isAwait) this.emit("Await"); // sync ソースの値も await (async-from-sync 相当)
         // stack: [value]
 
-        this.compileBindingTarget(stmt.left.declarations[0].id);
+        if (stmt.left.type === "VariableDeclaration") {
+          this.compileBindingTarget(stmt.left.declarations[0].id);
+        } else {
+          // 宣言なし代入形: for (x of arr) / for ([a, b] of pairs) / for (o.p of arr)
+          this.compileBindingTarget(stmt.left, true);
+        }
         // stack: []
 
         this.compileStatement(stmt.body);
@@ -1446,9 +1482,10 @@ class BytecodeCompiler {
           this.emitStore(expr.left.name);
         } else if (expr.left.type === "ObjectPattern" || expr.left.type === "ArrayPattern") {
           // 分割代入: ({a, b} = obj) or [x, y] = arr
-          // compileBindingTarget は値を Pop するので、先に Dup して値を残す
+          // compileBindingTarget は値を Pop するので、先に Dup して値を残す。
+          // assign=true: 既存束縛への代入 (member ターゲット / デフォルト値含む)
           this.emit("Dup");
-          this.compileBindingTarget(expr.left);
+          this.compileBindingTarget(expr.left, true);
         } else {
           throw new Error(`Unsupported assignment target: ${expr.left.type}`);
         }
