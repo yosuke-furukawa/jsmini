@@ -1,5 +1,6 @@
 import type { Identifier, BlockStatement } from "../parser/ast.js";
 import { Environment } from "./environment.js";
+import { isJSString, jsStringToString, internString } from "../vm/js-string.js";
 
 // 制御フローシグナル
 export class ReturnSignal {
@@ -154,7 +155,12 @@ export function bindPattern(
     }
   } else if (pattern.type === "ArrayPattern") {
     // Iterator Protocol で要素を取り出す
-    const iterable = value as any;
+    let iterable = value as any;
+    // 文字列はコードポイント単位の配列として分割 (const [a, b] = "xy")
+    if (isJSString(iterable) || typeof iterable === "string") {
+      const s = isJSString(iterable) ? jsStringToString(iterable) : iterable;
+      iterable = Array.from(s).map(internString);
+    }
     const iterFn = iterable != null && typeof iterable[Symbol.iterator] === "function"
       ? () => iterable[Symbol.iterator]()
       : iterable != null && typeof iterable?.["@@iterator"] === "function"

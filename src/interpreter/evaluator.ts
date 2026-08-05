@@ -128,6 +128,72 @@ function* resolveMemberKey(expr: MemberExpression, env: Environment): Generator<
   return (expr.property as Identifier).name;
 }
 
+// 代入形の分割代入ターゲット (宣言なし for-of/for-in ヘッドと分割代入式)。
+// values.ts の assignPattern と違い、MemberExpression ターゲットと
+// AssignmentPattern のデフォルト値評価をサポートする (評価に yield* が要るため
+// evaluator 側に置く)
+function* assignTarget(pattern: any, value: unknown, env: Environment): Generator<unknown, void, unknown> {
+  switch (pattern.type) {
+    case "Identifier":
+      env.set(pattern.name, value);
+      return;
+    case "MemberExpression": {
+      const obj = yield* evalExpression(pattern.object, env);
+      const key = yield* resolveMemberKey(pattern, env);
+      if (obj === null || obj === undefined) {
+        throw new TypeError(`Cannot set properties of ${obj} (setting '${key}')`);
+      }
+      (obj as Record<string, unknown>)[key] = value;
+      return;
+    }
+    case "AssignmentPattern": {
+      const v = value === undefined ? yield* evalExpression(pattern.right, env) : value;
+      yield* assignTarget(pattern.left, v, env);
+      return;
+    }
+    case "ObjectPattern": {
+      const obj = value as Record<string, unknown>;
+      const boundKeys: string[] = [];
+      for (const prop of pattern.properties) {
+        if (prop.type === "RestElement") {
+          const rest: Record<string, unknown> = {};
+          if (obj) {
+            for (const k of Object.keys(obj)) {
+              if (!boundKeys.includes(k) && k !== "__proto__") rest[k] = obj[k];
+            }
+          }
+          yield* assignTarget(prop.argument, rest, env);
+        } else {
+          boundKeys.push(prop.key.name);
+          const propValue = obj ? getProperty(obj as JSObject, prop.key.name) : undefined;
+          yield* assignTarget(prop.value, propValue, env);
+        }
+      }
+      return;
+    }
+    case "ArrayPattern": {
+      let arr = value as unknown[];
+      // 文字列はコードポイント単位で分割 ([a, b] = "xy")
+      if (isJSString(value) || typeof value === "string") {
+        const s = isJSString(value) ? jsStringToString(value) : value as string;
+        arr = Array.from(s).map(internString);
+      }
+      for (let i = 0; i < pattern.elements.length; i++) {
+        const el = pattern.elements[i];
+        if (!el) continue;
+        if (el.type === "RestElement") {
+          yield* assignTarget(el.argument, arr?.slice(i) ?? [], env);
+          break;
+        }
+        yield* assignTarget(el, arr?.[i], env);
+      }
+      return;
+    }
+    default:
+      throw new SyntaxError(`Invalid assignment target: ${pattern.type}`);
+  }
+}
+
 // Step コールバック (evaluate 実行中のみ有効)
 let _currentOnStep: ((info: StepInfo) => void) | null = null;
 
@@ -1072,11 +1138,21 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
       if (obj === null || obj === undefined) return undefined;
       const keys = typeof obj === "object" ? Object.keys(obj).filter(k => k !== "__proto__" && k !== "__hc__" && k !== "__slots__" && !k.startsWith("Symbol(")) : [];
       for (const key of keys) {
-        const varName = stmt.left.declarations[0].id.name;
-        if (stmt.left.kind === "var") {
-          try { env.set(varName, internString(key)); } catch { env.define(varName, internString(key)); }
+        const keyVal = internString(key);
+        if (stmt.left.type !== "VariableDeclaration") {
+          // 宣言なし代入形: for (x in obj) / for ([a] in obj) / for (o.p in obj)
+          yield* assignTarget(stmt.left, keyVal, env);
+        } else if (stmt.left.declarations[0].id.type !== "Identifier") {
+          // 宣言 + 分割パターン: for (const [a, b] in obj)
+          bindPattern(stmt.left.declarations[0].id, keyVal, env, stmt.left.kind,
+            (expr: any) => exhaustGen(evalExpression(expr, env)));
         } else {
-          env.define(varName, internString(key));
+          const varName = stmt.left.declarations[0].id.name;
+          if (stmt.left.kind === "var") {
+            try { env.set(varName, keyVal); } catch { env.define(varName, keyVal); }
+          } else {
+            env.define(varName, keyVal);
+          }
         }
         try {
           yield* evalStatement(stmt.body, env);
@@ -1145,9 +1221,10 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
       // for await (x of y): async iterator を lazy に回す (async 関数内でのみ出現)。
       // next() の戻りと (sync ソースの場合) 値を __await__ マーカーで await する
       if ((stmt as any).await) {
-        const kind = stmt.left.kind;
-        const isBlockScoped = kind !== "var";
-        const pattern = stmt.left.declarations[0].id;
+        const isDecl = stmt.left.type === "VariableDeclaration";
+        const kind = isDecl ? stmt.left.kind : "var";
+        const isBlockScoped = isDecl && kind !== "var";
+        const pattern = isDecl ? stmt.left.declarations[0].id : stmt.left;
 
         const aIterFn = typeof rawIterable === "object" && rawIterable !== null
           ? getProperty(rawIterable as JSObject, "@@asyncIterator") ?? (rawIterable as any)["@@asyncIterator"]
@@ -1192,7 +1269,11 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
           if (!isAsyncIter) item = yield { __await__: true, value: item };
 
           const iterEnv = isBlockScoped ? new Environment(env) : env;
-          bindPattern(pattern, item, iterEnv, kind, (expr: any) => exhaustGen(evalExpression(expr, iterEnv)));
+          if (isDecl) {
+            bindPattern(pattern, item, iterEnv, kind, (expr: any) => exhaustGen(evalExpression(expr, iterEnv)));
+          } else {
+            yield* assignTarget(pattern, item, iterEnv);
+          }
           try {
             yield* evalStatement(stmt.body, iterEnv);
           } catch (e) {
@@ -1240,13 +1321,19 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
       } else {
         iterable = rawIterable as unknown[];
       }
-      const kind = stmt.left.kind;
-      const isBlockScoped = kind !== "var";
-      const pattern = stmt.left.declarations[0].id;
+      const isDecl = stmt.left.type === "VariableDeclaration";
+      const kind = isDecl ? stmt.left.kind : "var";
+      const isBlockScoped = isDecl && kind !== "var";
+      const pattern = isDecl ? stmt.left.declarations[0].id : stmt.left;
 
       for (const item of iterable) {
         const iterEnv = isBlockScoped ? new Environment(env) : env;
-        bindPattern(pattern, item, iterEnv, kind, (expr: any) => exhaustGen(evalExpression(expr, iterEnv)));
+        if (isDecl) {
+          bindPattern(pattern, item, iterEnv, kind, (expr: any) => exhaustGen(evalExpression(expr, iterEnv)));
+        } else {
+          // 宣言なし代入形: for (x of arr) / for ([a, b] of pairs) / for (o.p of arr)
+          yield* assignTarget(pattern, item, iterEnv);
+        }
         try {
           yield* evalStatement(stmt.body, iterEnv);
         } catch (e) {
@@ -1512,7 +1599,8 @@ function* evalExpression(expr: Expression, env: Environment): Generator<unknown,
     case "AssignmentExpression": {
       if (expr.left.type === "ObjectPattern" || expr.left.type === "ArrayPattern") {
         const value = yield* evalExpression(expr.right, env);
-        assignPattern(expr.left, value, env);
+        // assignTarget は member ターゲット / AssignmentPattern のデフォルト値も扱う
+        yield* assignTarget(expr.left, value, env);
         return value;
       }
 
