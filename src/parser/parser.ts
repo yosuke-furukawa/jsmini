@@ -487,6 +487,25 @@ export function parse(source: string): Program {
     let init: any = null;
     if (current().type !== "Semicolon") {
       init = parseExpression();
+      // for (LHS of expr) — 宣言なし代入形。パース済みの式をパターンに変換
+      // (カバー文法: [a,b] は ArrayExpression として食われている)
+      if (current().type === "Of") {
+        eat("Of");
+        const left = exprToPattern(init);
+        const right = parseExpression();
+        eat("RightParen");
+        const body = parseStatement();
+        return { type: "ForOfStatement", left, right, body, await: isAwait } as any;
+      }
+      // for (LHS in expr) — 宣言なし代入形。parseExpression は `LHS in expr`
+      // 全体を In 二項式として食っているので、トップレベルの In を分解する
+      if (current().type === "RightParen" && init.type === "BinaryExpression" && init.operator === "in") {
+        if (isAwait) throw new SyntaxError("for await is only valid with for-of");
+        const left = exprToPattern(init.left);
+        eat("RightParen");
+        const body = parseStatement();
+        return { type: "ForInStatement", left, right: init.right, body };
+      }
       eat("Semicolon");
     } else {
       eat("Semicolon");
@@ -801,6 +820,11 @@ export function parse(source: string): Program {
     if (expr.type === "ObjectExpression") return exprToObjectPattern(expr);
     if (expr.type === "ArrayExpression") return exprToArrayPattern(expr);
     if (expr.type === "AssignmentExpression" && expr.operator === "=") {
+      return { type: "AssignmentPattern", left: exprToPattern(expr.left), right: expr.right };
+    }
+    // CoverInitializedName ({ a = 1 }) は object literal パース時点で既に
+    // AssignmentPattern になっている
+    if (expr.type === "AssignmentPattern") {
       return { type: "AssignmentPattern", left: exprToPattern(expr.left), right: expr.right };
     }
     if (expr.type === "SpreadElement") {
@@ -1452,6 +1476,14 @@ export function parse(source: string): Program {
           throw new SyntaxError("Shorthand property must be an identifier");
         }
         value = { type: "Identifier", name: key.name };
+        // CoverInitializedName: { a = 1 } — 分割代入パターンとしてのみ有効。
+        // AssignmentPattern として保持し、exprToPattern がそのまま採用する。
+        // パターンに変換されず式として評価されると TW/VM が未対応ノードとして
+        // 落とす (黙って `a = 1` の代入が走ることはない)
+        if (current().type === "Equals") {
+          eat("Equals");
+          value = { type: "AssignmentPattern", left: value, right: parseAssignment() } as any;
+        }
       }
       properties.push({ type: "Property", key, value, kind: propKind, computed });
       if (current().type === "Comma") {
