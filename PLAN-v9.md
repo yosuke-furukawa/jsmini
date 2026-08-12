@@ -5,8 +5,9 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 44 で for-of/for-in の宣言なし LHS 実装後): **TW 67.6% / VM 64.3% / JIT 63.6%**
+- test262 (Phase 45 で分割代入の TypeError 精緻化後): **TW 69.5% / VM 64.9% / JIT 64.2%**
   (14,053 件実行、noStrict/module 520 件スキップ)
+  - Phase 44 時点は TW 67.6% / VM 64.3% / JIT 63.6% (TW +267 / VM +92 / JIT +92)
   - Phase 43 時点は TW 66.4% / VM 63.0% / JIT 62.3% (TW +171 / VM +178 / JIT +180)
   - Phase 39 時点 (async skip) は TW 63.4% / VM 60.3% / JIT 60.1%
   - Phase 40 で async 1,634 件を skip→実行に変更。約173 件が新規パスする一方、
@@ -25,7 +26,7 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 | B. for-of/for-in の分割代入 LHS | ✅ **Phase 44 完了** (TW +171 / VM +178 / JIT +180) | — | — | パーサ |
 | C. async テストの `$DONE` ランナー対応 | ✅ **Phase 40 完了** (skip 2,114→520、+173 pass) | — | — | テストインフラ |
 | C2. async generator (`async *m`, `for await`) | ✅ **Phase 41 完了** (TW +535 / VM +487 / JIT +487) | — | — | 言語機能 |
-| D. プロパティ属性の TypeError 精緻化 | "Expected a TypeError" | **277** | 中〜大 | オブジェクトモデル |
+| D. 分割代入の TypeError (旧「プロパティ属性」) | ✅ **Phase 45 で主要部完了** (TW +267 / VM +92 / JIT +92) | 残 ~60 | — | dstr/オブジェクトモデル |
 | E. ビルトインのメソッド歯抜け | "Not a function" | **241** | 大 (件数分散) | ビルトイン |
 | F. RegExp exec の結果プロパティ | "__executed.input is expected" | **210** | 中 | RegExp |
 | G. try/catch 系のパース | "Identifier but got LeftBracket" (try 55) 等 | **~95** | 中 | パーサ |
@@ -104,14 +105,21 @@ checkSettledPromises を追加)。skip 2,114 → 520、実行数 12,459 → 14,0
 
 ## Part 2: オブジェクトモデル / ビルトイン
 
-### D. プロパティ属性の TypeError 精緻化 (277 件)
+### D. 分割代入の TypeError ✅ **Phase 45 で主要部完了**
 
-Phase 39 で属性モデルは入れたが "Expected a TypeError" がまだ 277 件。
-- 名前推論の細部 (`name.value` 不一致 ~28)、computed key メソッドの属性、
-  Symbol キーのプロパティ属性
-- **JIT の StoreProperty (wasm write-back) が attrs チェックを通らない** —
-  frozen オブジェクトが hot 関数内で書かれると素通り (実害限定的だが穴)
-- 非拡張オブジェクトへの `defineProperty` の一部エッジ
+実データ分析の結果、"Expected a TypeError" 296 件の主因は属性モデルではなく
+**分割代入の TypeError 系**だった。実装:
+- TW: bindPattern/assignTarget に RequireObjectCoercible (ObjectPattern×nullish)
+  と GetIterator 検査 (非イテラブル) を追加
+- VM: RequireCoercible opcode (空 ObjectPattern / rest のみパターン用)
+- VM: generator/async generator の呼び出し時パラメータ検証 (paramShapes を
+  compile 時に保存し生成前に eager 検証。getter は呼ばない近似)
+
+**残り (別フェーズ候補)**:
+- `delete Array.prototype[Symbol.iterator]` 系 ~30 件 — GetIterator が host 配列の
+  @@iterator 差し替えを見ない (host 配列設計と衝突、要設計)
+- 旧記述の属性モデル系 (少数): 名前推論の `name.value` 不一致、
+  JIT StoreProperty の attrs 素通り、非拡張 defineProperty のエッジ
 
 ### E. ビルトインのメソッド歯抜け (241 件)
 
