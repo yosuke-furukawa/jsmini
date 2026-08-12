@@ -628,6 +628,9 @@ class BytecodeCompiler {
       }
     } else if (id.type === "ObjectPattern") {
       // stack: obj → 各プロパティを取り出す
+      // RequireObjectCoercible: 空パターン ({} = null) や rest のみでもプロパティ
+      // 読みが走らず素通りするため、先頭で null/undefined を TypeError にする
+      this.emit("RequireCoercible");
       const boundKeys: string[] = [];
       for (const prop of id.properties) {
         if (prop.type === "RestElement") {

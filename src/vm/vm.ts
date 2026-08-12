@@ -924,6 +924,14 @@ export class VM {
           this.push(val === null || val === undefined);
           break;
         }
+        case "RequireCoercible": {
+          const val = this.peek();
+          if (val === null || val === undefined) {
+            const err = new TypeError(`Cannot destructure '${val}' as it is ${val === null ? "null" : "undefined"}.`);
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+          }
+          break;
+        }
         case "Negate": {
           const val = this.toPrimitive(this.pop());
           if (val === THROWN_SENTINEL) continue;
