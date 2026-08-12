@@ -164,6 +164,7 @@ export type BytecodeFunction = {
   hasRestParam?: boolean;  // 最後のパラメータが ...rest
   isGenerator?: boolean;   // function* で定義されたか
   isAsync?: boolean;       // async function で定義されたか
+  paramShapes?: unknown[]; // generator のみ: 呼び出し時のパラメータパターン検証シェイプ (compiler.buildParamShape)
   bytecode: Instruction[];
   constants: unknown[];
   handlers: ExceptionHandler[];
