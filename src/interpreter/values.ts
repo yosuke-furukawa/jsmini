@@ -118,6 +118,15 @@ export function collectBoundNames(pattern: any): string[] {
   return [];
 }
 
+// 分割対象のエラーメッセージ用表示名
+export function destructureName(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (isJSString(value)) return JSON.stringify(jsStringToString(value));
+  if (typeof value === "object" || typeof value === "function") return "object";
+  return String(value);
+}
+
 // パターンに対して値を分解して環境に定義する
 export function bindPattern(
   pattern: any,
@@ -136,6 +145,10 @@ export function bindPattern(
       varEnv.define(pattern.name, value);
     }
   } else if (pattern.type === "ObjectPattern") {
+    // RequireObjectCoercible: null/undefined の分割は TypeError (空パターンでも)
+    if (value === null || value === undefined) {
+      throw new TypeError(`Cannot destructure '${destructureName(value)}' as it is ${value === null ? "null" : "undefined"}.`);
+    }
     const obj = value as Record<string, unknown>;
     const boundKeys: string[] = [];
     for (const prop of pattern.properties) {
@@ -160,6 +173,11 @@ export function bindPattern(
     if (isJSString(iterable) || typeof iterable === "string") {
       const s = isJSString(iterable) ? jsStringToString(iterable) : iterable;
       iterable = Array.from(s).map(internString);
+    }
+    // GetIterator: 非イテラブルは TypeError (spec)。配列は fast path で許可
+    if (!Array.isArray(iterable)
+        && !(iterable != null && (typeof iterable[Symbol.iterator] === "function" || typeof iterable?.["@@iterator"] === "function"))) {
+      throw new TypeError(`${destructureName(value)} is not iterable`);
     }
     const iterFn = iterable != null && typeof iterable[Symbol.iterator] === "function"
       ? () => iterable[Symbol.iterator]()
