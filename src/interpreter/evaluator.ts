@@ -8,7 +8,7 @@ import {
   isJSFunction, createJSFunction, getProperty,
   collectBoundNames, bindPattern, assignPattern, destructureName,
 } from "./values.js";
-import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, joinElementToString, toNumericOperand, type JSString } from "../vm/js-string.js";
+import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, joinElementToString, toNumericOperand, internMatchResult, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_ASYNC_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
 import { JSPromise, drainMicrotasks, isJSPromise } from "../runtime/promise.js";
 import "../runtime/host-patches.js";
@@ -2256,7 +2256,9 @@ function* evalCallExpression(
           const nativeArgs = a.map(x => isJSString(x) ? jsStringToString(x) : x);
           const result = nativeFn.apply(str, nativeArgs);
           if (typeof result === "string") return internString(result);
-          if (Array.isArray(result)) return result.map((s: string) => typeof s === "string" ? internString(s) : s);
+          // match/split 等の配列結果: 要素を intern。match の index/input/groups の
+          // own プロパティも保持する (従来の .map() はこれらを落としていた)
+          if (Array.isArray(result)) return internMatchResult(result as RegExpMatchArray);
           return result;
         };
       } else if (isJSFunction(nativeFn)) {
