@@ -284,6 +284,111 @@ function matchValidator(expectedEntries, expectedIndex, expectedInput) {
     assert.sameValue(match.input, expectedInput, "Match input");
   };
 }
+
+// --- async ハーネス (doneprintHandle / asyncHelpers / promiseHelper) ---
+// \$DONE は runner が native globals として注入し、TS 側で完了/失敗を捕捉する。
+// 本家 asyncTest は globalThis.hasOwnProperty("\$DONE") を確認するが、
+// jsmini に globalThis が無いためそのチェックだけ省いた同等実装を置く。
+function asyncTest(testFunc) {
+  if (typeof testFunc !== "function") {
+    $DONE(new Test262Error("asyncTest called with non-function argument"));
+    return;
+  }
+  try {
+    testFunc().then(
+      function() { $DONE(); },
+      function(error) { $DONE(error); }
+    );
+  } catch (syncError) {
+    $DONE(syncError);
+  }
+}
+
+assert.throwsAsync = function(expectedErrorConstructor, func, message) {
+  return new Promise(function(resolve) {
+    var fail = function(detail) {
+      if (message === undefined) {
+        throw new Test262Error(detail);
+      }
+      throw new Test262Error(message + " " + detail);
+    };
+    if (typeof expectedErrorConstructor !== "function") {
+      fail("assert.throwsAsync called with an argument that is not an error constructor");
+    }
+    if (typeof func !== "function") {
+      fail("assert.throwsAsync called with an argument that is not a function");
+    }
+    var expectedName = expectedErrorConstructor.name;
+    var expectation = "Expected a " + expectedName + " to be thrown asynchronously";
+    var res;
+    try {
+      res = func();
+    } catch (thrown) {
+      fail(expectation + " but the function threw synchronously");
+    }
+    if (res === null || typeof res !== "object" || typeof res.then !== "function") {
+      fail(expectation + " but result was not a thenable");
+    }
+    var onResFulfilled, onResRejected;
+    var resSettlementP = new Promise(function(onFulfilled, onRejected) {
+      onResFulfilled = onFulfilled;
+      onResRejected = onRejected;
+    });
+    try {
+      res.then(onResFulfilled, onResRejected);
+    } catch (thrown) {
+      fail(expectation + " but .then threw synchronously");
+    }
+    resolve(resSettlementP.then(
+      function() {
+        fail(expectation + " but no exception was thrown at all");
+      },
+      function(thrown) {
+        var actualName;
+        if (thrown === null || typeof thrown !== "object") {
+          fail(expectation + " but thrown value was not an object");
+        } else if (thrown.constructor !== expectedErrorConstructor) {
+          actualName = thrown.constructor.name;
+          if (expectedName === actualName) {
+            fail(expectation + " but got a different error constructor with the same name");
+          }
+          fail(expectation + " but got a " + actualName);
+        }
+      }
+    ));
+  });
+};
+
+// promiseHelper.js
+function checkSequence(arr, message) {
+  arr.forEach(function(e, i) {
+    if (e !== (i + 1)) {
+      throw new Test262Error((message ? message : "Steps in unexpected sequence:") +
+        " '" + arr.join(",") + "'");
+    }
+  });
+  return true;
+}
+
+function checkSettledPromises(settleds, expected, message) {
+  var prefix = message ? message + ": " : "";
+  assert.sameValue(Array.isArray(settleds), true, prefix + "Settled values is an array");
+  assert.sameValue(settleds.length, expected.length, prefix + "The settled values has a different length than expected");
+  settleds.forEach(function(settled, i) {
+    assert.sameValue(Object.prototype.hasOwnProperty.call(settled, "status"), true, prefix + "The settled value has a property status");
+    assert.sameValue(settled.status, expected[i].status, prefix + "status for item " + i);
+    if (settled.status === "fulfilled") {
+      assert.sameValue(Object.prototype.hasOwnProperty.call(settled, "value"), true, prefix + "The fulfilled promise has a property named value");
+      assert.sameValue(Object.prototype.hasOwnProperty.call(settled, "reason"), false, prefix + "The fulfilled promise has no property named reason");
+      assert.sameValue(settled.value, expected[i].value, prefix + "value for item " + i);
+    } else {
+      assert.sameValue(settled.status, "rejected", prefix + "Valid statuses are only fulfilled or rejected");
+      assert.sameValue(Object.prototype.hasOwnProperty.call(settled, "value"), false, prefix + "The rejected promise has no property named value");
+      assert.sameValue(Object.prototype.hasOwnProperty.call(settled, "reason"), true, prefix + "The rejected promise has a property named reason");
+      assert.sameValue(settled.reason, expected[i].reason, prefix + "Reason value for item " + i);
+    }
+  });
+}
 `;
 }
 
@@ -362,6 +467,20 @@ function extractErrorMessage(e: unknown): string {
   try { return String(e); } catch { return "[unknown error]"; }
 }
 
+// $DONE(error) に渡る生のエラー値からメッセージを取り出す。
+// extractErrorMessage は ThrowSignal / {__thrown} ラッパ前提だが、こちらは
+// jsmini のエラーオブジェクトが直接渡ってくる (name + message を持つ)。
+function extractAsyncError(val: unknown): string {
+  if (typeof val === "object" && val !== null) {
+    const name = (val as any).name;
+    const msg = (val as any).message;
+    const nameStr = isJSString(name) ? jsStringToString(name) : (name !== undefined ? String(name) : "");
+    const msgStr = isJSString(msg) ? jsStringToString(msg) : (msg !== undefined ? String(msg) : "");
+    if (nameStr || msgStr) return (nameStr ? nameStr + ": " : "") + msgStr;
+  }
+  return extractErrorMessage(val);
+}
+
 // canRun は廃止。構文未対応のテストも実行して正直に Fail にする。
 // Skip は「テストの実行方式が合わない」場合のみ（メタデータで判定）。
 
@@ -423,7 +542,6 @@ function runTest(filePath: string): TestResult {
 
   // 実行方式が根本的に異なるもののみスキップ
   if (meta.flags.includes("module")) return { file: relPath, status: "skip", error: "module" };
-  if (meta.flags.includes("async")) return { file: relPath, status: "skip", error: "async" };
   if (meta.flags.includes("raw")) return { file: relPath, status: "skip", error: "raw" };
   // jsmini は strict mode 前提
   if (meta.flags.includes("noStrict")) {
@@ -443,9 +561,28 @@ function runTest(filePath: string): TestResult {
   // 構築するのに 100k では足りない。無限ループ系は数件しかないので
   // 上限を上げても全体の実行時間への影響は小さい
   const STEP_LIMIT = 2_000_000;
+
+  // async テスト: native $DONE を注入して完了/失敗を捕捉する。
+  // テスト本体が Promise チェーンを組んだあと run() 内の drainMicrotasks() で
+  // 全リアクションが走り $DONE が呼ばれる。呼ばれなければ「未完了」とみなす。
+  const isAsync = meta.flags.includes("async") && !meta.negative;
+  const asyncState: { called: boolean; error: unknown } = { called: false, error: undefined };
+  const globals: Record<string, unknown> = isAsync
+    ? {
+        ...NATIVE_HARNESS_GLOBALS,
+        $DONE: (err: unknown) => {
+          // 最初の $DONE 呼び出しだけを採用 (本家も二重呼び出しは想定外)
+          if (!asyncState.called) {
+            asyncState.called = true;
+            asyncState.error = err;
+          }
+        },
+      }
+    : NATIVE_HARNESS_GLOBALS;
+
   const opts = useVM || useJIT
-    ? { maxSteps: STEP_LIMIT, globals: NATIVE_HARNESS_GLOBALS }
-    : { onStep: () => { if (++steps > STEP_LIMIT) throw new Error("timeout: exceeded step limit"); }, globals: NATIVE_HARNESS_GLOBALS };
+    ? { maxSteps: STEP_LIMIT, globals }
+    : { onStep: () => { if (++steps > STEP_LIMIT) throw new Error("timeout: exceeded step limit"); }, globals };
 
   try {
     if (meta.negative) {
@@ -455,6 +592,22 @@ function runTest(filePath: string): TestResult {
       } catch {
         return { file: relPath, status: "pass" };
       }
+    }
+
+    if (isAsync) {
+      try {
+        run(fullSource, opts); // 実行 + microtask drain
+      } catch (e: any) {
+        // 同期的に throw した (setup エラー等) → そのまま fail
+        return { file: relPath, status: "fail", error: extractErrorMessage(e) };
+      }
+      if (!asyncState.called) {
+        return { file: relPath, status: "fail", error: "async: $DONE not called (未完了)" };
+      }
+      if (asyncState.error) {
+        return { file: relPath, status: "fail", error: extractAsyncError(asyncState.error) };
+      }
+      return { file: relPath, status: "pass" };
     }
 
     try {

@@ -1300,9 +1300,11 @@ class BytecodeCompiler {
         const useLocal = this.isFunction;
         const iterSlot = useLocal ? this.localCount++ : 0;
         const iterG = !useLocal ? this.addConstant(`__iter_${this.currentOffset()}`) : 0;
+        // for await (x of y): async iterator を取り、next() の戻りと値を Await で決着
+        const isAwait = (stmt as any).await === true;
 
         this.compileExpression(stmt.right);
-        this.emit("GetIterator");
+        this.emit(isAwait ? "GetAsyncIterator" : "GetIterator");
         if (useLocal) this.emit("StaLocal", iterSlot); else this.emit("StaGlobal", iterG);
         this.emit("Pop");
 
@@ -1312,6 +1314,7 @@ class BytecodeCompiler {
         // IteratorNext: pop iterator, push result
         if (useLocal) this.emit("LdaLocal", iterSlot); else this.emit("LdaGlobal", iterG);
         this.emit("IteratorNext");
+        if (isAwait) this.emit("Await"); // async iterator の next() は Promise
         // stack: [result]
 
         // IteratorComplete: peek result, push done
@@ -1323,6 +1326,7 @@ class BytecodeCompiler {
 
         // IteratorValue: pop result, push value
         this.emit("IteratorValue");
+        if (isAwait) this.emit("Await"); // sync ソースの値も await (async-from-sync 相当)
         // stack: [value]
 
         this.compileBindingTarget(stmt.left.declarations[0].id);
@@ -1627,7 +1631,7 @@ class BytecodeCompiler {
             if (expr.callee.computed) {
               this.compileExpression(expr.callee.property);
               this.emit("GetPropertyComputed");
-            } else if (expr.callee.property.type === "Identifier") {
+            } else if (expr.callee.property.type === "Identifier" || expr.callee.property.type === "PrivateIdentifier") {
               const nameIdx = this.addConstant(expr.callee.property.name);
               this.emitWithIC("GetProperty", nameIdx);
             }
@@ -1641,7 +1645,7 @@ class BytecodeCompiler {
             if (expr.callee.computed) {
               this.compileExpression(expr.callee.property);
               this.emit("GetPropertyComputed");
-            } else if (expr.callee.property.type === "Identifier") {
+            } else if (expr.callee.property.type === "Identifier" || expr.callee.property.type === "PrivateIdentifier") {
               const nameIdx = this.addConstant(expr.callee.property.name);
               this.emitWithIC("GetProperty", nameIdx);
             }
@@ -1756,6 +1760,35 @@ class BytecodeCompiler {
       }
 
       case "YieldExpression": {
+        // yield* の委譲: iterator を取得して 1 要素ずつ yield し、
+        // done の value が式の値になる。async generator では @@asyncIterator を
+        // 優先し next() の戻りを Await で決着させる。
+        // 簡易化: 再開値の内側 next(v) への転送と throw/return の転送は省略
+        if ((expr as any).delegate) {
+          const iterSlot = this.localCount++;
+          this.compileExpression((expr as any).argument);
+          this.emit(this.isAsync ? "GetAsyncIterator" : "GetIterator");
+          this.emit("StaLocal", iterSlot);
+          this.emit("Pop");
+
+          const loopStart = this.currentOffset();
+          this.emit("LdaLocal", iterSlot);
+          this.emit("IteratorNext");
+          if (this.isAsync) this.emit("Await"); // async iterator の next() は Promise
+          this.emit("Dup");
+          this.emit("IteratorComplete");
+          const exitJump = this.emit("JumpIfTrue", 0);
+          // stack: [result]
+          this.emit("IteratorValue");
+          this.emit("Yield");
+          this.emit("Pop"); // 再開時に push される sent 値は捨てる
+          this.emit("Jump", loopStart);
+
+          this.patch(exitJump, this.currentOffset());
+          // stack: [result (done)] → 最終 value が yield* 式の値
+          this.emit("IteratorValue");
+          break;
+        }
         if ((expr as any).argument) {
           this.compileExpression((expr as any).argument);
         } else {

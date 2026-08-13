@@ -4,7 +4,7 @@ import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
 import { isJSString, jsStringToString, internString, createSeqString, arrayToPrimitiveString, joinElementToString, jsStringEquals } from "./js-string.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getPropAttrs, setPropAttrs, preventObjExtensions, isObjExtensible, isAccessorDescriptor, createAccessorDescriptor, type PropAttrs } from "./js-object.js";
-import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
+import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_ASYNC_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
 import { Heap } from "./heap.js";
 import { evaluate } from "../interpreter/evaluator.js";
 import { JSPromise, drainMicrotasks, isJSPromise, setHandlerCaller } from "../runtime/promise.js";
@@ -983,6 +983,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return createSymbol(d);
   };
   SymbolFn.iterator = SYMBOL_ITERATOR;
+  SymbolFn.asyncIterator = SYMBOL_ASYNC_ITERATOR;
   SymbolFn.toPrimitive = SYMBOL_TO_PRIMITIVE;
   SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;

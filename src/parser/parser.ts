@@ -2,6 +2,13 @@ import type { Token, TokenType } from "../lexer/token.js";
 import { tokenize } from "../lexer/lexer.js";
 import type { Program, Expression, Statement } from "./ast.js";
 
+// private name (#x) のプロパティキー用プレフィックス。
+// パーサ段階で "#x" → "⁣#x" (不可視セパレータ付き) に mangle することで、
+// テストコードの hasOwnProperty("#x") / "#x" in obj からは見えなくなる
+// (spec の per-class brand ではなく「観測不能な共有キー」による近似)。
+// 両エンジンは name をそのままプロパティキーに使うため、エンジン側の変更は不要
+export const PRIVATE_KEY_PREFIX = "⁣";
+
 export function parse(source: string): Program {
   const tokens = tokenize(source);
   let pos = 0;
@@ -158,6 +165,8 @@ export function parse(source: string): Program {
   function parseAsyncFunctionDeclaration(): Statement {
     eat("Async");
     eat("Function");
+    const generator = current().type === "Star";
+    if (generator) eat("Star");
     const id = parseIdentifier();
     eat("LeftParen");
     resetParamState();
@@ -168,7 +177,7 @@ export function parse(source: string): Program {
     }
     eat("RightParen");
     const body = parseBlockStatement() as any;
-    return { type: "FunctionDeclaration", id, params, body, async: true } as any;
+    return { type: "FunctionDeclaration", id, params, body, async: true, generator } as any;
   }
 
   // FunctionDeclaration = 'function' Identifier '(' params ')' BlockStatement
@@ -247,7 +256,7 @@ export function parse(source: string): Program {
       if (current().type === "LeftBracket") {
         eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
       } else if (current().type === "PrivateIdentifier") {
-        key = { type: "PrivateIdentifier", name: eat("PrivateIdentifier").value };
+        key = { type: "PrivateIdentifier", name: PRIVATE_KEY_PREFIX + eat("PrivateIdentifier").value };
       } else if (current().type === "String") {
         key = { type: "Literal", value: eat("String").value };
       } else if (current().type === "Number") {
@@ -267,7 +276,7 @@ export function parse(source: string): Program {
         if (current().type === "LeftBracket") {
           eat("LeftBracket"); key = parseAssignment(); eat("RightBracket"); computed = true;
         } else if (current().type === "PrivateIdentifier") {
-          key = { type: "PrivateIdentifier", name: eat("PrivateIdentifier").value };
+          key = { type: "PrivateIdentifier", name: PRIVATE_KEY_PREFIX + eat("PrivateIdentifier").value };
         } else if (current().type === "String") {
           key = { type: "Literal", value: eat("String").value };
         } else if (current().type === "Number") {
@@ -400,6 +409,9 @@ export function parse(source: string): Program {
   // ForStatement or ForOfStatement
   function parseForStatement(): Statement {
     eat("For");
+    // for await (x of y) — await は of 形式でのみ有効
+    const isAwait = current().type === "Await";
+    if (isAwait) eat("Await");
     eat("LeftParen");
 
     // for (var/let/const ...  of  expr) → ForOfStatement
@@ -434,7 +446,7 @@ export function parse(source: string): Program {
           declarations: [{ type: "VariableDeclarator", id, init: null }],
           kind,
         };
-        return { type: "ForOfStatement", left, right, body };
+        return { type: "ForOfStatement", left, right, body, await: isAwait } as any;
       }
 
       // 通常の for — init は VariableDeclaration (複数宣言子対応)
@@ -925,6 +937,14 @@ export function parse(source: string): Program {
 
   // Comparison = Shift (('<' | '>' | '<=' | '>=') Shift)*
   function parseComparison(): Expression {
+    // private brand check: `#x in obj`。LHS を mangled 名の文字列リテラルに
+    // することで、両エンジンの既存の `in` 実装がそのまま brand check になる
+    if (current().type === "PrivateIdentifier" && peek().type === "In") {
+      const tok = eat("PrivateIdentifier");
+      eat("In");
+      const right = parseShift();
+      return { type: "BinaryExpression", operator: "in", left: { type: "Literal", value: PRIVATE_KEY_PREFIX + tok.value } as any, right };
+    }
     let left = parseShift();
     while (
       current().type === "Less" ||
@@ -1117,7 +1137,7 @@ export function parse(source: string): Program {
         let property: any;
         if (current().type === "PrivateIdentifier") {
           const tok = eat("PrivateIdentifier");
-          property = { type: "PrivateIdentifier", name: tok.value };
+          property = { type: "PrivateIdentifier", name: PRIVATE_KEY_PREFIX + tok.value };
         } else {
           property = parsePropertyKey();
         }
@@ -1193,6 +1213,8 @@ export function parse(source: string): Program {
           // async function expression
           eat("Async");
           eat("Function");
+          const generator = current().type === "Star";
+          if (generator) eat("Star");
           let id: any = null;
           if (current().type === "Identifier") id = parseIdentifier();
           eat("LeftParen");
@@ -1204,7 +1226,7 @@ export function parse(source: string): Program {
           }
           eat("RightParen");
           const body = parseBlockStatement() as any;
-          return { type: "FunctionExpression", id, params, body, async: true } as any;
+          return { type: "FunctionExpression", id, params, body, async: true, generator } as any;
         }
         // async arrow: async (params) => body or async ident => body
         if (peek().type === "Identifier" && tokens[pos + 2]?.type === "Arrow") {

@@ -87,10 +87,15 @@ type GeneratorObject = {
   "@@iterator": () => GeneratorObject;
 };
 
-// Yield で VM ループを抜けるためのシグナル
+// Yield / Await で VM ループを抜けるためのシグナル。
+// async generator では両方が出現するため kind で区別する
 class YieldSignal {
   value: unknown;
-  constructor(value: unknown) { this.value = value; }
+  kind: "yield" | "await";
+  constructor(value: unknown, kind: "yield" | "await" = "yield") {
+    this.value = value;
+    this.kind = kind;
+  }
 }
 
 // スタックベースの Bytecode VM
@@ -403,6 +408,121 @@ export class VM {
         return { value, done: true };
       },
       "@@iterator": () => genObj,
+    };
+    return genObj;
+  }
+
+  // AsyncGenerator オブジェクト (spec 27.6 の近似)。
+  // next/return/throw が JSPromise を返し、リクエストはキューで直列化。
+  // body 内の Await (kind: "await") は resume、Yield (kind: "yield") は
+  // 値を await してから {value, done:false} で決着する。
+  // 制約: await 拒否を body の try/catch に届ける手段が VM に無いため
+  // (sync generator に throw() が無いのと同根)、拒否は generator 全体の
+  // 完了 + reject として扱う
+  private createAsyncGeneratorObject(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[], thisValue?: unknown): Record<string, unknown> {
+    const vm = new VM();
+    vm.globals = this.globals;
+    vm.heap = this.heap;
+    vm.objectPrototype = this.objectPrototype;
+    vm.arrayPrototype = this.arrayPrototype;
+    vm.stringPrototype = this.stringPrototype;
+
+    let pc = 0;
+    let savedLocals = locals.slice();
+    let savedStack: unknown[] = [];
+    let finished = false;
+    let running = false;
+
+    type Req = { type: "next" | "return" | "throw"; arg: unknown; resolve: (v: unknown) => void; reject: (e: unknown) => void };
+    const queue: Req[] = [];
+
+    const settle = (fn: (req: Req) => void): void => {
+      const req = queue.shift()!;
+      running = false;
+      fn(req);
+      pump();
+    };
+
+    const finish = (fn: (req: Req) => void): void => {
+      finished = true;
+      settle(fn);
+    };
+
+    function resume(input: unknown): void {
+      vm.sp = -1;
+      for (const v of savedStack) vm.push(v);
+      if (pc > 0) vm.push(input); // Await/Yield の式の結果
+      vm.frames.push({
+        func, pc, locals: savedLocals, thisValue,
+        icSlots: vm.createICSlots(func),
+        upvalueBoxes,
+      });
+      try {
+        vm._runBaseFrameCount = vm.frames.length - 1;
+        const result = vm.run(vm.frames.length - 1);
+        finish((req) => req.resolve({ value: result, done: true }));
+      } catch (e) {
+        if (e instanceof YieldSignal) {
+          const fr = vm.frames[vm.frames.length - 1];
+          pc = fr.pc;
+          savedLocals = fr.locals;
+          savedStack = [];
+          for (let si = 0; si <= vm.sp; si++) savedStack.push(vm.stack[si]);
+          vm.frames.pop();
+          if (e.kind === "await") {
+            JSPromise.resolve(e.value).then(
+              (v: unknown) => resume(v),
+              (err: unknown) => finish((req) => req.reject(err)),
+            );
+          } else {
+            // yield: 値も await してから決着 (spec AsyncGeneratorYield)
+            JSPromise.resolve(e.value).then(
+              (v: unknown) => settle((req) => req.resolve({ value: v, done: false })),
+              (err: unknown) => finish((req) => req.reject(err)),
+            );
+          }
+        } else {
+          const thrown = (e as any)?.__thrown ? (e as any).value : e;
+          finish((req) => req.reject(thrown));
+        }
+      }
+    }
+
+    function pump(): void {
+      if (running || queue.length === 0) return;
+      const req = queue[0];
+      if (finished) {
+        queue.shift();
+        if (req.type === "throw") req.reject(req.arg);
+        else req.resolve({ value: req.type === "return" ? req.arg : undefined, done: true });
+        pump();
+        return;
+      }
+      if (req.type === "return") {
+        // 簡易: finally は実行しない (sync generator の return と同等)
+        finish((r) => r.resolve({ value: r.arg, done: true }));
+        return;
+      }
+      if (req.type === "throw") {
+        // 中断点への例外注入は未対応 → generator を終了して reject
+        finish((r) => r.reject(r.arg));
+        return;
+      }
+      running = true;
+      resume(req.arg);
+    }
+
+    const enqueue = (type: Req["type"], arg: unknown): JSPromise =>
+      new JSPromise((resolve, reject) => {
+        queue.push({ type, arg, resolve: resolve!, reject: reject! });
+        pump();
+      });
+
+    const genObj: Record<string, unknown> = {
+      next: (value?: unknown) => enqueue("next", value),
+      return: (value?: unknown) => enqueue("return", value),
+      throw: (value?: unknown) => enqueue("throw", value),
+      "@@asyncIterator": () => genObj,
     };
     return genObj;
   }
@@ -1367,6 +1487,32 @@ export class VM {
 
         // in / instanceof
         // Iterator protocol
+        case "GetAsyncIterator": {
+          // @@asyncIterator があれば呼ぶ。無ければ GetIterator と同じ扱い
+          // (sync iterable / 配列 / 文字列は for await / yield* 側の Await が決着させる)
+          const aObj = this.peek();
+          let aIterFn = isJSObject(aObj) ? jsObjGet(aObj, "@@asyncIterator") : (aObj as any)?.["@@asyncIterator"];
+          if (isAccessorDescriptor(aIterFn)) {
+            // getter 経由 (get [Symbol.asyncIterator]() {...}) — 呼んで値を得る
+            this.pop();
+            aIterFn = aIterFn.get !== undefined ? this.callGetterSetter(aIterFn.get, aObj, undefined) : undefined;
+            if (aIterFn === THROWN_SENTINEL) break;
+            this.push(aObj); // 下の共通処理のため戻す
+          }
+          if (aIterFn !== undefined && aIterFn !== null) {
+            this.pop();
+            // GetMethod: null/undefined 以外の非 callable は TypeError
+            // (@@iterator へはフォールバックしない)
+            if (typeof aIterFn !== "function" && !this.isBytecodeCallable(aIterFn)) {
+              throw new TypeError("Symbol.asyncIterator is not callable");
+            }
+            const iterator = this.callAny(aIterFn, aObj, []);
+            if (iterator === THROWN_SENTINEL) break;
+            this.push(iterator);
+            break;
+          }
+          // @@asyncIterator が無い → fallthrough して GetIterator と同じ処理
+        }
         case "GetIterator": {
           const obj = this.pop();
           if (Array.isArray(obj)) {
@@ -1577,7 +1723,9 @@ export class VM {
             }
             // arguments オブジェクト: パラメータの直後のスロット
             this.setArguments(fn, locals, args);
-            if (fn.isAsync) {
+            if (fn.isAsync && fn.isGenerator) {
+              this.push(this.createAsyncGeneratorObject(fn, locals, closureBoxes));
+            } else if (fn.isAsync) {
               // Async: JIT (JSPI) を試みる
               const __jc = (fn as { __jitCached?: unknown }).__jitCached;
               if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
@@ -1632,7 +1780,9 @@ export class VM {
               locals[i] = i < args.length ? args[i] : undefined;
             }
             this.setArguments(fn, locals, args);
-            if (fn.isAsync) {
+            if (fn.isAsync && fn.isGenerator) {
+              this.push(this.createAsyncGeneratorObject(fn, locals, closure.capturedBoxes, thisObj));
+            } else if (fn.isAsync) {
               const __jc = (fn as { __jitCached?: unknown }).__jitCached;
               if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
               // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
@@ -1662,7 +1812,9 @@ export class VM {
               locals[i] = i < args.length ? args[i] : undefined;
             }
             this.setArguments(fn, locals, args);
-            if (fn.isAsync) {
+            if (fn.isAsync && fn.isGenerator) {
+              this.push(this.createAsyncGeneratorObject(fn, locals, [], thisObj));
+            } else if (fn.isAsync) {
               const __jc = (fn as { __jitCached?: unknown }).__jitCached;
               if (this.feedback && __jc === undefined) this.feedback.recordCall(fn, args);
               // VM 行き確定 (__jc === null) なら tryCall もクロージャ値の map() も払わない
@@ -2013,7 +2165,7 @@ export class VM {
         // Await: same mechanism as Yield (suspend via signal)
         case "Await": {
           const value = this.pop();
-          throw new YieldSignal(value); // reuse YieldSignal for suspend
+          throw new YieldSignal(value, "await");
         }
 
         // Generator yield

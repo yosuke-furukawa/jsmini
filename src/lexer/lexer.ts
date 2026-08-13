@@ -224,8 +224,8 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // 識別子・キーワード (unicode escape 対応)
-    if (isAlpha(ch) || (ch === "\\" && peek(1) === "u")) {
+    // 識別子・キーワード (unicode escape + Unicode ID_Start/Continue 対応)
+    if (isAlpha(ch) || isUnicodeIdStart(ch) || (ch === "\\" && peek(1) === "u")) {
       const startCol = column;
       let word = "";
       while (pos < source.length) {
@@ -244,7 +244,7 @@ export function tokenize(source: string): Token[] {
             for (let j = 0; j < 4 && pos < source.length; j++) hex += advance();
             word += String.fromCharCode(parseInt(hex, 16));
           }
-        } else if (isAlphaNumeric(peek())) {
+        } else if (isAlphaNumeric(peek()) || isUnicodeIdContinue(peek())) {
           word += advance();
         } else {
           break;
@@ -254,13 +254,35 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // Private identifier: #name
-    if (ch === "#" && isAlpha(peek(1))) {
+    // Private identifier: #name。Unicode ID_Start/ID_Continue + ZWNJ/ZWJ と
+    // \uXXXX / \u{...} エスケープを許容 (test262 の privatename-identifier 系が
+    // #℘ / #\u{6F} / #ZW_‌_NJ のような名前を使う)。
+    // エスケープは実文字にデコードするので #\u{6F} と #o は同じキーになる
+    if (ch === "#" && (isAlpha(peek(1)) || isUnicodeIdStart(peek(1)) || (peek(1) === "\\" && peek(2) === "u"))) {
       const startCol = column;
       advance(); // skip #
-      const start = pos;
-      while (pos < source.length && isAlphaNumeric(peek())) advance();
-      pushToken("PrivateIdentifier", "#" + source.slice(start, pos), startCol);
+      let name = "";
+      while (pos < source.length) {
+        const c = peek();
+        if (c === "\\" && peek(1) === "u") {
+          advance(); advance(); // \u
+          let hex = "";
+          if (peek() === "{") {
+            advance();
+            while (pos < source.length && peek() !== "}") { hex += peek(); advance(); }
+            advance(); // }
+          } else {
+            for (let i = 0; i < 4 && pos < source.length; i++) { hex += peek(); advance(); }
+          }
+          name += String.fromCodePoint(parseInt(hex, 16));
+        } else if (isAlphaNumeric(c) || isUnicodeIdContinue(c)) {
+          name += c;
+          advance();
+        } else {
+          break;
+        }
+      }
+      pushToken("PrivateIdentifier", "#" + name, startCol);
       continue;
     }
 
@@ -493,4 +515,17 @@ function isAlpha(ch: string): boolean {
 
 function isAlphaNumeric(ch: string): boolean {
   return isAlpha(ch) || isDigit(ch);
+}
+
+// Unicode 識別子 (private name 用)。ASCII は isAlpha が先に拾うので
+// ここは非 ASCII のみ評価される
+const UNICODE_ID_START = /[\p{ID_Start}]/u;
+const UNICODE_ID_CONTINUE = /[\p{ID_Continue}‌‍]/u; // + ZWNJ/ZWJ
+
+function isUnicodeIdStart(ch: string): boolean {
+  return ch !== undefined && ch.charCodeAt(0) > 127 && UNICODE_ID_START.test(ch);
+}
+
+function isUnicodeIdContinue(ch: string): boolean {
+  return ch !== undefined && ch.charCodeAt(0) > 127 && UNICODE_ID_CONTINUE.test(ch);
 }
