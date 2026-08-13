@@ -2253,7 +2253,25 @@ function* evalCallExpression(
       const nativeFn = (str as any)[key];
       if (typeof nativeFn === "function") {
         fn = (...a: unknown[]) => {
-          const nativeArgs = a.map(x => isJSString(x) ? jsStringToString(x) : x);
+          const nativeArgs = a.map(x => {
+            if (isJSString(x)) return jsStringToString(x);
+            // replace(/re/, fn) 等のコールバック: host (String.prototype.replace) から
+            // 呼ばれるので、引数を intern して jsmini 関数に渡し、戻り値の JSString を
+            // host string に unwrap する。呼び出しの汎用ラップ (2360 行代) が先に
+            // JSFunction を host 関数に包むため __wrappedJSFunction タグで検出。
+            // (従来は raw JSString が host replace に返り "[object Object]" になっていた)
+            const wrapped = typeof x === "function" ? (x as any).__wrappedJSFunction : undefined;
+            if (wrapped || isJSFunction(x)) {
+              const call = wrapped
+                ? (cbArgs: unknown[]) => (x as Function)(...cbArgs)
+                : (cbArgs: unknown[]) => callJSFunctionSync(x as JSFunction, undefined, cbArgs);
+              return (...cbArgs: unknown[]) => {
+                const r = call(cbArgs.map(c => typeof c === "string" ? internString(c) : c));
+                return isJSString(r) ? jsStringToString(r) : r;
+              };
+            }
+            return x;
+          });
           const result = nativeFn.apply(str, nativeArgs);
           if (typeof result === "string") return internString(result);
           // match/split 等の配列結果: 要素を intern。match の index/input/groups の
