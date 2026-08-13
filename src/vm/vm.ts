@@ -341,7 +341,60 @@ export class VM {
   }
 
   // GeneratorObject を作成
+  // generator の呼び出し時パラメータ検証 (spec: FunctionDeclarationInstantiation は
+  // 呼び出し時に走るため、分割パターンの TypeError は generator オブジェクト生成前)。
+  // 副作用を避ける近似: getter (AccessorDescriptor) は呼ばず、非配列イテラブルの
+  // 要素は辿らない。false-negative (見逃し) 側に倒す
+  private validateParamShape(value: unknown, shape: any): void {
+    if (!shape) return;
+    if (shape.t === "d") {
+      // デフォルト付き: undefined ならデフォルトが適用されるので検証不要
+      if (value !== undefined) this.validateParamShape(value, shape.inner);
+      return;
+    }
+    if (shape.t === "o") {
+      if (value === null || value === undefined) {
+        throw new TypeError(`Cannot destructure '${value}' as it is ${value === null ? "null" : "undefined"}.`);
+      }
+      for (const { key, inner } of shape.props) {
+        let v: unknown;
+        if (isJSObject(value)) {
+          v = jsObjGet(value, key);
+          if (isAccessorDescriptor(v)) continue; // getter は呼ばない
+        } else if (Array.isArray(value) || typeof value !== "object") {
+          continue; // 配列/プリミティブのプロパティ読みは undefined 側に倒す
+        } else {
+          v = (value as Record<string, unknown>)[key];
+        }
+        this.validateParamShape(v, inner);
+      }
+      return;
+    }
+    if (shape.t === "a") {
+      const iterable = Array.isArray(value)
+        || typeof value === "string" || isJSString(value)
+        || (value !== null && (typeof value === "object" || typeof value === "function")
+            && ((value as any)[Symbol.iterator] !== undefined || (value as any)["@@iterator"] !== undefined
+                || (isJSObject(value) && jsObjGet(value, "@@iterator") !== undefined)));
+      if (!iterable) throw new TypeError("obj is not iterable");
+      if (Array.isArray(value)) {
+        for (let i = 0; i < shape.elems.length; i++) {
+          if (shape.elems[i]) this.validateParamShape(value[i], shape.elems[i]);
+        }
+      }
+    }
+  }
+
+  private validateGeneratorParams(func: BytecodeFunction, locals: unknown[]): void {
+    const shapes = func.paramShapes;
+    if (!shapes) return;
+    for (let i = 0; i < func.paramCount && i < shapes.length; i++) {
+      if (shapes[i]) this.validateParamShape(locals[i], shapes[i]);
+    }
+  }
+
   private createGeneratorObject(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[]): GeneratorObject {
+    this.validateGeneratorParams(func, locals);
     const vm = new VM();
     vm.globals = this.globals;
     vm.heap = this.heap;
@@ -420,6 +473,7 @@ export class VM {
   // (sync generator に throw() が無いのと同根)、拒否は generator 全体の
   // 完了 + reject として扱う
   private createAsyncGeneratorObject(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[], thisValue?: unknown): Record<string, unknown> {
+    this.validateGeneratorParams(func, locals);
     const vm = new VM();
     vm.globals = this.globals;
     vm.heap = this.heap;
@@ -922,6 +976,14 @@ export class VM {
         case "IsNullish": {
           const val = this.pop();
           this.push(val === null || val === undefined);
+          break;
+        }
+        case "RequireCoercible": {
+          const val = this.peek();
+          if (val === null || val === undefined) {
+            const err = new TypeError(`Cannot destructure '${val}' as it is ${val === null ? "null" : "undefined"}.`);
+            if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+          }
           break;
         }
         case "Negate": {
@@ -1946,7 +2008,7 @@ export class VM {
           child.__homeProto = parentProto; // ctor 内の super.m 用
           // メソッドに super 解決情報をタグ付け (super()/super.m 用)。
           // instance メソッド → parent.prototype、static メソッド → parent
-          const INTERNAL_KEYS = new Set(["name", "length", "paramCount", "localCount", "hasRestParam", "isGenerator", "isAsync",
+          const INTERNAL_KEYS = new Set(["name", "length", "paramCount", "localCount", "hasRestParam", "isGenerator", "isAsync", "paramShapes",
             "bytecode", "constants", "handlers", "icSlotCount", "upvalues", "__jitCached",
             "prototype", "__instanceFields", "__superClass", "__homeProto"]);
           const tagFns = (holder: unknown, home: unknown) => {

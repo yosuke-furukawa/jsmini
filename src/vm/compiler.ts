@@ -29,6 +29,7 @@ class BytecodeCompiler {
   private icSlotCount = 0;
   private hasRestParam = false;
   private isGenerator = false;
+  private paramShapes: any[] = []; // generator の呼び出し時パターン検証用 (buildParamShape)
   private isAsync = false;
   private fnLength = 0; // spec の fn.length (デフォルト/rest より前のパラメータ数)
   // class の instance field 初期化式 (ctor 本体の前に this.k = expr として emit)。
@@ -453,6 +454,7 @@ class BytecodeCompiler {
       hasRestParam: this.hasRestParam,
       isGenerator: this.isGenerator,
       isAsync: this.isAsync,
+      paramShapes: this.isGenerator && this.paramShapes.some(Boolean) ? this.paramShapes : undefined,
       bytecode: this.bytecode,
       constants: this.constants,
       handlers: this.handlers,
@@ -628,6 +630,9 @@ class BytecodeCompiler {
       }
     } else if (id.type === "ObjectPattern") {
       // stack: obj → 各プロパティを取り出す
+      // RequireObjectCoercible: 空パターン ({} = null) や rest のみでもプロパティ
+      // 読みが走らず素通りするため、先頭で null/undefined を TypeError にする
+      this.emit("RequireCoercible");
       const boundKeys: string[] = [];
       for (const prop of id.properties) {
         if (prop.type === "RestElement") {
@@ -741,9 +746,35 @@ class BytecodeCompiler {
     }
   }
 
+  // generator 用: パラメータパターンの「TypeError になりうる形」だけを残した
+  // 軽量シェイプ。generator は呼び出し時に prologue (分割代入) が走らないため、
+  // spec の「呼び出し時に TypeError」を再現するには生成時の eager 検証が必要。
+  // 副作用を避けるため getter/iterator プロトコルは呼ばない近似 (vm.ts 参照)
+  private buildParamShape(p: any): any {
+    if (!p) return null;
+    if (p.type === "AssignmentPattern") {
+      // デフォルト付き: undefined のときはデフォルトが適用されるので検証しない
+      const inner = this.buildParamShape(p.left);
+      return inner ? { t: "d", inner } : null;
+    }
+    if (p.type === "ObjectPattern") {
+      const props = p.properties
+        .filter((pr: any) => pr.type !== "RestElement" && !pr.computed && pr.key?.name !== undefined)
+        .map((pr: any) => ({ key: pr.key.name, inner: this.buildParamShape(pr.value) }))
+        .filter((e: any) => e.inner);
+      return { t: "o", props };
+    }
+    if (p.type === "ArrayPattern") {
+      const elems = p.elements.map((el: any) => el && el.type !== "RestElement" ? this.buildParamShape(el) : null);
+      return { t: "a", elems };
+    }
+    return null; // Identifier / RestElement 等はエラーにならない
+  }
+
   compileFunctionBody(params: any[], body: Statement[], isArrow?: boolean): void {
     // パラメータをローカルスロットに登録
     this.paramCount = params.length;
+    this.paramShapes = params.map(p => this.buildParamShape(p));
     // fn.length = 最初のデフォルト値/rest より前のパラメータ数 (spec)
     let fnLen = 0;
     for (const p of params) {

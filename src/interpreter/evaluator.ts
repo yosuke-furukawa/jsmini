@@ -6,7 +6,7 @@ import {
   JS_FUNCTION_BRAND, PROTO_KEY,
   type JSObject, type JSFunction,
   isJSFunction, createJSFunction, getProperty,
-  collectBoundNames, bindPattern, assignPattern,
+  collectBoundNames, bindPattern, assignPattern, destructureName,
 } from "./values.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, joinElementToString, toNumericOperand, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_ASYNC_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
@@ -152,6 +152,10 @@ function* assignTarget(pattern: any, value: unknown, env: Environment): Generato
       return;
     }
     case "ObjectPattern": {
+      // RequireObjectCoercible: null/undefined の分割は TypeError (空パターンでも)
+      if (value === null || value === undefined) {
+        throw new TypeError(`Cannot destructure '${destructureName(value)}' as it is ${value === null ? "null" : "undefined"}.`);
+      }
       const obj = value as Record<string, unknown>;
       const boundKeys: string[] = [];
       for (const prop of pattern.properties) {
@@ -177,6 +181,11 @@ function* assignTarget(pattern: any, value: unknown, env: Environment): Generato
       if (isJSString(value) || typeof value === "string") {
         const s = isJSString(value) ? jsStringToString(value) : value as string;
         arr = Array.from(s).map(internString);
+      }
+      // GetIterator: 非イテラブルは TypeError (spec)。配列は fast path で許可
+      if (!Array.isArray(arr)
+          && !(arr != null && (typeof (arr as any)[Symbol.iterator] === "function" || typeof (arr as any)?.["@@iterator"] === "function"))) {
+        throw new TypeError(`${destructureName(value)} is not iterable`);
       }
       for (let i = 0; i < pattern.elements.length; i++) {
         const el = pattern.elements[i];
