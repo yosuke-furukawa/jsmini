@@ -5,7 +5,9 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 47 でビルトイン歯抜け補充後): **TW 72.1% / VM 67.4% / JIT 66.7%**
+- test262 (Phase 48 で catch 分割パラメータ実装後): **TW 72.6% / VM 67.9% / JIT 67.2%**
+  (14,053 件実行、noStrict/module 520 件スキップ)
+  - Phase 47 時点は TW 72.1% / VM 67.4% / JIT 66.7% (TW +72 / VM +68 / JIT +68)
   (14,053 件実行、noStrict/module 520 件スキップ)
   - Phase 46 時点は TW 71.2% / VM 66.6% / JIT 65.9% (TW +125 / VM +118 / JIT +118)
   (14,053 件実行、noStrict/module 520 件スキップ)
@@ -32,7 +34,7 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 | D. 分割代入の TypeError (旧「プロパティ属性」) | ✅ **Phase 45 で主要部完了** (TW +267 / VM +92 / JIT +92) | 残 ~60 | — | dstr/オブジェクトモデル |
 | E. ビルトインのメソッド歯抜け | ✅ **Phase 47 で主要部完了** (TW +125 / VM +118 / JIT +118) | 残 ~130 | — | ビルトイン |
 | F. RegExp exec の結果プロパティ | ✅ **Phase 46 完了** (TW +241 / VM +234 / JIT +234) | — | — | RegExp |
-| G. try/catch 系のパース | "Identifier but got LeftBracket" (try 55) 等 | **~95** | 中 | パーサ |
+| G. try/catch 系のパース | ✅ **Phase 48 完了** (TW +72 / VM +68 / JIT +68) | — | — | パーサ |
 | H. `.constructor` の host 境界 | "!== gen/fn/cover/cls/arrow" 系 350 の一部 | 大 | 大 | 設計 |
 
 ---
@@ -97,12 +99,17 @@ checkSettledPromises を追加)。skip 2,114 → 520、実行数 12,459 → 14,0
 2,114 の隠れ skip を正直な実行に置き換えた結果 (絶対パス数は +134)。
 プロジェクト方針「canRun 廃止・正直に Fail」に沿う。
 
-### G. try/catch / その他パース (~95 件 + 関連)
+### G. try/catch / その他パース ✅ **Phase 48 で完了**
 
-"Identifier but got LeftBracket" の 55 件が try 系 = `catch ([e])` / `catch ({e})`
-の分割 catch パラメータ。B と同じ「分割パターンをパーサが許す場所を増やす」系。
-"RightParen but got Identifier" 112 件は Set/RegExp prototype テストで別要因
-(引数リストの何か) — 要調査。
+実装: CatchParameter を parseBindingPattern に拡張 (`catch ([a])` / `catch ({m})`)、
+`catch { }` (ES2019 optional catch binding) も受理。TW は bindPattern、VM は
+compileBindingTarget で展開。null の分割は Phase 45 の RequireObjectCoercible が効く。
+- 既知の近似: VM は catch 変数のシャドウ未実装 (識別子 catch も同じ)
+- 補足: "RightParen but got Identifier" 112 件の正体は **BigInt リテラル** (`1n`)
+  と判明 (Phase 47 の調査)。言語機能まるごとなので別フェーズ
+
+**残るパーサ系クラスタ (Phase 47 調査)**: パターン内の computed/リテラルキー
+(`{ [k]: x }` / `{ 1: x }`, ~142 件)、class static ブロック (~62 件)、BigInt (~112 件)
 
 ---
 
