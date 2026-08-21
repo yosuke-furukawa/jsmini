@@ -689,8 +689,19 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   PromiseConstructor.race = (promises: unknown[]) => JSPromise.race(promises);
   PromiseConstructor.allSettled = (promises: unknown[]) => JSPromise.allSettled(promises);
   PromiseConstructor.any = (promises: unknown[]) => JSPromise.any(promises);
-  PromiseConstructor.try = (fn: unknown, ...args: unknown[]) =>
-    JSPromise.try(isJSFunction(fn) ? (...a: unknown[]) => callJSFunctionSync(fn, undefined, a) : fn, ...args);
+  PromiseConstructor.try = (fn: unknown, ...args: unknown[]) => {
+    // fn は素の JSFunction のことも、汎用ラップ済み host 関数のこともある。
+    // どちらも ThrowSignal を投げうるので unwrap を挟む (executor と同じ規約)
+    if (!isJSFunction(fn) && typeof fn !== "function") return JSPromise.try(fn, ...args); // → TypeError reject
+    return JSPromise.try((...a: unknown[]) => {
+      try {
+        return isJSFunction(fn) ? callJSFunctionSync(fn, undefined, a) : (fn as Function)(...a);
+      } catch (e) {
+        const u = e instanceof ThrowSignal ? e.value : e;
+        throw isJSString(u) ? jsStringToString(u) : u;
+      }
+    }, ...args);
+  };
   PromiseConstructor.withResolvers = function(this: unknown) {
     if (this !== PromiseConstructor) {
       throw new TypeError("Promise.withResolvers called on non-Promise");

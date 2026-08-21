@@ -1023,8 +1023,9 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
         if (typeof executor === "function") {
           executor(resolve, reject);
         } else {
-          // BytecodeFunction / クロージャ
-          vm.callFunction(executor, undefined, [resolve, reject]);
+          // BytecodeFunction / クロージャ。boundary: executor 内の unhandled throw は
+          // ここの catch → reject に変換する (外側フレームを unwind させない)
+          vm.callFunction(executor, undefined, [resolve, reject], { boundary: true });
         }
       } catch (e: any) {
         const reason = e?.__thrown ? e.value : e;
@@ -1039,7 +1040,8 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   PromiseConstructor.allSettled = (promises: unknown[]) => JSPromise.allSettled(promises);
   PromiseConstructor.any = (promises: unknown[]) => JSPromise.any(promises);
   PromiseConstructor.try = (fn: unknown, ...args: unknown[]) =>
-    JSPromise.try(typeof fn === "function" ? fn : (...a: unknown[]) => vm.callFunction(fn, undefined, a), ...args);
+    JSPromise.try(typeof fn === "function" ? fn
+      : (...a: unknown[]) => vm.callFunction(fn, undefined, a, { boundary: true }), ...args);
   PromiseConstructor.withResolvers = function(this: unknown) {
     if (this !== PromiseConstructor) {
       throw new TypeError("Promise.withResolvers called on non-Promise");
@@ -1061,8 +1063,11 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     // BytecodeFunction / クロージャ → vm.callFunction
     return vm.callFunction(handler as any, undefined, [value]);
   });
-  // host-patches (getOrInsertComputed / @@replace 等) が VM クロージャを呼ぶフック
-  setClosureCaller((cb, args) => vm.callFunction(cb, undefined, args));
+  // host-patches (getOrInsertComputed / @@replace 等) が VM クロージャを呼ぶフック。
+  // boundary: コールバックの throw は host 例外として伝播し、run() の generic catch
+  // が外側の VM ハンドラに変換する (直接 unwind すると呼び出し中の host メソッドの
+  // 状態を飛び越してしまう)
+  setClosureCaller((cb, args) => vm.callFunction(cb, undefined, args, { boundary: true }));
 
   // eval: TW にフォールバック (VM のグローバル変数を TW env に注入)
   vm.setGlobal("eval", (code: unknown) => {

@@ -115,10 +115,13 @@ export class JSPromise {
     return this.then(undefined, onRejected);
   }
 
-  // Promise.prototype.finally: 値/理由を素通しし、onFinally の thenable を待つ
+  // Promise.prototype.finally: 値/理由を素通しし、onFinally の thenable を待つ。
+  // onFinally は VM ではクロージャで届くので runReaction と同じ _handlerCaller 経由で呼ぶ
   finally(onFinally?: (() => unknown) | undefined | null): JSPromise {
     if (!isCallable(onFinally)) return this.then(onFinally as any, onFinally as any);
-    const f = onFinally as () => unknown;
+    const f = () => _handlerCaller
+      ? _handlerCaller(onFinally as (v: unknown) => unknown, undefined)
+      : (onFinally as () => unknown)();
     return this.then(
       (v: unknown) => {
         const r = f();

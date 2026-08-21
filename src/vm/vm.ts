@@ -684,8 +684,13 @@ export class VM {
     return false;
   }
 
-  // jsmini 関数 (BytecodeFunction or クロージャ or ネイティブ) を呼ぶ汎用ヘルパー
-  callFunction(fn: unknown, thisValue: unknown, args: unknown[]): unknown {
+  // jsmini 関数 (BytecodeFunction or クロージャ or ネイティブ) を呼ぶ汎用ヘルパー。
+  // opts.boundary: 呼び出し内で unhandled throw が起きたとき、外側 VM フレームへ
+  // unwind せず host caller へ再 throw する (Promise executor / Promise.try /
+  // host-patches のコールバック等、host 側が try/catch で受けて rejection 等に
+  // 変換する呼び出し用)。従来の無指定は「外側の VM ハンドラまで unwind」で、
+  // getter/setter (opcode 文脈からの呼び出し) はそちらが正しい
+  callFunction(fn: unknown, thisValue: unknown, args: unknown[], opts?: { boundary?: boolean }): unknown {
     if (typeof fn === "function") {
       return (fn as Function).apply(thisValue, args);
     }
@@ -699,6 +704,12 @@ export class VM {
       try { this.run(base); } catch (e: any) {
         this.sp = saved;
         const tv = e?.__thrown ? e.value : e;
+        if (opts?.boundary) {
+          // run(base) 内で既に [base..] のハンドラは探索済み。外側フレームには
+          // 触らず、unwrap した値を host caller へ投げる (__thrown のまま投げると
+          // 外側の run() が処理済み扱いで素通しし、スクリプトが黙殺される)
+          throw e instanceof YieldSignal ? e : tv;
+        }
         if (this.unwindToHandler(tv)) return THROWN_SENTINEL;
         throw e;
       }
@@ -707,13 +718,15 @@ export class VM {
       return result;
     }
     if (typeof fn === "object" && fn !== null && "bytecode" in (fn as any)) {
-      return this.callInternal(fn as BytecodeFunction, thisValue, args);
+      // キャプチャなしの関数式は closure 包みでなく素の BytecodeFunction で届く
+      return this.callInternal(fn as BytecodeFunction, thisValue, args, opts);
     }
     throw new TypeError("Not a function");
   }
 
-  // BytecodeFunction を直接呼び出す (ToPrimitive, Promise handler 等の内部用)
-  private callInternal(func: BytecodeFunction, thisValue: unknown, args: unknown[]): unknown {
+  // BytecodeFunction を直接呼び出す (ToPrimitive, Promise handler 等の内部用)。
+  // opts.boundary は callFunction と同じ意味 (unhandled throw を host へ再 throw)
+  private callInternal(func: BytecodeFunction, thisValue: unknown, args: unknown[], opts?: { boundary?: boolean }): unknown {
     const locals = new Array(func.localCount).fill(undefined);
     if (func.hasRestParam) {
       const restIdx = func.paramCount - 1;
@@ -745,6 +758,10 @@ export class VM {
     } catch (e: any) {
       this.sp = savedSp;
       const throwValue = e?.__thrown ? e.value : e;
+      if (opts?.boundary) {
+        // 外側フレームへ unwind せず host caller へ (callFunction の boundary と同じ)
+        throw e instanceof YieldSignal ? e : throwValue;
+      }
       if (this.unwindToHandler(throwValue)) return THROWN_SENTINEL;
       throw e;
     }
