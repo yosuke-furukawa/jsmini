@@ -4,11 +4,12 @@ import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
 import { isJSString, jsStringToString, internString, createSeqString, arrayToPrimitiveString, joinElementToString, jsStringEquals, internMatchResult } from "./js-string.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getPropAttrs, setPropAttrs, preventObjExtensions, isObjExtensible, isAccessorDescriptor, createAccessorDescriptor, type PropAttrs } from "./js-object.js";
-import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_ASYNC_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
+import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_ASYNC_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG, SYMBOL_MATCH, SYMBOL_MATCH_ALL, SYMBOL_REPLACE, SYMBOL_SEARCH, SYMBOL_SPLIT } from "./js-symbol.js";
 import { Heap } from "./heap.js";
 import { evaluate } from "../interpreter/evaluator.js";
 import { JSPromise, drainMicrotasks, isJSPromise, setHandlerCaller } from "../runtime/promise.js";
 import "../runtime/host-patches.js";
+import { setClosureCaller } from "../runtime/host-patches.js";
 export { disassemble } from "./bytecode.js";
 
 type ConsoleOptions = {
@@ -796,6 +797,19 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return m;
   };
   MapCtor.prototype = Map.prototype;
+  // Map.groupBy (ES2024): callback は BytecodeFunction/クロージャで届く
+  MapCtor.groupBy = (items: unknown, cb: unknown) => {
+    const call = wrapVMCallback(cb);
+    const m = new Map<unknown, unknown[]>();
+    let i = 0;
+    for (const v of toHostIterable(items)) {
+      const key = call(v, i++);
+      let arr = m.get(key);
+      if (!arr) { arr = []; m.set(key, arr); }
+      arr.push(v);
+    }
+    return m;
+  };
   vm.setGlobal("Map", MapCtor);
 
   const SetCtor: any = function SetCtorFn(this: unknown, iterable?: unknown) {
@@ -852,6 +866,9 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     return f !== undefined ? new RegExp(p as any, f as any) : new RegExp(p as any);
   };
   RegExpCtor.prototype = RegExp.prototype;
+  // RegExp.escape (ES2025): host に委譲。非文字列は host が TypeError を投げる
+  RegExpCtor.escape = (s: unknown) =>
+    internString((RegExp as any).escape(isJSString(s) ? jsStringToString(s) : s));
   vm.setGlobal("RegExp", RegExpCtor);
 
   // String.prototype の RegExp 引数版を vm.stringPrototype に注入
@@ -985,6 +1002,11 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   SymbolFn.toPrimitive = SYMBOL_TO_PRIMITIVE;
   SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
+  SymbolFn.match = SYMBOL_MATCH;
+  SymbolFn.matchAll = SYMBOL_MATCH_ALL;
+  SymbolFn.replace = SYMBOL_REPLACE;
+  SymbolFn.search = SYMBOL_SEARCH;
+  SymbolFn.split = SYMBOL_SPLIT;
   vm.setGlobal("Symbol", SymbolFn);
 
   // Promise 組み込み
@@ -1016,6 +1038,8 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
   PromiseConstructor.race = (promises: unknown[]) => JSPromise.race(promises);
   PromiseConstructor.allSettled = (promises: unknown[]) => JSPromise.allSettled(promises);
   PromiseConstructor.any = (promises: unknown[]) => JSPromise.any(promises);
+  PromiseConstructor.try = (fn: unknown, ...args: unknown[]) =>
+    JSPromise.try(typeof fn === "function" ? fn : (...a: unknown[]) => vm.callFunction(fn, undefined, a), ...args);
   PromiseConstructor.withResolvers = function(this: unknown) {
     if (this !== PromiseConstructor) {
       throw new TypeError("Promise.withResolvers called on non-Promise");
@@ -1037,6 +1061,8 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     // BytecodeFunction / クロージャ → vm.callFunction
     return vm.callFunction(handler as any, undefined, [value]);
   });
+  // host-patches (getOrInsertComputed / @@replace 等) が VM クロージャを呼ぶフック
+  setClosureCaller((cb, args) => vm.callFunction(cb, undefined, args));
 
   // eval: TW にフォールバック (VM のグローバル変数を TW env に注入)
   vm.setGlobal("eval", (code: unknown) => {
