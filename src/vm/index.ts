@@ -614,11 +614,15 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
       }
       if (descHas(desc, "get")) {
         const g = descField(desc, "get");
-        hostDesc.get = typeof g === "function" ? g as () => unknown : function(this: unknown) { return vm.callFunction(g, this, []); };
+        // boundary: getter の throw は host 例外として伝播させる。boundary なしだと
+        // VM が先に unwind して host へ THROWN_SENTINEL が返り、host アルゴリズム
+        // (RegExp[Symbol.match] の flags 読み等) が sentinel を値として続行してしまう
+        // (get-global-err.js で無限マッチループ → OOM になった)
+        hostDesc.get = typeof g === "function" ? g as () => unknown : function(this: unknown) { return vm.callFunction(g, this, [], { boundary: true }); };
       }
       if (descHas(desc, "set")) {
         const st = descField(desc, "set");
-        hostDesc.set = typeof st === "function" ? st as (v: unknown) => void : function(this: unknown, v: unknown) { vm.callFunction(st, this, [v]); };
+        hostDesc.set = typeof st === "function" ? st as (v: unknown) => void : function(this: unknown, v: unknown) { vm.callFunction(st, this, [v], { boundary: true }); };
       }
       Object.defineProperty(obj, k, hostDesc);
     } else {
