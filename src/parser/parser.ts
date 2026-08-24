@@ -342,18 +342,23 @@ export function parse(source: string): Program {
     return { type: "ThrowStatement", argument };
   }
 
-  // TryStatement = 'try' Block ('catch' '(' Identifier ')' Block)? ('finally' Block)?
+  // TryStatement = 'try' Block ('catch' ('(' CatchParameter ')')? Block)? ('finally' Block)?
+  // CatchParameter = Identifier | BindingPattern (ES2019 optional catch binding 含む)
   function parseTryStatement(): Statement {
     eat("Try");
     const block = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
 
-    let handler: { type: "CatchClause"; param: { type: "Identifier"; name: string }; body: { type: "BlockStatement"; body: Statement[] } } | null = null;
+    let handler: { type: "CatchClause"; param: any; body: { type: "BlockStatement"; body: Statement[] } } | null = null;
     if (current().type === "Catch") {
       eat("Catch");
-      eat("LeftParen");
-      const param = parseIdentifier();
-      checkStrictBindingName(param.name);
-      eat("RightParen");
+      let param: any = null; // optional catch binding: catch { ... }
+      if (current().type === "LeftParen") {
+        eat("LeftParen");
+        param = parseBindingPattern();
+        if (param.type === "Identifier") checkStrictBindingName(param.name);
+        else checkStrictPattern(param);
+        eat("RightParen");
+      }
       const body = parseBlockStatement() as { type: "BlockStatement"; body: Statement[] };
       handler = { type: "CatchClause", param, body };
     }

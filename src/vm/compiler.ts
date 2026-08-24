@@ -991,19 +991,28 @@ class BytecodeCompiler {
         let catchVarSlot = -1;
         let catchVarName = "";
         if (stmt.handler) {
-          catchVarName = stmt.handler.param.name;
-          if (this.isFunction) {
-            catchVarSlot = this.declareLocal(catchVarName);
-          }
           // VM が例外値をスタックに push してここにジャンプする
-          // 例外値を catch 変数に格納
-          if (catchVarSlot >= 0) {
-            this.emit("StaLocal", catchVarSlot);
+          const cp = stmt.handler.param;
+          if (cp === null || cp === undefined) {
+            // optional catch binding: catch { ... } — 例外値を捨てる
+            this.emit("Pop");
+          } else if (cp.type === "Identifier") {
+            catchVarName = cp.name;
+            if (this.isFunction) {
+              catchVarSlot = this.declareLocal(catchVarName);
+            }
+            // 例外値を catch 変数に格納
+            if (catchVarSlot >= 0) {
+              this.emit("StaLocal", catchVarSlot);
+            } else {
+              const nameIdx = this.addConstant(catchVarName);
+              this.emit("StaGlobal", nameIdx);
+            }
+            this.emit("Pop");
           } else {
-            const nameIdx = this.addConstant(catchVarName);
-            this.emit("StaGlobal", nameIdx);
+            // 分割 catch パラメータ: catch ([a]) / catch ({message}) — [exc] を消費
+            this.compileBindingTarget(cp);
           }
-          this.emit("Pop");
           this.compileStatement(stmt.handler.body);
         }
         this.patch(jumpOverCatch, this.currentOffset());

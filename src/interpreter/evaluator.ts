@@ -1111,7 +1111,16 @@ function* evalStatement(stmt: Statement, env: Environment): Generator<unknown, u
 
         if (stmt.handler) {
           const catchEnv = new Environment(env);
-          catchEnv.define(stmt.handler.param.name, errorValue);
+          const cp = stmt.handler.param;
+          if (cp === null || cp === undefined) {
+            // optional catch binding: catch { ... }
+          } else if (cp.type === "Identifier") {
+            catchEnv.define(cp.name, errorValue);
+          } else {
+            // 分割 catch パラメータ: catch ([a]) / catch ({message})
+            bindPattern(cp, errorValue, catchEnv, "let",
+              (expr: any) => exhaustGen(evalExpression(expr, catchEnv)));
+          }
           try {
             result = yield* evalStatement(stmt.handler.body, catchEnv);
           } catch (catchError) {
