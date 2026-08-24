@@ -5,7 +5,8 @@ jsmini の「できていないこと」の台帳。正しさの基準は **node
 
 ## 現状サマリ (2026-07-28, Phase 43 時点)
 
-- test262: **TW 72.6% / VM 67.9% / JIT 67.2%** (14,053 件実行、noStrict/module 520 件スキップ)
+- test262: **TW 72.6% / VM 67.9% / JIT 67.5%** (14,053 件実行、noStrict/module 520 件スキップ)
+  — Phase 49 で JIT の非プリミティブ定数/async/undefined return の誤コンパイルを修正。VM/JIT 差分 96→15
   — Phase 43 で yield* 委譲 (sync/async、GetMethod 意味論) + Symbol.asyncIterator +
   TW の Symbol キー defineProperty 修正。TW +320 / VM +282 / JIT +278
   — Phase 42 で class private # の全ポジション (メソッド/static/getter/setter/

@@ -65,6 +65,45 @@ function classifyBoolReturns(func: BytecodeFunction): "none" | "bool" | "mixed" 
   }
   return sawBool ? (sawOther ? "mixed" : "bool") : "none";
 }
+
+// Return がリテラル undefined/null になりうる関数を検出する (bytecode 静的解析)。
+// legacy direct パス (wasm-compiler.ts, useIR=false — 現在のデフォルト、実質
+// 唯一使われているパス) は tagged 値モデルを一切持たない純粋な数値コンパイラで、
+// undefined/null は単に i32 の 0/1 として emit され、呼び出し元に生の数値として
+// 漏れる (Phase 49 で発覚: 暗黙の undefined return や素の `return;` の typeof が
+// JIT だけ "number" になっていた)。IR パス (useIR=true, 明示オプトインのみ) は
+// 別課題として未対応のまま — 同じタグ付け機構の不足は codegen.ts 側にも残っている
+// (this.foo を一切使わない関数の resultTagged 検出が taggedProps.size>0 の中に
+// 閉じ込められている)。feedback (fb.returnTypes) が空の早期コンパイル
+// (threshold=1 等、まだ一度も実行されていない関数) には feedback ベースの
+// チェックが効かないため、bytecode を直接見て安全側に倒す。
+// 検出対象は Return の直前が LdaUndefined / LdaNull の場合のみ (リテラルの
+// 直接 return、暗黙エピローグ、素の `return;`)。パラメータ由来の間接的な
+// undefined (`function f(x){return x}` を引数無しで呼ぶ等) は対象外 —
+// 配列/ループカウンタ等の「常に補われる」パラメータを返す一般的な JIT
+// カーネルまで広く弾いてしまう (最初の実装でベンチ系テスト 27 件が退行した)。
+// そちらは feedback.returnTypes ベースのチェック (下記) が warm-up 後に捕まえる
+function bytecodeMayReturnNullish(func: BytecodeFunction): boolean {
+  const bc = func.bytecode;
+  // Array.prototype の拡張メソッドを使わない (test262 が host Array.prototype
+  // を汎用に汚染するケースがある)。classifyBoolReturns と同じ index-for に統一
+  let returnCount = 0;
+  for (let i = 0; i < bc.length; i++) if (bc[i].op === "Return") returnCount++;
+  const lastIdx = bc.length - 1;
+  for (let i = 1; i < bc.length; i++) {
+    if (bc[i].op !== "Return") continue;
+    const prevOp = bc[i - 1].op;
+    if (prevOp !== "LdaUndefined" && prevOp !== "LdaNull") continue;
+    // 関数末尾には常にコンパイラが暗黙エピローグ (LdaUndefined; Return) を
+    // 付け足す (classifyBoolReturns と同じ既知の性質)。他に到達可能な
+    // Return が既にある場合、末尾のそれは死コードなので誤検出になる —
+    // 唯一の Return (= 本当に return 文が無い/素の `return;` だけの関数)
+    // のときだけ末尾も対象にする
+    if (i === lastIdx && returnCount > 1) continue;
+    return true;
+  }
+  return false;
+}
 // ネストアクセス import が「VM に返すべき状況」(数値の deref 等) を検出した
 // ときに投げる sentinel。executeWasm が捕まえて deopt → VM 再実行する
 // (ネスト load は純粋読みで write-back 前なので再実行は安全)
@@ -223,6 +262,35 @@ export class JitManager {
       return null;
     }
 
+    // LdaConst が非プリミティブ定数 (ネスト関数宣言/クラス式/正規表現リテラル
+    // 等の BytecodeFunction/Object) を積む関数は JIT 未対応。tagged/object-table
+    // 機構は this.foo の LoadProperty からしか taggedValues に種を撒かないため
+    // (codegen.ts の taggedValues 伝播参照)、Const ノードの非数値定数は
+    // 素通りして i32ToLEB128(obj|0) = 0 に潰れる。結果、戻り値としてこの定数を
+    // 返す関数は typeof が "number" になる (Phase 49 で発覚: ネスト関数を返す
+    // 関数が "Not a function" になっていた)。誤コンパイルする前に VM 行きを確定する
+    if (func.bytecode.some(i => i.op === "LdaConst"
+        && typeof func.constants[i.operand!] === "object" && func.constants[i.operand!] !== null)) {
+      this.wasmCache.set(func, null);
+      (func as { __jitCached?: CachedWasm | null }).__jitCached = null;
+      this.logTier(func, "Bytecode VM (non-primitive constant)", callCount);
+      return null;
+    }
+
+    // async 関数: JSPI (WebAssembly.promising) が使える環境でしか Promise
+    // ラップを維持したままコンパイルできない。現行 Node は未対応 (typeof
+    // WebAssembly.promising !== "function") なので、await の有無に関わらず
+    // 「本体をただの数値関数として実行し Promise ラップを丸ごと落とす」
+    // 誤コンパイルになっていた (Phase 49 で発覚: async function の戻り値の
+    // typeof が最初の呼び出しから毎回 "number" になり、外側の .then() が
+    // "Not a function" で落ちる)。JSPI が無い環境では常に VM 行きにする
+    if (func.isAsync && typeof (WebAssembly as any).promising !== "function") {
+      this.wasmCache.set(func, null);
+      (func as { __jitCached?: CachedWasm | null }).__jitCached = null;
+      this.logTier(func, "Bytecode VM (async, JSPI unavailable)", callCount);
+      return null;
+    }
+
     const wasmArgTypes = this.feedback.getWasmArgTypes(func);
     if (!wasmArgTypes) {
       this.wasmCache.set(func, null);
@@ -276,6 +344,19 @@ export class JitManager {
         //  JIT になっていた)。this 関数は IR パス専用にする
         // i32 で失敗したら f64 でリトライ (引数は i32 でも本体に 1e10 のような
         // i32 非表現定数があると i32 spec ではコンパイルできない)
+        //
+        // direct パス (wasm-compiler.ts) は tagged 値モデルを一切持たない
+        // 純粋な数値コンパイラなので、undefined/null を単に i32 0/1 として
+        // emit してしまう (this/array 引数を持つ関数はこの分岐に来ないので
+        // 対象外)。Return フィードバックがまだ空の早期コンパイル (threshold=1
+        // 等) は bytecode 静的解析で直接検出する (Phase 49 で発覚: 暗黙
+        // undefined return の typeof が JIT だけ "number" になっていた)
+        if (fb.returnTypes.some(t => t === "undefined" || t === "null") || bytecodeMayReturnNullish(func)) {
+          this.wasmCache.set(func, null);
+          (func as { __jitCached?: CachedWasm | null }).__jitCached = null;
+          this.logTier(func, "Bytecode VM (may return undefined/null)", callCount);
+          return null;
+        }
         let usedSpec = spec;
         let wasmFn = compileToWasmSync(func, spec);
         if (!wasmFn && spec === "i32") {
