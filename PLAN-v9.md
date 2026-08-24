@@ -5,7 +5,9 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 46 で RegExp exec/match 結果整形後): **TW 71.2% / VM 66.6% / JIT 65.9%**
+- test262 (Phase 47 でビルトイン歯抜け補充後): **TW 72.1% / VM 67.4% / JIT 66.7%**
+  (14,053 件実行、noStrict/module 520 件スキップ)
+  - Phase 46 時点は TW 71.2% / VM 66.6% / JIT 65.9% (TW +125 / VM +118 / JIT +118)
   (14,053 件実行、noStrict/module 520 件スキップ)
   - Phase 45 時点は TW 69.5% / VM 64.9% / JIT 64.2% (TW +241 / VM +234 / JIT +234)
   - Phase 44 時点は TW 67.6% / VM 64.3% / JIT 63.6% (TW +267 / VM +92 / JIT +92)
@@ -28,7 +30,7 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 | C. async テストの `$DONE` ランナー対応 | ✅ **Phase 40 完了** (skip 2,114→520、+173 pass) | — | — | テストインフラ |
 | C2. async generator (`async *m`, `for await`) | ✅ **Phase 41 完了** (TW +535 / VM +487 / JIT +487) | — | — | 言語機能 |
 | D. 分割代入の TypeError (旧「プロパティ属性」) | ✅ **Phase 45 で主要部完了** (TW +267 / VM +92 / JIT +92) | 残 ~60 | — | dstr/オブジェクトモデル |
-| E. ビルトインのメソッド歯抜け | "Not a function" | **241** | 大 (件数分散) | ビルトイン |
+| E. ビルトインのメソッド歯抜け | ✅ **Phase 47 で主要部完了** (TW +125 / VM +118 / JIT +118) | 残 ~130 | — | ビルトイン |
 | F. RegExp exec の結果プロパティ | ✅ **Phase 46 完了** (TW +241 / VM +234 / JIT +234) | — | — | RegExp |
 | G. try/catch 系のパース | "Identifier but got LeftBracket" (try 55) 等 | **~95** | 中 | パーサ |
 | H. `.constructor` の host 境界 | "!== gen/fn/cover/cls/arrow" 系 350 の一部 | 大 | 大 | 設計 |
@@ -122,11 +124,22 @@ checkSettledPromises を追加)。skip 2,114 → 520、実行数 12,459 → 14,0
 - 旧記述の属性モデル系 (少数): 名前推論の `name.value` 不一致、
   JIT StoreProperty の attrs 素通り、非拡張 defineProperty のエッジ
 
-### E. ビルトインのメソッド歯抜け (241 件)
+### E. ビルトインのメソッド歯抜け ✅ **Phase 47 で主要部完了**
 
-"Not a function" 241 件。ES2025 系 (`Map.prototype.getOrInsertComputed` 等) や
-TypedArray/ArrayBuffer 系、String/Array の未実装メソッド。
-- 件数は多いが 1 メソッド = 数件で分散。ROI は「よく使われる順」に実装
+「Not a function」376 件を再集計した結果、分散ではなく集中クラスタだった:
+- **RegExp well-known symbol メソッド 136 件** — Symbol.match/matchAll/replace/
+  search/split を追加し、RegExp.prototype に "@@..." 委譲メソッド (host-patches)
+- Map.groupBy / Map・WeakMap getOrInsert(Computed) / RegExp.escape /
+  Promise.prototype.finally / Promise.try
+- 副産物の重要バグ修正 2 件:
+  1. VM の Promise executor / host コールバック内 unhandled throw が外側フレームを
+     全 unwind してスクリプトの残りを黙殺 (callFunction/callInternal に boundary モード)
+  2. throw する getter を仕込んだ host アルゴリズム (RegExp[Symbol.match]) が
+     THROWN_SENTINEL を値として続行し無限ループ → OOM で node ごとクラッシュ
+     (defineProperty の getter/setter ラッパを boundary に)
+
+**残り (~130 件)**: lang 系の雑多な iterator close エッジ (~80)、既存メソッドの
+意味論差 (Promise.all の反復エラー処理等)、Set 演算の JSString 境界少数
 
 ### F. RegExp exec の結果プロパティ ✅ **Phase 46 で完了**
 

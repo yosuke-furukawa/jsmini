@@ -6,6 +6,26 @@ import { isJSString, jsStringToString, internString, internMatchResult } from ".
 
 const PATCHED = Symbol.for("jsmini.host-patches.applied");
 
+// VM のクロージャ (BytecodeFunction / __closure) は host から直接呼べないため、
+// 呼び出し方を VM 側から登録してもらう (vmEvaluate 初期化時。promise.ts の
+// setHandlerCaller と同じパターン)。TW の JSFunction は汎用ラップで host callable
+// になって届くのでこのフックは不要。
+// フックはグローバル共有 (Symbol.for) — 本モジュールは PATCHED ガードで最初の
+// 1 インスタンスしかパッチしないため、モジュール複製時もフックを見失わないように
+const CALLER_KEY = Symbol.for("jsmini.host-patches.closureCaller");
+export function setClosureCaller(fn: (cb: unknown, args: unknown[]) => unknown): void {
+  (globalThis as any)[CALLER_KEY] = fn;
+}
+const isEngineClosure = (v: unknown): boolean =>
+  typeof v === "object" && v !== null && ("__closure" in v || ("bytecode" in v && "paramCount" in v));
+// jsmini の callable (host 関数 / VM クロージャ) を host から呼べる形に。callable でなければ null
+function toHostCallable(v: unknown): ((...a: unknown[]) => unknown) | null {
+  if (typeof v === "function") return v as (...a: unknown[]) => unknown;
+  const caller = (globalThis as any)[CALLER_KEY];
+  if (isEngineClosure(v) && caller) return (...a: unknown[]) => caller(v, a);
+  return null;
+}
+
 if (!(globalThis as any)[PATCHED]) {
   (globalThis as any)[PATCHED] = true;
 
@@ -39,4 +59,65 @@ if (!(globalThis as any)[PATCHED]) {
   // Map.prototype.forEach / Set.prototype.forEach: BytecodeFunction を wrap する側は
   // VM 側で動的に必要なので、wrap helper を渡せる仕組みは vm/index.ts 側に残す。
   // ここではそのフックを後付けできる形で。
+
+  // --- RegExp well-known symbol メソッド (Phase 47) ---
+  // jsmini は Symbol キーを "@@name" 文字列に写像するため、`re[Symbol.replace](...)`
+  // は host RegExp の "@@replace" 文字列プロパティ読みになる。host の Symbol 実体
+  // メソッドへ委譲する薄いラッパを RegExp.prototype に文字列キーで生やす。
+  // 文字列境界: 引数の JSString は unwrap、結果の host string は intern。
+  // コールバック (関数 replacement) は両エンジンの汎用ラップ済み host callable で
+  // 届くが、引数 intern / 戻り値 unwrap はしてくれないのでここで行う
+  const toHostStr = (s: unknown): string => isJSString(s) ? jsStringToString(s) : String(s);
+  const symMatch = RegExp.prototype[Symbol.match];
+  const symMatchAll = RegExp.prototype[Symbol.matchAll];
+  const symReplace = RegExp.prototype[Symbol.replace];
+  const symSearch = RegExp.prototype[Symbol.search];
+  const symSplit = RegExp.prototype[Symbol.split];
+  const rp = RegExp.prototype as unknown as Record<string, unknown>;
+  rp["@@match"] = function(this: RegExp, s: unknown) {
+    const m = symMatch.call(this, toHostStr(s));
+    return m === null ? null : internMatchResult(m);
+  };
+  rp["@@matchAll"] = function(this: RegExp, s: unknown) {
+    // イテレータではなく配列で近似 (vm.stringPrototype.matchAll と同じ方針)
+    const out: unknown[] = [];
+    for (const m of symMatchAll.call(this, toHostStr(s))) out.push(internMatchResult(m));
+    return out;
+  };
+  rp["@@search"] = function(this: RegExp, s: unknown) {
+    return symSearch.call(this, toHostStr(s));
+  };
+  rp["@@split"] = function(this: RegExp, s: unknown, limit?: unknown) {
+    const r = symSplit.call(this, toHostStr(s), limit as number | undefined);
+    return r.map(v => typeof v === "string" ? internString(v) : v);
+  };
+  rp["@@replace"] = function(this: RegExp, s: unknown, repl: unknown) {
+    const cb = toHostCallable(repl);
+    if (cb) {
+      const out = symReplace.call(this, toHostStr(s), (...args: unknown[]) => {
+        const r = cb(...args.map(a => typeof a === "string" ? internString(a) : a));
+        return isJSString(r) ? jsStringToString(r) : String(r);
+      });
+      return internString(out);
+    }
+    return internString(symReplace.call(this, toHostStr(s), toHostStr(repl)));
+  };
+
+  // --- Map/WeakMap の getOrInsert / getOrInsertComputed (ES2026 upsert 提案) ---
+  // host にはまだ無いので手実装。callback は wrap 済み host callable で届く
+  const defineUpsert = (proto: Map<unknown, unknown> | WeakMap<object, unknown>) => {
+    const p = proto as unknown as Record<string, unknown>;
+    p.getOrInsert = function(this: Map<unknown, unknown>, k: unknown, v: unknown) {
+      if (!this.has(k)) this.set(k, v);
+      return this.get(k);
+    };
+    p.getOrInsertComputed = function(this: Map<unknown, unknown>, k: unknown, cb: unknown) {
+      const call = toHostCallable(cb);
+      if (!call) throw new TypeError("callbackfn is not a function");
+      if (!this.has(k)) this.set(k, call(k));
+      return this.get(k);
+    };
+  };
+  defineUpsert(Map.prototype as Map<unknown, unknown>);
+  defineUpsert(WeakMap.prototype as unknown as WeakMap<object, unknown>);
 }

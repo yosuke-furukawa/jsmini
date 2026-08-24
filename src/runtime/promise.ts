@@ -115,6 +115,41 @@ export class JSPromise {
     return this.then(undefined, onRejected);
   }
 
+  // Promise.prototype.finally: 値/理由を素通しし、onFinally の thenable を待つ。
+  // onFinally は VM ではクロージャで届くので runReaction と同じ _handlerCaller 経由で呼ぶ
+  finally(onFinally?: (() => unknown) | undefined | null): JSPromise {
+    if (!isCallable(onFinally)) return this.then(onFinally as any, onFinally as any);
+    const f = () => _handlerCaller
+      ? _handlerCaller(onFinally as (v: unknown) => unknown, undefined)
+      : (onFinally as () => unknown)();
+    return this.then(
+      (v: unknown) => {
+        const r = f();
+        return r instanceof JSPromise ? r.then(() => v) : v;
+      },
+      (e: unknown) => {
+        const r = f();
+        if (r instanceof JSPromise) return r.then(() => { throw e; });
+        throw e;
+      },
+    );
+  }
+
+  // Promise.try: 同期例外も rejection に変換して開始
+  static try(fn: unknown, ...args: unknown[]): JSPromise {
+    const p = new JSPromise();
+    if (typeof fn !== "function") {
+      (p as any)._reject(new TypeError("Promise.try requires a callable"));
+      return p;
+    }
+    try {
+      (p as any)._resolve((fn as Function)(...args));
+    } catch (e) {
+      (p as any)._reject(e);
+    }
+    return p;
+  }
+
   // Promise.resolve
   static resolve(value: unknown): JSPromise {
     if (value instanceof JSPromise) return value;

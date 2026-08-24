@@ -733,7 +733,9 @@ let skip = 0;
 const failures: TestResult[] = [];
 const skipReasons: Record<string, number> = {};
 
+const traceTests = process.env.TRACE_TESTS === "1";
 for (const testFile of allTests) {
+  if (traceTests) process.stderr.write(`RUN ${testFile}\n`);
   const result = runTest(testFile);
   if (result.status === "pass") pass++;
   else if (result.status === "skip") {

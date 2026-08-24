@@ -9,7 +9,7 @@ import {
   collectBoundNames, bindPattern, assignPattern, destructureName,
 } from "./values.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, joinElementToString, toNumericOperand, internMatchResult, type JSString } from "../vm/js-string.js";
-import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_ASYNC_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "../vm/js-symbol.js";
+import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_ASYNC_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG, SYMBOL_MATCH, SYMBOL_MATCH_ALL, SYMBOL_REPLACE, SYMBOL_SEARCH, SYMBOL_SPLIT } from "../vm/js-symbol.js";
 import { JSPromise, drainMicrotasks, isJSPromise } from "../runtime/promise.js";
 import "../runtime/host-patches.js";
 
@@ -381,6 +381,21 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     return m;
   };
   twMapCtor.prototype = Map.prototype;
+  // Map.groupBy (ES2024): callback は JSFunction で届く
+  twMapCtor.groupBy = (items: unknown, cb: unknown) => {
+    const call = isJSFunction(cb) ? (v: unknown, i: number) => callJSFunctionSync(cb, undefined, [v, i])
+      : typeof cb === "function" ? (v: unknown, i: number) => (cb as Function)(v, i)
+      : (() => { throw new TypeError("callbackfn is not a function"); })();
+    const m = new Map<unknown, unknown[]>();
+    let i = 0;
+    for (const v of twToHostIterable(items)) {
+      const key = call(v, i++);
+      let arr = m.get(key);
+      if (!arr) { arr = []; m.set(key, arr); }
+      arr.push(v);
+    }
+    return m;
+  };
   env.defineReadOnly("Map", twMapCtor);
 
   const twSetCtor: any = function(this: unknown, iterable?: unknown) {
@@ -437,6 +452,9 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
     return f !== undefined ? new RegExp(p as any, f as any) : new RegExp(p as any);
   };
   twRegExpCtor.prototype = RegExp.prototype;
+  // RegExp.escape (ES2025): host に委譲。非文字列は host が TypeError を投げる
+  twRegExpCtor.escape = (s: unknown) =>
+    internString((RegExp as any).escape(isJSString(s) ? jsStringToString(s) : s));
   env.defineReadOnly("RegExp", twRegExpCtor);
 
   // Object
@@ -640,6 +658,11 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   SymbolFn.toPrimitive = SYMBOL_TO_PRIMITIVE;
   SymbolFn.hasInstance = SYMBOL_HAS_INSTANCE;
   SymbolFn.toStringTag = SYMBOL_TO_STRING_TAG;
+  SymbolFn.match = SYMBOL_MATCH;
+  SymbolFn.matchAll = SYMBOL_MATCH_ALL;
+  SymbolFn.replace = SYMBOL_REPLACE;
+  SymbolFn.search = SYMBOL_SEARCH;
+  SymbolFn.split = SYMBOL_SPLIT;
   env.defineReadOnly("Symbol", SymbolFn);
 
   // Promise 組み込み
@@ -666,6 +689,19 @@ export function evaluate(source: string, opts?: ConsoleOptions | EvalOptions): u
   PromiseConstructor.race = (promises: unknown[]) => JSPromise.race(promises);
   PromiseConstructor.allSettled = (promises: unknown[]) => JSPromise.allSettled(promises);
   PromiseConstructor.any = (promises: unknown[]) => JSPromise.any(promises);
+  PromiseConstructor.try = (fn: unknown, ...args: unknown[]) => {
+    // fn は素の JSFunction のことも、汎用ラップ済み host 関数のこともある。
+    // どちらも ThrowSignal を投げうるので unwrap を挟む (executor と同じ規約)
+    if (!isJSFunction(fn) && typeof fn !== "function") return JSPromise.try(fn, ...args); // → TypeError reject
+    return JSPromise.try((...a: unknown[]) => {
+      try {
+        return isJSFunction(fn) ? callJSFunctionSync(fn, undefined, a) : (fn as Function)(...a);
+      } catch (e) {
+        const u = e instanceof ThrowSignal ? e.value : e;
+        throw isJSString(u) ? jsStringToString(u) : u;
+      }
+    }, ...args);
+  };
   PromiseConstructor.withResolvers = function(this: unknown) {
     if (this !== PromiseConstructor) {
       throw new TypeError("Promise.withResolvers called on non-Promise");
@@ -2190,8 +2226,8 @@ function* evalCallExpression(
     const key = yield* resolveMemberKey(expr.callee, env);
     fn = getProperty(thisValue as JSObject, key);
     // JSPromise: getProperty が native then/catch を返すので、JSFunction handler をラップ
-    if (isJSPromise(thisValue) && (key === "then" || key === "catch") && typeof fn === "function") {
-      // JSPromise.then/catch with JSFunction handler wrapping
+    if (isJSPromise(thisValue) && (key === "then" || key === "catch" || key === "finally") && typeof fn === "function") {
+      // JSPromise.then/catch/finally with JSFunction handler wrapping
       const nativeFn = fn as Function;
       const callArgs = yield* evalArguments(expr.arguments, env);
       const wrapHandler = (h: unknown) => {
@@ -2207,6 +2243,8 @@ function* evalCallExpression(
       };
       if (key === "then") {
         return (thisValue as JSPromise).then(wrapHandler(callArgs[0]), wrapHandler(callArgs[1]));
+      } else if (key === "finally") {
+        return (thisValue as JSPromise).finally(wrapHandler(callArgs[0]) as (() => unknown) | undefined);
       } else {
         return (thisValue as JSPromise).catch(wrapHandler(callArgs[0]));
       }
