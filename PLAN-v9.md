@@ -5,8 +5,9 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 45 で分割代入の TypeError 精緻化後): **TW 69.5% / VM 64.9% / JIT 64.2%**
+- test262 (Phase 46 で RegExp exec/match 結果整形後): **TW 71.2% / VM 66.6% / JIT 65.9%**
   (14,053 件実行、noStrict/module 520 件スキップ)
+  - Phase 45 時点は TW 69.5% / VM 64.9% / JIT 64.2% (TW +241 / VM +234 / JIT +234)
   - Phase 44 時点は TW 67.6% / VM 64.3% / JIT 63.6% (TW +267 / VM +92 / JIT +92)
   - Phase 43 時点は TW 66.4% / VM 63.0% / JIT 62.3% (TW +171 / VM +178 / JIT +180)
   - Phase 39 時点 (async skip) は TW 63.4% / VM 60.3% / JIT 60.1%
@@ -28,7 +29,7 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 | C2. async generator (`async *m`, `for await`) | ✅ **Phase 41 完了** (TW +535 / VM +487 / JIT +487) | — | — | 言語機能 |
 | D. 分割代入の TypeError (旧「プロパティ属性」) | ✅ **Phase 45 で主要部完了** (TW +267 / VM +92 / JIT +92) | 残 ~60 | — | dstr/オブジェクトモデル |
 | E. ビルトインのメソッド歯抜け | "Not a function" | **241** | 大 (件数分散) | ビルトイン |
-| F. RegExp exec の結果プロパティ | "__executed.input is expected" | **210** | 中 | RegExp |
+| F. RegExp exec の結果プロパティ | ✅ **Phase 46 完了** (TW +241 / VM +234 / JIT +234) | — | — | RegExp |
 | G. try/catch 系のパース | "Identifier but got LeftBracket" (try 55) 等 | **~95** | 中 | パーサ |
 | H. `.constructor` の host 境界 | "!== gen/fn/cover/cls/arrow" 系 350 の一部 | 大 | 大 | 設計 |
 
@@ -127,11 +128,16 @@ checkSettledPromises を追加)。skip 2,114 → 520、実行数 12,459 → 14,0
 TypedArray/ArrayBuffer 系、String/Array の未実装メソッド。
 - 件数は多いが 1 メソッド = 数件で分散。ROI は「よく使われる順」に実装
 
-### F. RegExp exec の結果プロパティ (210 件)
+### F. RegExp exec の結果プロパティ ✅ **Phase 46 で完了**
 
-"__executed.input is expected to equal" = exec の結果オブジェクトの
-`input`/`index`/`groups` 等が host RegExp 委譲で欠けている。
-- exec 結果を jsmini 側で input/index/groups 付きに整形
+原因は「欠け」ではなく **host string と JSString の intern 同一性**: exec 結果の
+要素/input/groups が host string のままで `===` が false になっていた。実装:
+- js-string.ts の internMatchResult で in place 整形 (index 等の own プロパティ保持)
+- host-patches の exec は「引数が JSString = jsmini 呼び出し」のときだけ整形。
+  host 内部呼び出し (String.prototype.replace → exec) は raw のまま
+- VM match/matchAll、TW の文字列メソッド委譲も同ヘルパーに統一
+- おまけ: TW の replace(/re/, fn) コールバック戻り値が unwrap されず
+  "[object Object]" になる既存バグも修正
 
 ### H. `.constructor` の host 境界 (設計課題・大)
 
@@ -189,12 +195,14 @@ length/charAt/slice/index がバイト単位。非 ASCII で `.length` がずれ
    +173 pass。以降は下記の可視化された async ギャップを潰していく
 2. ~~**A. class private `#`**~~ — ✅ **Phase 42 完了** (Unicode 識別子含む)。
    TW +442 / VM +433 / JIT +383
-3. **B + G. 分割代入 LHS のパース拡大** (for-of/for-in/catch) — ~285 件、
-   bindPattern は既存なのでパーサ改修が主
+3. ~~**B. 分割代入 LHS のパース拡大** (for-of/for-in)~~ — ✅ **Phase 44 完了**。
+   ~~**D. 分割代入の TypeError**~~ — ✅ **Phase 45 で主要部完了**。
+   残: パターン内の computed/リテラルキー (`{ [k]: x }` / `{ 1: x }`, ~142 件) と
+   catch 句の分割 (G の一部)
 4. ~~**C2. async generator**~~ — ✅ **Phase 41 完了**。パーサ + TW + VM に実装し
    TW +535 / VM +487 / JIT +487。残る制約: VM は中断点への例外注入
    (await 拒否を body の try/catch に届ける) が未対応
-5. **F. RegExp exec 結果プロパティ** — 210 件、局所的
+5. ~~**F. RegExp exec 結果プロパティ**~~ — ✅ **Phase 46 完了** (TW +241 / VM +234 / JIT +234)
 6. **D/E** — 属性精緻化・ビルトイン歯抜けは件数分散なので中長期
 7. **I. JSString UTF-16 化** と **H. .constructor** は大改修、優先度低
 8. 並行して **Part 5** (oracle node / dstr 横展開) で品質の底上げ

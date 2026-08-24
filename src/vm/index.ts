@@ -2,7 +2,7 @@ import { compile } from "./compiler.js";
 import { VM } from "./vm.js";
 import { FeedbackCollector } from "../jit/feedback.js";
 import { JitManager } from "../jit/jit.js";
-import { isJSString, jsStringToString, internString, createSeqString, arrayToPrimitiveString, joinElementToString, jsStringEquals } from "./js-string.js";
+import { isJSString, jsStringToString, internString, createSeqString, arrayToPrimitiveString, joinElementToString, jsStringEquals, internMatchResult } from "./js-string.js";
 import { createJSObject, isJSObject, getProperty as jsObjGet, setProperty as jsObjSet, getHiddenClass, getPropAttrs, setPropAttrs, preventObjExtensions, isObjExtensible, isAccessorDescriptor, createAccessorDescriptor, type PropAttrs } from "./js-object.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_ASYNC_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG } from "./js-symbol.js";
 import { Heap } from "./heap.js";
@@ -862,8 +862,8 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re));
     const m = s.match(r);
     if (!m) return null;
-    for (let i = 0; i < m.length; i++) if (typeof m[i] === "string") m[i] = internString(m[i]) as any;
-    return m;
+    // g フラグなしは exec 相当 → input/groups も intern。g フラグありは文字列配列
+    return internMatchResult(m);
   };
   vm.stringPrototype.search = function(this: unknown, re: unknown) {
     const s = isJSString(this) ? jsStringToString(this) : String(this);
@@ -875,9 +875,7 @@ export function vmEvaluate(source: string, opts?: ConsoleOptions | VMOptions): u
     const r = re instanceof RegExp ? re : new RegExp(isJSString(re) ? jsStringToString(re) : String(re), "g");
     const arr: unknown[][] = [];
     for (const m of s.matchAll(r)) {
-      const row: unknown[] = [];
-      for (let i = 0; i < m.length; i++) row.push(typeof m[i] === "string" ? internString(m[i]) : m[i]);
-      arr.push(row);
+      arr.push(internMatchResult(m)); // index/input/groups を保持したまま intern
     }
     return arr; // host Array of arrays (iterator のかわりに配列で代替)
   };

@@ -274,3 +274,24 @@ export function toNumericOperand(v: unknown): number {
   if (isJSString(v)) return Number(jsStringToString(v));
   return v as number;
 }
+
+// RegExp exec/match 結果の jsmini 整形 (in place): 要素・input・groups の
+// host string を internString する。index/その他の own プロパティは保持。
+// host 内部 (String.prototype.replace 等) に渡る結果には使わないこと —
+// host engine は host string を期待する (host-patches.ts の注意書き参照)
+export function internMatchResult(m: RegExpMatchArray): unknown[] {
+  const arr = m as unknown as Record<string, unknown> & unknown[];
+  for (let i = 0; i < arr.length; i++) {
+    if (typeof arr[i] === "string") arr[i] = internString(arr[i] as string);
+  }
+  if (typeof arr.input === "string") arr.input = internString(arr.input);
+  if (arr.groups) {
+    const g: Record<string, unknown> = {};
+    for (const k of Object.keys(arr.groups)) {
+      const v = (arr.groups as Record<string, unknown>)[k];
+      g[k] = typeof v === "string" ? internString(v) : v;
+    }
+    arr.groups = g;
+  }
+  return arr;
+}
