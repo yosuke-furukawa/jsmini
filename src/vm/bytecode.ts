@@ -25,6 +25,7 @@ export type Opcode =
   | "UShiftRight"     // pop 2つ、右シフト(符号なし)
   | "IsNullish"       // pop 1つ、null/undefined なら true を push
   | "RequireCoercible" // peek、null/undefined なら TypeError (スタック不変)。分割代入の RequireObjectCoercible
+  | "GeneratorPrologueEnd" // generator 専用: パラメータ束縛 prologue の終端マーカ。生成時の同期実行 (runGeneratorPrologue) はここでフレームを抜ける。通常実行では no-op
   | "Negate"          // pop 1つ、符号反転して push
 
   // 比較
@@ -164,7 +165,7 @@ export type BytecodeFunction = {
   hasRestParam?: boolean;  // 最後のパラメータが ...rest
   isGenerator?: boolean;   // function* で定義されたか
   isAsync?: boolean;       // async function で定義されたか
-  paramShapes?: unknown[]; // generator のみ: 呼び出し時のパラメータパターン検証シェイプ (compiler.buildParamShape)
+  prologueEnd?: number;   // generator のみ: GeneratorPrologueEnd の pc。生成時に [0, prologueEnd] を同期実行し、本体は prologueEnd+1 から再開する
   bytecode: Instruction[];
   constants: unknown[];
   handlers: ExceptionHandler[];

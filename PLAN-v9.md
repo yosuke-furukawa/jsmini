@@ -5,8 +5,14 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 48 で catch 分割パラメータ実装後): **TW 72.6% / VM 67.9% / JIT 67.2%**
-  (14,053 件実行、noStrict/module 520 件スキップ)
+- test262 (Phase 50 で generator prologue 同期実行後): **TW 72.2% / VM 68.8% / JIT 68.7%**
+  (**14,137 件実行** — test262 コーパス更新で +84 件 (Promise/allKeyed 等、3 モードとも未対応)。
+  分母が変わったため率は Phase 49 以前と直接比較不可。テスト単位の突き合わせでは
+  VM +180 / 退行 0、TW ±0。TW/VM 差分 951→771)
+  - Phase 49 時点は TW 72.6% / VM 67.9% / JIT 67.5% (14,053 件実行)
+  - Phase 49 は VM/JIT 差分の解消に特化 (VM は無変更 9543)。JIT 9447→9528
+    (+81)、差分 96→15。TW 側は変化なし
+  - Phase 48 時点は TW 72.6% / VM 67.9% / JIT 67.2% (Phase 47比 TW +72 / VM +68 / JIT +68)
   - Phase 47 時点は TW 72.1% / VM 67.4% / JIT 66.7% (TW +72 / VM +68 / JIT +68)
   (14,053 件実行、noStrict/module 520 件スキップ)
   - Phase 46 時点は TW 71.2% / VM 66.6% / JIT 65.9% (TW +125 / VM +118 / JIT +118)
@@ -36,6 +42,8 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 | F. RegExp exec の結果プロパティ | ✅ **Phase 46 完了** (TW +241 / VM +234 / JIT +234) | — | — | RegExp |
 | G. try/catch 系のパース | ✅ **Phase 48 完了** (TW +72 / VM +68 / JIT +68) | — | — | パーサ |
 | H. `.constructor` の host 境界 | "!== gen/fn/cover/cls/arrow" 系 350 の一部 | 大 | 大 | 設計 |
+| I. VM/JIT の test262 差分解消 | ✅ **Phase 49 で主要部完了** (JIT +81、差分 96→15) | 残 ~15 | 中 | JIT |
+| J. TW/VM の test262 差分解消 | **Phase 50 で generator prologue 完了** (VM +180、差分 951→771) | 残 ~770 | 中〜大 | VM/TW |
 
 ---
 
@@ -164,6 +172,73 @@ compileBindingTarget で展開。null の分割は Phase 45 の RequireObjectCoe
 `[1,2].constructor` が TW=host Array / VM=jsmini Object。両エンジンで独自
 Array/Number コンストラクタ + prototype チェーンを一貫モデル化する必要があり
 大規模。差分ファザ generator からは除外済み。**優先度低** (収束済みなので急がない)。
+
+### I. VM/JIT の test262 差分解消 ✅ **Phase 49 で主要部完了**
+
+VM 9543 pass に対し JIT 9447 pass (差分 96 件) だった原因を調査。legacy direct
+パス (wasm-compiler.ts, `useIR: false` — 現在のデフォルトで実質唯一使われる
+パス) に、いずれも「値が本来非数値なのに生の i32 として emit/decode され、
+typeof が壊れる」系の誤コンパイルが 3 パターンあった:
+
+1. **`LdaConst` の非プリミティブ定数** (ネスト関数宣言/クラス式/正規表現
+   リテラル) — Const ノードの非数値定数が `i32ToLEB128(obj|0)=0` に潰れる。
+   ネスト関数を返す関数の typeof が "number" になり、後続呼び出しが
+   "Not a function" (test262 class-elements 系の大半がこれ)
+2. **async 関数** — JSPI (`WebAssembly.promising`) 前提でしか Promise ラップを
+   維持できないが現行 Node は未対応。await の有無に関わらず「本体をただの
+   数値関数として実行し Promise ラップを丸ごと落とす」誤コンパイルに
+   なっていた (typeof が最初の呼び出しから毎回 "number")
+3. **undefined/null の暗黙 return** (素の `return;`、return 文が無い関数) —
+   数値モデルでは 0/1 として emit されるだけで生の数値が漏れる。bytecode
+   静的解析 (`bytecodeMayReturnNullish`) と `feedback.returnTypes` の両方で
+   検出。パラメータ由来の間接的な undefined (`function f(x){return x}` を
+   引数無しで呼ぶ等) は対象外 — 配列/ループカウンタパラメータを返す一般的な
+   JIT カーネルまで広く弾いてしまうため (最初の実装でベンチ系テスト27件退行)
+
+いずれも「誤コンパイルする前に VM 行きを確定する」既存の防御的パターン
+(class 継承/spread の除外と同じ) で対応。
+
+**結果**: JIT 9447→9528 (+81)、VM/JIT 差分 96→15 (VM は無変更 9543)。
+
+**残り (~15 件、別フェーズ候補)**:
+- IR パス (`useIR: true`、明示オプトインのみ・test262 では未使用) 側の同種の
+  欠落 — `resultTagged` 検出が `taggedProps.size > 0` (this.foo 使用) の中に
+  閉じ込められていて、this を使わない関数の undefined/null 返り値が同じ理由で
+  壊れる。codegen.ts で一度修正を試みたが、tagged 値の local 化タイミングが
+  変わり wasm スタックバランスの新規リグレッション (tagged-jit.test.ts 4件、
+  "not enough arguments on the stack" エラー) を出したため安全側でリバート。
+  IR パス自体が現状 test262 計測に使われていないので優先度低
+- `arguments.length` (f_arg().length 系 4件)、Set 演算の内部実装
+  (`nonBoolSlots.add`/`boolSlots.add` 系 7件)、arrow function rest params の
+  "type incompatibility" (2件) — JIT 固有の別要因、要個別調査
+- パラメータ由来の間接的 undefined return (`function f(x){return x} f()`) —
+  静的解析でも feedback (threshold=1 で空) でも捕まらない残存ギャップ
+
+### J. TW/VM の test262 差分解消 (Phase 50〜)
+
+Phase 49 完了時点で TW pass/VM fail 951 件、VM pass/TW fail 287 件。主因クラスタ:
+
+**VM 側 (TW が先行)**
+1. ✅ **generator / async generator の prologue が遅延** (~300 件) — **Phase 50 で解決**。
+   spec の FunctionDeclarationInstantiation (デフォルト値評価・分割・TDZ 穴) は
+   呼び出し時に走るが、VM は最初の next() まで実行しなかった。compiler が
+   prologue 終端に `GeneratorPrologueEnd` を emit し、`runGeneratorPrologue` が
+   生成時に呼び出し側 VM で同期実行 → 本体は prologueEnd+1 から再開。
+   Phase 45 の paramShapes 近似は撤去。VM +180、既存退行 0
+2. **class elements の VM 欠落** (~270 件) — private getter/setter (`get #x()`) が
+   undefined を返す (68)、computed フィールド名 `[x] = 42` (35)、computed accessor 名
+   `get [expr]()` (~50)、`__super__ is not defined` 等
+3. for-of/dstr・try・for/dstr の iterator close 系 (~70、要サンプル)、
+   String/split の `.constructor` (H) と `split(RegExp)` の ToPrimitive (22)
+4. **パラメータ TDZ** (`function f(a = b, b)` → ReferenceError) — 通常関数含め VM 未対応
+
+**TW 側 (VM が先行)**
+1. **分割代入でユーザー定義 `@@iterator` (JSFunction) を呼べない** (120 件) —
+   bindPattern/assignTarget が host 関数の iterator しか扱えず、Phase 45 の
+   イテラブル検査が "object is not iterable" として顕在化。evaluator 側の
+   JSFunction 呼び出し (next/return プロトコル込み) に繋ぐ必要あり
+2. Promise のマイクロタスク順序 (~30)、`Function("a","body")` コンストラクタ (15)、
+   `yield` 後のコード到達 (12)
 
 ---
 

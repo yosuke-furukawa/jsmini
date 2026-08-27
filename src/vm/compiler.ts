@@ -29,7 +29,7 @@ class BytecodeCompiler {
   private icSlotCount = 0;
   private hasRestParam = false;
   private isGenerator = false;
-  private paramShapes: any[] = []; // generator の呼び出し時パターン検証用 (buildParamShape)
+  private prologueEnd: number | undefined = undefined; // generator: GeneratorPrologueEnd マーカの pc
   private isAsync = false;
   private fnLength = 0; // spec の fn.length (デフォルト/rest より前のパラメータ数)
   // class の instance field 初期化式 (ctor 本体の前に this.k = expr として emit)。
@@ -454,7 +454,7 @@ class BytecodeCompiler {
       hasRestParam: this.hasRestParam,
       isGenerator: this.isGenerator,
       isAsync: this.isAsync,
-      paramShapes: this.isGenerator && this.paramShapes.some(Boolean) ? this.paramShapes : undefined,
+      prologueEnd: this.prologueEnd,
       bytecode: this.bytecode,
       constants: this.constants,
       handlers: this.handlers,
@@ -746,35 +746,9 @@ class BytecodeCompiler {
     }
   }
 
-  // generator 用: パラメータパターンの「TypeError になりうる形」だけを残した
-  // 軽量シェイプ。generator は呼び出し時に prologue (分割代入) が走らないため、
-  // spec の「呼び出し時に TypeError」を再現するには生成時の eager 検証が必要。
-  // 副作用を避けるため getter/iterator プロトコルは呼ばない近似 (vm.ts 参照)
-  private buildParamShape(p: any): any {
-    if (!p) return null;
-    if (p.type === "AssignmentPattern") {
-      // デフォルト付き: undefined のときはデフォルトが適用されるので検証しない
-      const inner = this.buildParamShape(p.left);
-      return inner ? { t: "d", inner } : null;
-    }
-    if (p.type === "ObjectPattern") {
-      const props = p.properties
-        .filter((pr: any) => pr.type !== "RestElement" && !pr.computed && pr.key?.name !== undefined)
-        .map((pr: any) => ({ key: pr.key.name, inner: this.buildParamShape(pr.value) }))
-        .filter((e: any) => e.inner);
-      return { t: "o", props };
-    }
-    if (p.type === "ArrayPattern") {
-      const elems = p.elements.map((el: any) => el && el.type !== "RestElement" ? this.buildParamShape(el) : null);
-      return { t: "a", elems };
-    }
-    return null; // Identifier / RestElement 等はエラーにならない
-  }
-
   compileFunctionBody(params: any[], body: Statement[], isArrow?: boolean): void {
     // パラメータをローカルスロットに登録
     this.paramCount = params.length;
-    this.paramShapes = params.map(p => this.buildParamShape(p));
     // fn.length = 最初のデフォルト値/rest より前のパラメータ数 (spec)
     let fnLen = 0;
     for (const p of params) {
@@ -848,6 +822,12 @@ class BytecodeCompiler {
     }
     // class instance field の初期化 (this.k = expr) を本体より前に emit
     this.emitFieldInits();
+    // generator: ここまでが FunctionDeclarationInstantiation 相当 (パラメータの
+    // デフォルト値評価・分割・TDZ 穴)。spec ではこれらは呼び出し時に走るので、
+    // VM は生成時に [0, prologueEnd] を同期実行し (runGeneratorPrologue)、本体は
+    // prologueEnd+1 から最初の next() で始める。yield/await は引数式に書けない
+    // (SyntaxError) ため、prologue は必ず直線的な同期コードになる
+    if (this.isGenerator) this.prologueEnd = this.emit("GeneratorPrologueEnd");
     // 本体をコンパイル
     for (const stmt of body) {
       this.compileStatement(stmt);
