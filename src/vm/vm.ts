@@ -82,6 +82,7 @@ type GeneratorObject = {
   savedStack: unknown[];  // yield 時のスタック状態
   upvalueBoxes: UpvalueBox[];
   vm: VM;  // 実行に使う VM インスタンス
+  yielded: boolean;  // 一度でも yield で中断したか (再開時に next(value) を push する判定)
   next: (value?: unknown) => { value: unknown; done: boolean };
   return: (value?: unknown) => { value: unknown; done: boolean };
   "@@iterator": () => GeneratorObject;
@@ -341,60 +342,44 @@ export class VM {
   }
 
   // GeneratorObject を作成
-  // generator の呼び出し時パラメータ検証 (spec: FunctionDeclarationInstantiation は
-  // 呼び出し時に走るため、分割パターンの TypeError は generator オブジェクト生成前)。
-  // 副作用を避ける近似: getter (AccessorDescriptor) は呼ばず、非配列イテラブルの
-  // 要素は辿らない。false-negative (見逃し) 側に倒す
-  private validateParamShape(value: unknown, shape: any): void {
-    if (!shape) return;
-    if (shape.t === "d") {
-      // デフォルト付き: undefined ならデフォルトが適用されるので検証不要
-      if (value !== undefined) this.validateParamShape(value, shape.inner);
-      return;
+  // generator の prologue (パラメータのデフォルト値評価・分割・TDZ 穴 =
+  // FunctionDeclarationInstantiation 相当) を、生成時に呼び出し側の VM で
+  // 同期実行する。spec ではこれらは呼び出し時に走るため、デフォルト式の throw /
+  // 未解決参照の ReferenceError / 非イテラブルの TypeError は generator
+  // オブジェクトが返る前に呼び出し元へ届かなければならない (Phase 45 の
+  // paramShapes 近似はこの一部しか再現できなかったので撤去)。
+  // 実行は [0, prologueEnd] で、GeneratorPrologueEnd opcode が __prologueOnly
+  // フレームを pop して run() を抜ける。unhandled throw は外側フレームを
+  // unwind せず host 例外として再 throw し (callFunction の boundary と同じ)、
+  // 外側 run() の generic catch が呼び出し元の try/catch へ届ける。
+  // 戻り値は prologue 実行後のフレーム (locals と、prologue 内で作られた
+  // クロージャの __localBoxes を本体再開フレームに引き継ぐため)
+  private runGeneratorPrologue(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[], thisValue: unknown): CallFrame {
+    const frame: CallFrame = { func, pc: 0, locals, thisValue, icSlots: this.createICSlots(func), upvalueBoxes };
+    (frame as any).__prologueOnly = true;
+    const base = this.frames.length;
+    const savedSp = this.sp;
+    this.frames.push(frame);
+    try {
+      this.run(base);
+    } catch (e: any) {
+      while (this.frames.length > base) this.frames.pop();
+      this.sp = savedSp;
+      throw e instanceof YieldSignal ? e : (e?.__thrown ? e.value : e);
     }
-    if (shape.t === "o") {
-      if (value === null || value === undefined) {
-        throw new TypeError(`Cannot destructure '${value}' as it is ${value === null ? "null" : "undefined"}.`);
-      }
-      for (const { key, inner } of shape.props) {
-        let v: unknown;
-        if (isJSObject(value)) {
-          v = jsObjGet(value, key);
-          if (isAccessorDescriptor(v)) continue; // getter は呼ばない
-        } else if (Array.isArray(value) || typeof value !== "object") {
-          continue; // 配列/プリミティブのプロパティ読みは undefined 側に倒す
-        } else {
-          v = (value as Record<string, unknown>)[key];
-        }
-        this.validateParamShape(v, inner);
-      }
-      return;
-    }
-    if (shape.t === "a") {
-      const iterable = Array.isArray(value)
-        || typeof value === "string" || isJSString(value)
-        || (value !== null && (typeof value === "object" || typeof value === "function")
-            && ((value as any)[Symbol.iterator] !== undefined || (value as any)["@@iterator"] !== undefined
-                || (isJSObject(value) && jsObjGet(value, "@@iterator") !== undefined)));
-      if (!iterable) throw new TypeError("obj is not iterable");
-      if (Array.isArray(value)) {
-        for (let i = 0; i < shape.elems.length; i++) {
-          if (shape.elems[i]) this.validateParamShape(value[i], shape.elems[i]);
-        }
-      }
-    }
-  }
-
-  private validateGeneratorParams(func: BytecodeFunction, locals: unknown[]): void {
-    const shapes = func.paramShapes;
-    if (!shapes) return;
-    for (let i = 0; i < func.paramCount && i < shapes.length; i++) {
-      if (shapes[i]) this.validateParamShape(locals[i], shapes[i]);
-    }
+    this.sp = savedSp;
+    return frame;
   }
 
   private createGeneratorObject(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[]): GeneratorObject {
-    this.validateGeneratorParams(func, locals);
+    // prologue (パラメータ束縛) は生成時に同期実行 → 本体は prologueEnd+1 から
+    let startPc = 0;
+    let localBoxes: Map<number, UpvalueBox> | undefined;
+    if (func.prologueEnd !== undefined) {
+      const pf = this.runGeneratorPrologue(func, locals, upvalueBoxes, undefined);
+      startPc = func.prologueEnd + 1;
+      localBoxes = (pf as any).__localBoxes;
+    }
     const vm = new VM();
     vm.globals = this.globals;
     vm.heap = this.heap;
@@ -407,10 +392,11 @@ export class VM {
       state: "suspended",
       func,
       locals: locals.slice(), // コピー
-      pc: 0,
+      pc: startPc,
       savedStack: [],
       upvalueBoxes,
       vm,
+      yielded: false,
       next: (value?: unknown) => {
         if (genObj.state === "completed") {
           return { value: undefined, done: true };
@@ -422,18 +408,22 @@ export class VM {
         for (const v of genObj.savedStack) {
           vm.push(v);
         }
-        // next(value) の値をスタックに push（初回以外）
-        if (genObj.pc > 0) {
+        // next(value) の値をスタックに push (yield からの再開時のみ。初回は
+        // prologue 実行で pc > 0 になっているため pc では判定できない)
+        if (genObj.yielded) {
           vm.push(value); // yield 式の結果として使われる
         }
-        vm.frames.push({
+        const resumeFrame: CallFrame = {
           func: genObj.func,
           pc: genObj.pc,
           locals: genObj.locals,
           thisValue: undefined,
           icSlots: vm.createICSlots(genObj.func),
           upvalueBoxes: genObj.upvalueBoxes,
-        });
+        };
+        // prologue 内で作られたクロージャの box を本体と共有する
+        if (localBoxes) (resumeFrame as any).__localBoxes = localBoxes;
+        vm.frames.push(resumeFrame);
         try {
           vm._runBaseFrameCount = vm.frames.length - 1;
           const result = vm.run(vm.frames.length - 1);
@@ -444,9 +434,11 @@ export class VM {
           if (e instanceof YieldSignal) {
             // yield で中断: 状態を保存
             genObj.state = "suspended";
+            genObj.yielded = true;
             const currentFrame = vm.frames[vm.frames.length - 1];
             genObj.pc = currentFrame.pc;
             genObj.locals = currentFrame.locals;
+            localBoxes = (currentFrame as any).__localBoxes;
             // スタックを保存（現在のフレームのベースから）
             genObj.savedStack = [];
             vm.frames.pop();
@@ -473,7 +465,14 @@ export class VM {
   // (sync generator に throw() が無いのと同根)、拒否は generator 全体の
   // 完了 + reject として扱う
   private createAsyncGeneratorObject(func: BytecodeFunction, locals: unknown[], upvalueBoxes: UpvalueBox[], thisValue?: unknown): Record<string, unknown> {
-    this.validateGeneratorParams(func, locals);
+    // prologue (パラメータ束縛) は生成時に同期実行 → 本体は prologueEnd+1 から
+    let startPc = 0;
+    let localBoxes: Map<number, UpvalueBox> | undefined;
+    if (func.prologueEnd !== undefined) {
+      const pf = this.runGeneratorPrologue(func, locals, upvalueBoxes, thisValue);
+      startPc = func.prologueEnd + 1;
+      localBoxes = (pf as any).__localBoxes;
+    }
     const vm = new VM();
     vm.globals = this.globals;
     vm.heap = this.heap;
@@ -481,7 +480,8 @@ export class VM {
     vm.arrayPrototype = this.arrayPrototype;
     vm.stringPrototype = this.stringPrototype;
 
-    let pc = 0;
+    let pc = startPc;
+    let suspended = false; // Yield/Await で中断中 (再開時に入力値を push する)
     let savedLocals = locals.slice();
     let savedStack: unknown[] = [];
     let finished = false;
@@ -505,12 +505,14 @@ export class VM {
     function resume(input: unknown): void {
       vm.sp = -1;
       for (const v of savedStack) vm.push(v);
-      if (pc > 0) vm.push(input); // Await/Yield の式の結果
-      vm.frames.push({
+      if (suspended) vm.push(input); // Await/Yield の式の結果 (初回は prologue で pc > 0 なので pc では判定しない)
+      const resumeFrame: CallFrame = {
         func, pc, locals: savedLocals, thisValue,
         icSlots: vm.createICSlots(func),
         upvalueBoxes,
-      });
+      };
+      if (localBoxes) (resumeFrame as any).__localBoxes = localBoxes;
+      vm.frames.push(resumeFrame);
       try {
         vm._runBaseFrameCount = vm.frames.length - 1;
         const result = vm.run(vm.frames.length - 1);
@@ -519,7 +521,9 @@ export class VM {
         if (e instanceof YieldSignal) {
           const fr = vm.frames[vm.frames.length - 1];
           pc = fr.pc;
+          suspended = true;
           savedLocals = fr.locals;
+          localBoxes = (fr as any).__localBoxes;
           savedStack = [];
           for (let si = 0; si <= vm.sp; si++) savedStack.push(vm.stack[si]);
           vm.frames.pop();
@@ -1000,6 +1004,15 @@ export class VM {
           if (val === null || val === undefined) {
             const err = new TypeError(`Cannot destructure '${val}' as it is ${val === null ? "null" : "undefined"}.`);
             if (!this.unwindToHandler(err, this._runBaseFrameCount)) throw err;
+          }
+          break;
+        }
+        case "GeneratorPrologueEnd": {
+          // runGeneratorPrologue の同期実行はここで終わる: フレームを pop して
+          // run() を抜ける (通常の再開実行では単なる no-op)
+          if ((frame as any).__prologueOnly) {
+            this.frames.pop();
+            return undefined;
           }
           break;
         }
@@ -2025,7 +2038,7 @@ export class VM {
           child.__homeProto = parentProto; // ctor 内の super.m 用
           // メソッドに super 解決情報をタグ付け (super()/super.m 用)。
           // instance メソッド → parent.prototype、static メソッド → parent
-          const INTERNAL_KEYS = new Set(["name", "length", "paramCount", "localCount", "hasRestParam", "isGenerator", "isAsync", "paramShapes",
+          const INTERNAL_KEYS = new Set(["name", "length", "paramCount", "localCount", "hasRestParam", "isGenerator", "isAsync", "prologueEnd",
             "bytecode", "constants", "handlers", "icSlotCount", "upvalues", "__jitCached",
             "prototype", "__instanceFields", "__superClass", "__homeProto"]);
           const tagFns = (holder: unknown, home: unknown) => {
