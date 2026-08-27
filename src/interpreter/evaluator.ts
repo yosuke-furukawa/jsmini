@@ -6,7 +6,7 @@ import {
   JS_FUNCTION_BRAND, PROTO_KEY,
   type JSObject, type JSFunction,
   isJSFunction, createJSFunction, getProperty,
-  collectBoundNames, bindPattern, assignPattern, destructureName,
+  collectBoundNames, bindPattern, assignPattern, destructureName, getPatternIterator, setJSFunctionCaller,
 } from "./values.js";
 import { isJSString, createSeqString, jsStringConcat, jsStringEquals, jsStringToString, internString, arrayToPrimitiveString, joinElementToString, toNumericOperand, internMatchResult, type JSString } from "../vm/js-string.js";
 import { createSymbol, isJSSymbol, SYMBOL_ITERATOR, SYMBOL_ASYNC_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE, SYMBOL_TO_STRING_TAG, SYMBOL_MATCH, SYMBOL_MATCH_ALL, SYMBOL_REPLACE, SYMBOL_SEARCH, SYMBOL_SPLIT } from "../vm/js-symbol.js";
@@ -60,6 +60,8 @@ function callJSFunctionSync(fn: JSFunction, thisValue: unknown, args: unknown[])
 
   return evalBlockSync(fn.body.body, callEnv);
 }
+// 分割代入のイテレータプロトコル (values.ts) から jsmini 関数を呼ぶためのフック
+setJSFunctionCaller(callJSFunctionSync);
 
 // JSString 対応の truthiness 判定 (空文字列は falsy)
 function isTruthy(value: unknown): boolean {
@@ -176,26 +178,26 @@ function* assignTarget(pattern: any, value: unknown, env: Environment): Generato
       return;
     }
     case "ArrayPattern": {
-      let arr = value as unknown[];
-      // 文字列はコードポイント単位で分割 ([a, b] = "xy")
-      if (isJSString(value) || typeof value === "string") {
-        const s = isJSString(value) ? jsStringToString(value) : value as string;
-        arr = Array.from(s).map(internString);
-      }
-      // GetIterator: 非イテラブルは TypeError (spec)。配列は fast path で許可
-      if (!Array.isArray(arr)
-          && !(arr != null && (typeof (arr as any)[Symbol.iterator] === "function" || typeof (arr as any)?.["@@iterator"] === "function"))) {
-        throw new TypeError(`${destructureName(value)} is not iterable`);
-      }
-      for (let i = 0; i < pattern.elements.length; i++) {
-        const el = pattern.elements[i];
-        if (!el) continue;
-        if (el.type === "RestElement") {
-          yield* assignTarget(el.argument, arr?.slice(i) ?? [], env);
-          break;
+      // bindPattern と同じ Iterator Protocol (ユーザー定義 @@iterator / IteratorClose 込み)
+      const it = getPatternIterator(value);
+      try {
+        for (let i = 0; i < pattern.elements.length; i++) {
+          const el = pattern.elements[i];
+          if (!el) { it.step(); continue; }
+          if (el.type === "RestElement") {
+            const rest: unknown[] = [];
+            for (let r = it.step(); !r.done; r = it.step()) rest.push(r.value);
+            yield* assignTarget(el.argument, rest, env);
+            break;
+          }
+          const r = it.step();
+          yield* assignTarget(el, r.done ? undefined : r.value, env);
         }
-        yield* assignTarget(el, arr?.[i], env);
+      } catch (e) {
+        it.close(true);
+        throw e;
       }
+      it.close(false);
       return;
     }
     default:

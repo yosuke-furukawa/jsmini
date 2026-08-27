@@ -1,6 +1,6 @@
 import type { Identifier, BlockStatement } from "../parser/ast.js";
 import { Environment } from "./environment.js";
-import { isJSString, jsStringToString, internString } from "../vm/js-string.js";
+import { isJSString, jsStringToString, internString, type JSString } from "../vm/js-string.js";
 
 // 制御フローシグナル
 export class ReturnSignal {
@@ -118,6 +118,92 @@ export function collectBoundNames(pattern: any): string[] {
   return [];
 }
 
+// jsmini 関数 (JSFunction) を同期的に呼ぶフック。values.ts は evaluator を
+// import できない (循環) ので、evaluator がモジュール初期化時に登録する
+// (promise.ts の setHandlerCaller と同じパターン)
+let _jsFunctionCaller: ((fn: JSFunction, thisValue: unknown, args: unknown[]) => unknown) | null = null;
+export function setJSFunctionCaller(caller: (fn: JSFunction, thisValue: unknown, args: unknown[]) => unknown): void {
+  _jsFunctionCaller = caller;
+}
+function callCallable(fn: unknown, thisValue: unknown, args: unknown[], what: string): unknown {
+  if (typeof fn === "function") return (fn as Function).apply(thisValue, args);
+  if (isJSFunction(fn) && _jsFunctionCaller) return _jsFunctionCaller(fn, thisValue, args);
+  throw new TypeError(`${what} is not a function`);
+}
+const isObjectLike = (v: unknown): boolean => (typeof v === "object" && v !== null) || typeof v === "function";
+
+// 分割代入用のイテレータ (spec GetIterator / IteratorStep / IteratorClose の近似)。
+// - 文字列はコードポイント単位、host 配列 (@@iterator の上書きなし) はインデックス
+//   fast path
+// - それ以外は @@iterator (host の Symbol.iterator / jsmini の "@@iterator" 文字列
+//   キー) を呼ぶ。jsmini 側の JSFunction は _jsFunctionCaller 経由。getter の
+//   throw、非 callable、next() の非オブジェクト結果は spec 通り伝播/TypeError
+// - step() 内の throw は [[Done]]=true 扱い (spec: next の abrupt では close しない)
+// - close(abrupt): 未完了なら return() を呼ぶ。abrupt (束縛中の throw) のときは
+//   return の例外/結果は握りつぶし、正常完了時は結果が非オブジェクトなら TypeError
+export type PatternIterator = {
+  step: () => { done: boolean; value: unknown };
+  close: (abrupt: boolean) => void;
+};
+export function getPatternIterator(value: unknown): PatternIterator {
+  const fromArray = (arr: unknown[]): PatternIterator => {
+    let i = 0;
+    return {
+      step: () => (i < arr.length ? { done: false, value: arr[i++] } : { done: true, value: undefined }),
+      close: () => {},
+    };
+  };
+  if (isJSString(value) || typeof value === "string") {
+    const str = isJSString(value) ? jsStringToString(value) : value;
+    return fromArray(Array.from(str).map(internString));
+  }
+  if (value === null || value === undefined) {
+    throw new TypeError(`${destructureName(value)} is not iterable`);
+  }
+  const obj = value as Record<string, unknown>;
+  // @@iterator の取得 (JSObject は host object なので getter があればここで走る)
+  let method: unknown = obj["@@iterator"];
+  if (method === undefined && Array.isArray(value)) return fromArray(value as unknown[]);
+  if (method === undefined) method = (obj as any)[Symbol.iterator];
+  if (method === undefined || method === null) {
+    throw new TypeError(`${destructureName(value)} is not iterable`);
+  }
+  const iterator = callCallable(method, value, [], "[Symbol.iterator]");
+  if (!isObjectLike(iterator)) throw new TypeError("Result of the Symbol.iterator method is not an object");
+  const it = iterator as Record<string, unknown>;
+  const nextMethod = it.next; // spec: IteratorRecord.[[NextMethod]] は一度だけ読む
+  let done = false;
+  return {
+    step: () => {
+      if (done) return { done: true, value: undefined };
+      let r: unknown;
+      try {
+        r = callCallable(nextMethod, iterator, [], "iterator.next");
+      } catch (e) { done = true; throw e; }
+      if (!isObjectLike(r)) { done = true; throw new TypeError("Iterator result is not an object"); }
+      const rec = r as Record<string, unknown>;
+      const d = rec.done;
+      const falsy = d === false || d === undefined || d === null || d === 0 || d === ""
+        || (typeof d === "number" && Number.isNaN(d)) || (isJSString(d) && (d as JSString).length === 0);
+      if (!falsy) { done = true; return { done: true, value: undefined }; }
+      return { done: false, value: rec.value };
+    },
+    close: (abrupt: boolean) => {
+      if (done) return;
+      done = true;
+      let ret: unknown;
+      try {
+        ret = it.return;
+        if (ret === undefined || ret === null) return;
+        const r = callCallable(ret, iterator, [], "iterator.return");
+        if (!abrupt && !isObjectLike(r)) throw new TypeError("Iterator return result is not an object");
+      } catch (e) {
+        if (!abrupt) throw e; // 束縛中の throw が優先 (return の例外は握りつぶす)
+      }
+    },
+  };
+}
+
 // 分割対象のエラーメッセージ用表示名
 export function destructureName(value: unknown): string {
   if (value === null) return "null";
@@ -167,57 +253,27 @@ export function bindPattern(
       }
     }
   } else if (pattern.type === "ArrayPattern") {
-    // Iterator Protocol で要素を取り出す
-    let iterable = value as any;
-    // 文字列はコードポイント単位の配列として分割 (const [a, b] = "xy")
-    if (isJSString(iterable) || typeof iterable === "string") {
-      const s = isJSString(iterable) ? jsStringToString(iterable) : iterable;
-      iterable = Array.from(s).map(internString);
-    }
-    // GetIterator: 非イテラブルは TypeError (spec)。配列は fast path で許可
-    if (!Array.isArray(iterable)
-        && !(iterable != null && (typeof iterable[Symbol.iterator] === "function" || typeof iterable?.["@@iterator"] === "function"))) {
-      throw new TypeError(`${destructureName(value)} is not iterable`);
-    }
-    const iterFn = iterable != null && typeof iterable[Symbol.iterator] === "function"
-      ? () => iterable[Symbol.iterator]()
-      : iterable != null && typeof iterable?.["@@iterator"] === "function"
-        ? () => iterable["@@iterator"]()
-        : null;
-
-    if (iterFn) {
-      const iterator = iterFn();
+    // Iterator Protocol で要素を取り出す (getPatternIterator: 文字列/配列の fast
+    // path + ユーザー定義 @@iterator。束縛中の throw では IteratorClose(abrupt))
+    const it = getPatternIterator(value);
+    try {
       for (let i = 0; i < pattern.elements.length; i++) {
         const el = pattern.elements[i];
-        if (!el) {
-          // elision: iterator を進めるが値は捨てる
-          iterator.next();
-          continue;
-        }
+        if (!el) { it.step(); continue; } // elision: 進めるだけ
         if (el.type === "RestElement") {
           const rest: unknown[] = [];
-          let r = iterator.next();
-          while (r && !r.done) { rest.push(r.value); r = iterator.next(); }
+          for (let r = it.step(); !r.done; r = it.step()) rest.push(r.value);
           bindPattern(el.argument, rest, env, kind, defaultResolver);
-          return;
-        }
-        const r = iterator.next();
-        const val = r && !r.done ? r.value : undefined;
-        bindPattern(el, val, env, kind, defaultResolver);
-      }
-    } else {
-      // 配列風オブジェクト: 直接インデックスアクセス
-      const arr = iterable as unknown[];
-      for (let i = 0; i < pattern.elements.length; i++) {
-        const el = pattern.elements[i];
-        if (!el) continue;
-        if (el.type === "RestElement") {
-          bindPattern(el.argument, arr?.slice(i) ?? [], env, kind, defaultResolver);
           break;
         }
-        bindPattern(el, arr?.[i], env, kind, defaultResolver);
+        const r = it.step();
+        bindPattern(el, r.done ? undefined : r.value, env, kind, defaultResolver);
       }
+    } catch (e) {
+      it.close(true);
+      throw e;
     }
+    it.close(false);
   } else if (pattern.type === "AssignmentPattern") {
     const val = (value === undefined && defaultResolver) ? defaultResolver(pattern.right) : value;
     bindPattern(pattern.left, val, env, kind, defaultResolver);
