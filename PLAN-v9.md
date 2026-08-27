@@ -5,7 +5,9 @@ Phase 39 完了時点 (2026-07-27) の残課題台帳。正しさの基準は **
 
 ## 現状サマリ
 
-- test262 (Phase 50 で generator prologue 同期実行後): **TW 72.2% / VM 68.8% / JIT 68.7%**
+- test262 (Phase 51 で TW 分割代入の Iterator Protocol 実装後): **TW 74.2% / VM 68.8% / JIT 68.7%**
+  (14,137 件実行。TW +274 / 退行 0。VM pass/TW fail 287→165、TW pass/VM fail 771→923 (TW が先行))
+- test262 (Phase 50 で generator prologue 同期実行後): TW 72.2% / VM 68.8% / JIT 68.7%
   (**14,137 件実行** — test262 コーパス更新で +84 件 (Promise/allKeyed 等、3 モードとも未対応)。
   分母が変わったため率は Phase 49 以前と直接比較不可。テスト単位の突き合わせでは
   VM +180 / 退行 0、TW ±0。TW/VM 差分 951→771)
@@ -43,7 +45,7 @@ VM の失敗をエラー別に集計した上位クラスタ (2026-07-27):
 | G. try/catch 系のパース | ✅ **Phase 48 完了** (TW +72 / VM +68 / JIT +68) | — | — | パーサ |
 | H. `.constructor` の host 境界 | "!== gen/fn/cover/cls/arrow" 系 350 の一部 | 大 | 大 | 設計 |
 | I. VM/JIT の test262 差分解消 | ✅ **Phase 49 で主要部完了** (JIT +81、差分 96→15) | 残 ~15 | 中 | JIT |
-| J. TW/VM の test262 差分解消 | **Phase 50 で generator prologue 完了** (VM +180、差分 951→771) | 残 ~770 | 中〜大 | VM/TW |
+| J. TW/VM の test262 差分解消 | **Phase 50-51 進行中** (Phase 50: VM +180 / Phase 51: TW +274) | VM 側 ~920 / TW 側 ~165 | 中〜大 | VM/TW |
 
 ---
 
@@ -228,15 +230,18 @@ Phase 49 完了時点で TW pass/VM fail 951 件、VM pass/TW fail 287 件。主
 2. **class elements の VM 欠落** (~270 件) — private getter/setter (`get #x()`) が
    undefined を返す (68)、computed フィールド名 `[x] = 42` (35)、computed accessor 名
    `get [expr]()` (~50)、`__super__ is not defined` 等
-3. for-of/dstr・try・for/dstr の iterator close 系 (~70、要サンプル)、
-   String/split の `.constructor` (H) と `split(RegExp)` の ToPrimitive (22)
-4. **パラメータ TDZ** (`function f(a = b, b)` → ReferenceError) — 通常関数含め VM 未対応
+3. **分割代入の IteratorClose / Symbol.iterator getter が VM 未対応** — TW は
+   Phase 51 で実装済み (getPatternIterator)。VM の compileBindingTarget は
+   GetIterator/IteratorNext だけで return() を呼ばず、defineProperty した
+   Symbol.iterator getter も GetIterator が見ない。TW 先行分の主要因の一つ
+4. String/split の `.constructor` (H) と `split(RegExp)` の ToPrimitive (22)
+5. **パラメータ TDZ** (`function f(a = b, b)` → ReferenceError) — 通常関数含め VM 未対応
 
 **TW 側 (VM が先行)**
-1. **分割代入でユーザー定義 `@@iterator` (JSFunction) を呼べない** (120 件) —
-   bindPattern/assignTarget が host 関数の iterator しか扱えず、Phase 45 の
-   イテラブル検査が "object is not iterable" として顕在化。evaluator 側の
-   JSFunction 呼び出し (next/return プロトコル込み) に繋ぐ必要あり
+1. ✅ **分割代入でユーザー定義 `@@iterator` (JSFunction) を呼べない** (120 件) —
+   **Phase 51 で解決** (+274: IteratorClose も実装したため for-of/dstr・
+   assignment/dstr 系まで回収)。values.ts の setJSFunctionCaller フック +
+   getPatternIterator (GetIterator / IteratorStep / IteratorClose の近似)
 2. Promise のマイクロタスク順序 (~30)、`Function("a","body")` コンストラクタ (15)、
    `yield` 後のコード到達 (12)
 
